@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
+use hark_core::audition::{Clip, Source};
 use hark_core::config::Root;
 use hark_core::export::{ExportRequest, Selection};
 use hark_core::library::{ChannelClass, Query};
@@ -108,13 +110,29 @@ enum Cmd {
         #[arg(long)]
         path: bool,
     },
-    /// Play a file through the audition engine and wait for it to finish.
+    /// Play a file through the audition engine and wait for it to finish. Files longer than the
+    /// config's `stream_above_secs` stream from disk while they play.
     Play {
         file: PathBuf,
         #[arg(long = "in")]
         start: Option<f64>,
         #[arg(long = "out")]
         end: Option<f64>,
+        /// Start inside the selection, with the fades where they would be from `--in`.
+        #[arg(long)]
+        from: Option<f64>,
+        /// Repeat the selection; plays for `--for` seconds, or until interrupted.
+        #[arg(long = "loop")]
+        looped: bool,
+        /// Stop after this many seconds of playback.
+        #[arg(long = "for")]
+        seconds: Option<f64>,
+        /// After AT seconds of playback restart from TO seconds, as a waveform click would.
+        #[arg(long, value_name = "AT:TO", value_parser = parse_jump)]
+        jump: Option<(f64, f64)>,
+        /// Stream when longer than this many seconds, overriding the config for this run.
+        #[arg(long)]
+        stream_above: Option<f64>,
     },
 }
 
@@ -346,6 +364,11 @@ fn main() {
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }
+}
+
+fn parse_jump(s: &str) -> Result<(f64, f64), String> {
+    let (at, to) = s.split_once(':').ok_or("expected AT:TO seconds")?;
+    Ok((at.parse().map_err(|_| "bad AT")?, to.parse().map_err(|_| "bad TO")?))
 }
 
 fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
@@ -627,8 +650,7 @@ fn run() -> Result<()> {
         }
         Cmd::Analyze { file, store } => {
             let file = abs(&file)?;
-            let pcm = hark_core::decode(&file)?;
-            let l = hark_core::loudness::measure(&pcm)?;
+            let l = hark_core::loudness::measure_file(&file)?;
             if store {
                 open_db(&project)?.set_loudness(&file, l.integrated_lufs, l.true_peak_dbfs)?;
             }
@@ -867,22 +889,72 @@ fn run() -> Result<()> {
                 print_json(&config)?;
             }
         }
-        Cmd::Play { file, start, end } => {
+        Cmd::Play { file, start, end, from, looped, seconds, jump, stream_above } => {
             let file = abs(&file)?;
-            let player = hark_core::audition::Player::open(None)?;
-            let pcm = hark_core::decode(&file)?;
-            let pcm = hark_core::resample::resample(&pcm, player.sample_rate)?;
-            let frames = pcm.frames();
-            let clip = hark_core::audition::Clip {
-                start: start.map(|s| pcm.frame_at(s)).unwrap_or(0),
-                end: end.map(|s| pcm.frame_at(s)).unwrap_or(frames),
-                ..hark_core::audition::Clip::whole(std::sync::Arc::new(pcm))
+            let config = load(&project)?;
+            let player = hark_core::audition::Player::open(config.audition_sample_rate)?;
+            let info = hark_core::probe(&file)?;
+            let streamed = info.duration_secs > stream_above.unwrap_or(config.stream_above_secs);
+            let source = if streamed {
+                Source::File { path: file.clone(), source_rate: info.sample_rate, channels: info.channels, source_frames: (info.duration_secs * info.sample_rate as f64).round() as u64 }
+            } else {
+                let pcm = hark_core::decode(&file)?;
+                Source::Whole(std::sync::Arc::new(hark_core::resample::resample(&pcm, player.sample_rate)?))
             };
-            eprintln!("playing on {} at {} Hz", player.device_name, player.sample_rate);
-            player.play(clip);
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            while player.is_playing() {
-                std::thread::sleep(std::time::Duration::from_millis(20));
+            let rate = player.sample_rate as f64;
+            let total = source.frames(player.sample_rate);
+            let frame = |secs: f64| ((secs * rate).round().max(0.0) as usize).min(total);
+            let clip = Clip {
+                source,
+                start: start.map(frame).unwrap_or(0),
+                end: end.map(frame).unwrap_or(total),
+                looped,
+                fade_in: 0,
+                fade_out: 0,
+                fade_shape: Default::default(),
+            };
+            let from = from.map(frame).unwrap_or(clip.start);
+            if !json {
+                eprintln!("{} on {} at {} Hz", if streamed { "streaming" } else { "playing" }, player.device_name, player.sample_rate);
+            }
+            let t0 = Instant::now();
+            player.play_from(clip.clone(), from);
+            let mut first_audio = None;
+            let mut jumped = false;
+            let tick = Duration::from_millis(1);
+            loop {
+                let played = t0.elapsed().as_secs_f64();
+                if first_audio.is_none() && player.position() > from {
+                    first_audio = Some(played);
+                }
+                if let Some((at, to)) = jump {
+                    if !jumped && played >= at {
+                        player.play_from(clip.clone(), frame(to));
+                        jumped = true;
+                    }
+                }
+                if seconds.map(|s| played >= s).unwrap_or(false) {
+                    player.stop();
+                    std::thread::sleep(Duration::from_millis(20));
+                    break;
+                }
+                if played > 0.05 && !player.is_playing() {
+                    break;
+                }
+                std::thread::sleep(tick);
+            }
+            let report = serde_json::json!({
+                "streamed": streamed,
+                "device_rate": player.sample_rate,
+                "first_audio_ms": first_audio.map(|s| s * 1000.0),
+                "played_secs": t0.elapsed().as_secs_f64(),
+                "position_frames": player.position(),
+                "underrun_frames": player.underrun_frames(),
+            });
+            if json {
+                print_json(&report)?;
+            } else {
+                eprintln!("first audio after {:.1} ms, {} underrun frames", first_audio.unwrap_or(f64::NAN) * 1000.0, player.underrun_frames());
             }
         }
     }

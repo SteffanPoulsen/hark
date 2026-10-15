@@ -14,10 +14,10 @@ use std::time::Duration;
 use egui::{Color32, CornerRadius, FontId, Key, Margin, RichText, Sense, Stroke, StrokeKind};
 use egui_extras::{Column, TableBuilder};
 use egui_phosphor::regular as icons;
-use hark_core::audition::{Clip, Player};
+use hark_core::audition::{Clip, Player, Source};
 use hark_core::export::{ExportRequest, Selection};
 use hark_core::library::{ChannelClass, Query};
-use hark_core::{Config, Db, ExportPreset, FileRecord};
+use hark_core::{Config, Db, ExportPreset, FileRecord, Loudness};
 
 use theme::Theme;
 use waveform::{WaveEvent, WaveState};
@@ -192,6 +192,8 @@ struct App {
     search_id: egui::Id,
     tag_edit: Option<(usize, String)>,
     project_edit: Option<String>,
+    /// Playback was running when the device was reopened; resume once the file reloads.
+    play_on_load: bool,
     /// Output file name for the next export; empty takes the preset's template.
     export_name: String,
     /// The preset the settings page edits.
@@ -263,6 +265,7 @@ impl App {
             search_id: egui::Id::new("search"),
             tag_edit: None,
             project_edit: None,
+            play_on_load: false,
             export_name: String::new(),
             preset_edit: preset_name,
             preset_rename: None,
@@ -362,7 +365,8 @@ impl App {
             return;
         }
         self.pending.insert(path.to_path_buf());
-        self.worker.send(Job::Load { path: path.to_path_buf(), device_rate: self.device_rate() });
+        let analyzed = self.files.iter().find(|f| f.path == path).map(|f| f.lufs.is_some()).unwrap_or(false);
+        self.worker.send(Job::Load { path: path.to_path_buf(), device_rate: self.device_rate(), stream_above_secs: self.config.stream_above_secs, analyzed });
     }
 
     fn remember(&mut self, loaded: Arc<Loaded>) {
@@ -370,7 +374,7 @@ impl App {
         self.cache_order.retain(|p| p != &path);
         self.cache_order.push_back(path.clone());
         self.cache.insert(path, loaded);
-        let mut frames: usize = self.cache.values().map(|l| l.device.frames()).sum();
+        let mut frames: usize = self.cache.values().map(|l| l.resident_frames()).sum();
         while frames > CACHE_FRAMES && self.cache_order.len() > 1 {
             let Some(old) = self.cache_order.pop_front() else { break };
             if self.current.as_ref().map(|c| c.path == old).unwrap_or(false) {
@@ -381,7 +385,7 @@ impl App {
                 continue;
             }
             if let Some(l) = self.cache.remove(&old) {
-                frames -= l.device.frames();
+                frames -= l.resident_frames();
             }
         }
     }
@@ -429,8 +433,8 @@ impl App {
 
     fn play(&mut self, from_secs: Option<f64>) {
         let (Some(player), Some(cur)) = (&self.player, &self.current) else { return };
-        let rate = cur.device.sample_rate as f64;
-        let total = cur.device.frames();
+        let rate = player.sample_rate as f64;
+        let total = cur.source.frames(player.sample_rate);
         let frames = |t: f64| ((t * rate) as usize).min(total);
         // The fades belong to the selection, or to the whole file without one. A seek outside
         // the selection auditions the file from there without them.
@@ -443,7 +447,7 @@ impl App {
         let (start, end) = if inside { (start, end) } else { (from, total) };
         let (fade_in, fade_out) = if inside { (frames(self.wave.fade_in), frames(self.wave.fade_out)) } else { (0, 0) };
         player.play_from(
-            Clip { pcm: cur.device.clone(), start, end: end.max(start), looped: self.loop_on, fade_in, fade_out, fade_shape: self.wave.fade_shape },
+            Clip { source: cur.source.clone(), start, end: end.max(start), looped: self.loop_on, fade_in, fade_out, fade_shape: self.wave.fade_shape },
             from,
         );
     }
@@ -540,34 +544,47 @@ impl App {
         }
     }
 
+    fn record_loudness(&mut self, path: &Path, loudness: Option<Loudness>) {
+        let Some(ld) = loudness else { return };
+        let _ = self.db.set_loudness(path, ld.integrated_lufs, ld.true_peak_dbfs);
+        if let Some(i) = self.files.iter().position(|f| f.path == path) {
+            self.files[i].lufs = Some(ld.integrated_lufs);
+            self.files[i].true_peak_dbfs = Some(ld.true_peak_dbfs);
+        }
+    }
+
     fn handle_done(&mut self) {
         for done in self.worker.poll() {
             match done {
                 Done::Loaded(path, result) => {
                     self.pending.remove(&path);
                     match result {
-                        Ok(l) if l.device.sample_rate != self.device_rate() => {
+                        Ok(l) if matches!(&l.source, Source::Whole(p) if p.sample_rate != self.device_rate()) => {
                             // Decoded for a device that has since been reopened at another rate.
                             self.request_load(&path);
                         }
                         Ok(l) => {
-                            if let Some(ld) = l.loudness {
-                                let _ = self.db.set_loudness(&path, ld.integrated_lufs, ld.true_peak_dbfs);
-                                if let Some(i) = self.files.iter().position(|f| f.path == path) {
-                                    self.files[i].lufs = Some(ld.integrated_lufs);
-                                    self.files[i].true_peak_dbfs = Some(ld.true_peak_dbfs);
-                                }
-                            }
+                            self.record_loudness(&path, l.loudness);
                             self.remember(l.clone());
                             let wanted = self.selected.and_then(|i| self.files.get(i)).map(|f| f.path == path).unwrap_or(false);
                             if wanted && self.current.as_ref().map(|c| c.path != path).unwrap_or(true) {
                                 self.show_loaded(l);
-                                if self.autoplay {
+                                if self.autoplay || std::mem::take(&mut self.play_on_load) {
                                     self.play(None);
                                 }
                             }
                         }
                         Err(e) => self.set_status(format!("{}: {e}", path.display()), true),
+                    }
+                }
+                Done::Analyzed(path, peaks, loudness) => {
+                    self.record_loudness(&path, loudness);
+                    if let Some(old) = self.cache.get(&path) {
+                        let l = Arc::new(Loaded { path: old.path.clone(), source_rate: old.source_rate, channels: old.channels, duration_secs: old.duration_secs, source: old.source.clone(), peaks: Some(peaks), loudness });
+                        self.cache.insert(path.clone(), l.clone());
+                        if self.current.as_ref().map(|c| c.path == path).unwrap_or(false) {
+                            self.current = Some(l);
+                        }
                     }
                 }
                 Done::Exported(result) => match result {
@@ -654,7 +671,7 @@ impl App {
             self.wave.fade_out = 0.0;
         }
         if let Some(cur) = &self.current {
-            let pos = self.player.as_ref().map(|p| p.position() as f64 / cur.device.sample_rate as f64);
+            let pos = self.player.as_ref().map(|p| p.position() as f64 / p.sample_rate as f64);
             if let Some(t) = pos {
                 if pressed(Key::OpenBracket) {
                     let end = self.wave.selection.map(|(_, b)| b).filter(|b| *b > t).unwrap_or(cur.duration_secs);
@@ -1108,7 +1125,7 @@ impl App {
     fn ui_wave_column(&mut self, ui: &mut egui::Ui) {
         let playing = self.is_playing();
         let playhead = match (&self.player, &self.current) {
-            (Some(p), Some(c)) if playing => Some(p.position() as f64 / c.device.sample_rate as f64),
+            (Some(p), Some(_)) if playing => Some(p.position() as f64 / p.sample_rate as f64),
             _ => None,
         };
         let duration = self.current.as_ref().map(|c| c.duration_secs).unwrap_or(0.0);
@@ -1123,8 +1140,13 @@ impl App {
                 let name = c.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 ui.label(theme::semibold(name).size(15.0));
                 let mut meta = format!("{} Hz  ·  {} ch  ·  {}", c.source_rate, c.channels, waveform::fmt_time(c.duration_secs));
-                if let Some(l) = c.loudness {
-                    meta.push_str(&format!("  ·  {:.1} LUFS{}  ·  {:.1} dBTP", l.integrated_lufs, if l.momentary { " (M)" } else { "" }, l.true_peak_dbfs));
+                let record = self.selected.and_then(|i| self.files.get(i)).filter(|f| f.path == c.path);
+                let loudness = c.loudness.map(|l| (l.integrated_lufs, l.true_peak_dbfs, l.momentary)).or_else(|| record.and_then(|f| Some((f.lufs?, f.true_peak_dbfs?, false))));
+                if let Some((lufs, tp, momentary)) = loudness {
+                    meta.push_str(&format!("  ·  {lufs:.1} LUFS{}  ·  {tp:.1} dBTP", if momentary { " (M)" } else { "" }));
+                }
+                if c.source.is_streamed() {
+                    meta.push_str("  ·  streaming");
                 }
                 ui.add(egui::Label::new(RichText::new(meta).color(self.theme.muted)).truncate());
                 if self.selected.is_some() {
@@ -1152,8 +1174,11 @@ impl App {
         // The transport row wraps at narrow widths; the waveform leaves it the height it took on
         // the last frame.
         let wave_h = (ui.available_height() - self.transport_h - ui.spacing().item_spacing.y).max(80.0);
-        let peaks = self.current.as_ref().map(|c| c.peaks.clone());
-        let samples = self.current.as_ref().map(|c| c.device.clone());
+        let peaks = self.current.as_ref().and_then(|c| c.peaks.clone());
+        let samples = self.current.as_ref().and_then(|c| match &c.source {
+            Source::Whole(p) => Some(p.clone()),
+            Source::File { .. } => None,
+        });
         let colors = waveform::WaveColors {
             peak: self.theme.accent.gamma_multiply(0.55),
             rms: self.theme.accent.gamma_multiply(0.95),
@@ -1621,6 +1646,9 @@ impl App {
                     _ => theme::icon_text(icons::SPEAKER_HIGH, "No audio", 12.0, egui::FontFamily::Proportional, self.theme.err),
                 };
                 ui.label(device);
+                if let Some(n) = self.player.as_ref().map(|p| p.underrun_frames()).filter(|n| *n > 0) {
+                    ui.label(RichText::new(format!("{n} underrun frames")).color(self.theme.err).size(12.0)).on_hover_text("Silence played because a streamed file was not decoded in time");
+                }
                 ui.separator();
                 if self.scanning {
                     ui.spinner();

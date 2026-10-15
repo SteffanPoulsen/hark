@@ -3,12 +3,13 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use symphonia::core::codecs::audio::AudioDecoderOptions;
+use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
+use symphonia::core::units::{Time, TimeBase};
 
 use crate::pcm::Pcm;
 
@@ -27,6 +28,8 @@ struct Opened {
     track_id: u32,
     params: symphonia::core::codecs::audio::AudioCodecParameters,
     container: &'static str,
+    time_base: Option<TimeBase>,
+    frames: Option<u64>,
 }
 
 fn open(path: &Path) -> Result<Opened> {
@@ -47,7 +50,7 @@ fn open(path: &Path) -> Result<Opened> {
         _ => return Err(anyhow!("{}: no audio codec parameters", path.display())),
     };
     let container = reader.format_info().short_name;
-    Ok(Opened { track_id: track.id, reader, params, container })
+    Ok(Opened { track_id: track.id, time_base: track.time_base, frames: track.num_frames, reader, params, container })
 }
 
 fn codec_name(params: &symphonia::core::codecs::audio::AudioCodecParameters) -> String {
@@ -63,11 +66,9 @@ pub fn probe(path: &Path) -> Result<AudioInfo> {
     let opened = open(path)?;
     let sample_rate = opened.params.sample_rate.unwrap_or(0);
     let channels = opened.params.channels.as_ref().map(|c| c.count() as u16).unwrap_or(0);
-    let track = opened.reader.tracks().iter().find(|t| t.id == opened.track_id);
-    let frames = track.and_then(|t| t.num_frames);
-    let duration_secs = match (frames, sample_rate) {
+    let duration_secs = match (opened.frames, sample_rate) {
         (Some(n), r) if r > 0 => n as f64 / r as f64,
-        _ => decode_opened(opened_reopen(path)?)?.duration_secs(),
+        _ => decode(path)?.duration_secs(),
     };
     Ok(AudioInfo {
         duration_secs,
@@ -79,39 +80,79 @@ pub fn probe(path: &Path) -> Result<AudioInfo> {
     })
 }
 
-fn opened_reopen(path: &Path) -> Result<Opened> {
-    open(path)
-}
-
 pub fn decode(path: &Path) -> Result<Pcm> {
-    decode_opened(open(path)?)
-}
-
-fn decode_opened(mut opened: Opened) -> Result<Pcm> {
-    let mut decoder = symphonia::default::get_codecs()
-        .make_audio_decoder(&opened.params, &AudioDecoderOptions::default())?;
-    let mut pcm = Pcm::new(opened.params.sample_rate.unwrap_or(0), 0);
-    let mut chunk: Vec<f32> = Vec::new();
-    while let Some(packet) = opened.reader.next_packet()? {
-        if packet.track_id != opened.track_id {
-            continue;
-        }
-        let buf = match decoder.decode(&packet) {
-            Ok(b) => b,
-            Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-            Err(e) => return Err(e.into()),
-        };
-        if pcm.channels == 0 {
-            pcm.channels = buf.spec().channels().count() as u16;
-            pcm.sample_rate = buf.spec().rate();
-        }
-        buf.copy_to_vec_interleaved(&mut chunk);
-        pcm.samples.extend_from_slice(&chunk);
-    }
-    if pcm.channels == 0 {
+    let mut reader = Reader::open(path)?;
+    let mut pcm = Pcm::new(0, 0);
+    while reader.next_chunk(&mut pcm.samples)? {}
+    if reader.channels == 0 {
         return Err(anyhow!("no audio frames decoded"));
     }
+    pcm.sample_rate = reader.sample_rate;
+    pcm.channels = reader.channels;
     Ok(pcm)
+}
+
+/// A file decoded one packet at a time, seekable by frame.
+pub struct Reader {
+    opened: Opened,
+    decoder: Box<dyn AudioDecoder>,
+    chunk: Vec<f32>,
+    /// From the header until the first packet decodes, then from the decoded audio.
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// Length in frames when the container states it.
+    pub frames: Option<u64>,
+}
+
+impl Reader {
+    pub fn open(path: &Path) -> Result<Reader> {
+        let opened = open(path)?;
+        let decoder = symphonia::default::get_codecs().make_audio_decoder(&opened.params, &AudioDecoderOptions::default())?;
+        Ok(Reader {
+            sample_rate: opened.params.sample_rate.unwrap_or(0),
+            channels: opened.params.channels.as_ref().map(|c| c.count() as u16).unwrap_or(0),
+            frames: opened.frames,
+            opened,
+            decoder,
+            chunk: Vec::new(),
+        })
+    }
+
+    /// Appends the next packet's interleaved frames to `out`; `false` once the file is exhausted.
+    pub fn next_chunk(&mut self, out: &mut Vec<f32>) -> Result<bool> {
+        loop {
+            let Some(packet) = self.opened.reader.next_packet()? else { return Ok(false) };
+            if packet.track_id != self.opened.track_id {
+                continue;
+            }
+            let buf = match self.decoder.decode(&packet) {
+                Ok(b) => b,
+                Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
+                Err(e) => return Err(e.into()),
+            };
+            self.sample_rate = buf.spec().rate();
+            self.channels = buf.spec().channels().count() as u16;
+            buf.copy_to_vec_interleaved(&mut self.chunk);
+            out.extend_from_slice(&self.chunk);
+            return Ok(true);
+        }
+    }
+
+    /// Positions the reader at or before `frame` and returns the frame the next chunk starts
+    /// at; the caller drops the difference.
+    pub fn seek(&mut self, frame: u64) -> Result<u64> {
+        if self.sample_rate == 0 {
+            return Err(anyhow!("sample rate unknown, cannot seek"));
+        }
+        let time = Time::try_from_secs_f64(frame as f64 / self.sample_rate as f64).ok_or_else(|| anyhow!("seek out of range"))?;
+        let to = self.opened.reader.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(self.opened.track_id) })?;
+        self.decoder.reset();
+        let landed = match self.opened.time_base {
+            Some(tb) => tb.calc_time(to.actual_ts).map(|t| (t.as_secs_f64() * self.sample_rate as f64).round() as u64).unwrap_or(0),
+            None => to.actual_ts.get().max(0) as u64,
+        };
+        Ok(landed.min(frame))
+    }
 }
 
 pub fn is_audio_extension(ext: &str) -> bool {
