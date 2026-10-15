@@ -1154,6 +1154,10 @@ impl App {
                     meta.push_str("  ·  streaming");
                 }
                 ui.add(egui::Label::new(RichText::new(meta).color(self.theme.muted)).truncate());
+                if c.peaks.is_none() {
+                    ui.spinner();
+                    ui.label(RichText::new("Analysing").color(self.theme.muted));
+                }
                 if self.selected.is_some() {
                     if ui.available_width() >= chips_w {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.tag_chips(ui, true));
@@ -1789,7 +1793,8 @@ impl eframe::App for App {
 
         self.ui_settings(&ctx);
 
-        if self.is_playing() || !self.pending.is_empty() {
+        let analysing = self.current.as_ref().map(|c| c.peaks.is_none()).unwrap_or(false);
+        if self.is_playing() || !self.pending.is_empty() || analysing {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
