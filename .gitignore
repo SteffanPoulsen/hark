@@ -2,3 +2,4 @@
 *.resume.md
 /.plan/
 .claude/
+/dist

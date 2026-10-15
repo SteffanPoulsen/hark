@@ -33,7 +33,7 @@ Downloads for Linux and Windows are on the [Releases](../../releases) page. To b
 cargo build --release
 ```
 
-Binaries land in `target/release/hark` (the window) and `target/release/hark-cli`. `packaging/install-desktop.sh` installs a desktop entry and the icon for the current user, so launchers and the compositor show hark by its app id. Rust stable; on Linux the PipeWire headers (`pipewire` package) are needed for the native backend, with ALSA as the fallback. Windows builds with the MSVC or GNU toolchain and uses WASAPI.
+Binaries land in `target/release/hark` (the window) and `target/release/hark-cli`. `packaging/install.sh` installs the desktop entry and the icon for the current user, so launchers and the compositor show hark by its app id; from a release archive it also puts the binaries in `~/.local/bin`. Rust stable; on Linux the PipeWire headers (`pipewire` package) are needed for the native backend, with ALSA as the fallback. Windows builds with the MSVC or GNU toolchain and uses WASAPI.
 
 ## Use
 
