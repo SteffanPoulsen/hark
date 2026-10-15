@@ -42,7 +42,15 @@ pub enum Job {
     Scan(Vec<Root>),
 }
 
+/// Where a running scan is: walking the roots, or hashing files so moved marks find theirs.
+#[derive(Clone, Copy, Debug)]
+pub enum ScanPhase {
+    Walking { seen: usize },
+    Matching { hashed: usize },
+}
+
 pub enum Done {
+    Scanning(ScanPhase),
     Loaded(PathBuf, Result<Arc<Loaded>, String>),
     /// The analysis pass of a streamed file.
     Analyzed(PathBuf, Result<(Arc<Peaks>, Option<Loudness>), String>),
@@ -82,7 +90,10 @@ impl Worker {
                 let done = match job {
                     Job::Load { path, device_rate, stream_above_mb } => Done::Loaded(path.clone(), load(&path, device_rate, stream_above_mb).map(Arc::new).map_err(|e| format!("{e:#}"))),
                     Job::Export(req) => Done::Exported(hark_core::export::run(&req).map_err(|e| format!("{e:#}"))),
-                    Job::Scan(roots) => Done::Scanned(scan(&roots)),
+                    Job::Scan(roots) => Done::Scanned(scan(&roots, |phase| {
+                        let _ = done_tx.send(Done::Scanning(phase));
+                        ctx.request_repaint();
+                    })),
                 };
                 if done_tx.send(done).is_err() {
                     return;
@@ -222,9 +233,29 @@ fn analyze(path: &Path, cached: Option<Arc<Peaks>>, abort: &dyn Fn() -> bool) ->
     Ok((peaks, meter.and_then(|m| m.finish())))
 }
 
-fn scan(roots: &[Root]) -> Vec<(String, Result<ScanReport, String>)> {
+/// Scans every root, then matches orphaned marks; `progress` hears the phase a few times a
+/// second at most, so a fast walk does not flood the UI.
+fn scan(roots: &[Root], mut progress: impl FnMut(ScanPhase)) -> Vec<(String, Result<ScanReport, String>)> {
     let Ok(mut db) = hark_core::Db::open() else { return Vec::new() };
-    let out = roots.iter().map(|r| (r.name.clone(), db.scan(&r.path, |_, _| {}).map_err(|e| format!("{e:#}")))).collect();
-    let _ = db.match_orphaned_marks(|_, _| {});
+    let mut last = std::time::Instant::now();
+    let mut throttled = |phase: ScanPhase| {
+        if last.elapsed() >= std::time::Duration::from_millis(100) {
+            last = std::time::Instant::now();
+            progress(phase);
+        }
+    };
+    let mut seen = 0;
+    let out = roots
+        .iter()
+        .map(|r| {
+            let before = seen;
+            let result = db.scan(&r.path, |_, n| {
+                seen = before + n;
+                throttled(ScanPhase::Walking { seen });
+            });
+            (r.name.clone(), result.map_err(|e| format!("{e:#}")))
+        })
+        .collect();
+    let _ = db.match_orphaned_marks(|_, hashed| throttled(ScanPhase::Matching { hashed }));
     out
 }

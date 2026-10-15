@@ -21,7 +21,7 @@ use hark_core::{Config, Db, ExportPreset, FileRecord, Loudness};
 
 use theme::Theme;
 use waveform::{WaveEvent, WaveState};
-use worker::{Done, Job, Loaded, Worker};
+use worker::{Done, Job, Loaded, ScanPhase, Worker};
 
 /// Twenty minutes of stereo at 48 kHz, decoded audio and peaks together.
 const CACHE_BYTES: usize = 48_000 * 60 * 20 * 2 * 4;
@@ -228,7 +228,8 @@ struct App {
     status: String,
     status_since: Instant,
     status_is_error: bool,
-    scanning: bool,
+    /// The running scan's phase; `None` between scans.
+    scanning: Option<ScanPhase>,
     settings_open: bool,
     settings_page: settings::Page,
     /// The mark beside the wordmark, white on transparent, tinted at draw time.
@@ -274,7 +275,7 @@ impl App {
         }
         let preset_name = config.default_preset.clone();
         let preset = config.preset(&preset_name).cloned().unwrap_or_default();
-        let scanning = !config.roots().is_empty();
+        let scanning = (!config.roots().is_empty()).then_some(ScanPhase::Walking { seen: 0 });
         let expanded = config.roots().iter().map(|r| r.path.clone()).collect();
         App {
             config,
@@ -724,8 +725,13 @@ impl App {
                     }
                     Err(e) => self.set_status(format!("Export failed: {e}"), true),
                 },
+                Done::Scanning(phase) => {
+                    if self.scanning.is_some() {
+                        self.scanning = Some(phase);
+                    }
+                }
                 Done::Scanned(reports) => {
-                    self.scanning = false;
+                    self.scanning = None;
                     let scanned = reports.iter().filter_map(|(_, r)| r.as_ref().ok());
                     self.file_count = scanned.clone().map(|r| r.seen).sum();
                     let errors: usize = scanned.map(|r| r.errors.len()).sum();
@@ -954,11 +960,11 @@ impl App {
     fn rescan(&mut self) {
         self.dir_children.clear();
         if self.config.roots().is_empty() {
-            self.scanning = false;
+            self.scanning = None;
             self.list_dirty = true;
             return;
         }
-        self.scanning = true;
+        self.scanning = Some(ScanPhase::Walking { seen: 0 });
         self.worker.send(Job::Scan(self.config.roots().to_vec()));
     }
 
@@ -1023,7 +1029,7 @@ impl App {
                 if ui.add(theme::tool_button_widget(icons::FOLDER_PLUS, "Add folder").min_size(egui::vec2(w, 30.0))).on_hover_text("Add a library folder").clicked() {
                     self.add_root();
                 }
-                let can = !self.scanning && !self.config.roots().is_empty();
+                let can = self.scanning.is_none() && !self.config.roots().is_empty();
                 if ui.add_enabled(can, theme::tool_button_widget(icons::ARROWS_CLOCKWISE, "Rescan").min_size(egui::vec2(w, 30.0))).on_hover_text("Walk the library folders again").clicked() {
                     self.rescan();
                 }
@@ -1913,9 +1919,14 @@ impl App {
                     ui.label(RichText::new(format!("{n} underrun frames")).color(self.theme.err).size(12.0)).on_hover_text("Silence played because a streamed file was not decoded in time");
                 }
                 ui.separator();
-                if self.scanning {
+                if let Some(phase) = self.scanning {
                     ui.spinner();
-                    ui.label(RichText::new("Scanning").color(self.theme.muted).size(12.0));
+                    let text = match phase {
+                        ScanPhase::Walking { seen: 0 } => "Scanning".to_string(),
+                        ScanPhase::Walking { seen } => format!("Scanning  ·  {seen} files"),
+                        ScanPhase::Matching { hashed } => format!("Matching marks  ·  {hashed} files"),
+                    };
+                    ui.label(RichText::new(text).color(self.theme.muted).size(12.0));
                 } else {
                     ui.label(RichText::new(format!("{} files", self.file_count)).color(self.theme.muted).size(12.0));
                 }
