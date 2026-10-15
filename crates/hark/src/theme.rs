@@ -291,7 +291,9 @@ impl egui::Widget for Check<'_> {
         let inset = if self.menu_row { MENU_INSET } else { 0.0 };
         let content_h = BOX.max(galley.size().y).max(ui.spacing().interact_size.y);
         let content_w = BOX + text_w + 2.0 * inset;
-        let size = egui::vec2(if self.menu_row { ui.available_width().max(content_w) } else { content_w }, content_h + if self.menu_row { 2.0 * ui.spacing().button_padding.y } else { 0.0 });
+        // A menu sizes itself to its content in a sizing pass, then its rows fill the width.
+        let fill = self.menu_row && !ui.is_sizing_pass();
+        let size = egui::vec2(if fill { ui.available_width().max(content_w) } else { content_w }, content_h + if self.menu_row { 2.0 * ui.spacing().button_padding.y } else { 0.0 });
         let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
         if response.clicked() {
             *self.on = !*self.on;

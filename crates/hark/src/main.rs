@@ -955,7 +955,7 @@ impl App {
                 }
             });
             ui.add_space(6.0);
-            if ui.add_enabled(n > 0, egui::Button::new("Clear")).clicked() {
+            if ui.add_enabled(n > 0, egui::Button::new(theme::icon_text(icons::FUNNEL_X, "Clear", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER))).clicked() {
                 self.filter.clear();
                 changed = true;
             }
