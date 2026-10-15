@@ -295,8 +295,20 @@ impl App {
             Some(t) => ((t * rate) as usize).clamp(0, total),
             None => start,
         };
-        let end = if from_secs.is_some() && self.wave.selection.map(|(a, b)| start < (a * rate) as usize || start >= (b * rate) as usize).unwrap_or(true) { total } else { end };
-        player.play(Clip { pcm: cur.device.clone(), start, end: end.max(start), looped: self.loop_on });
+        let outside = from_secs.is_some() && self.wave.selection.map(|(a, b)| start < (a * rate) as usize || start >= (b * rate) as usize).unwrap_or(true);
+        let end = if outside { total } else { end };
+        let in_selection = self.wave.selection.is_some() && !outside;
+        let sel_start = self.wave.selection.map(|(a, _)| (a * rate) as usize).unwrap_or(0);
+        let (fade_in, fade_out) = if in_selection { ((self.wave.fade_in * rate) as usize, (self.wave.fade_out * rate) as usize) } else { (0, 0) };
+        player.play(Clip {
+            pcm: cur.device.clone(),
+            start,
+            end: end.max(start),
+            looped: self.loop_on,
+            fade_in: if in_selection && start > sel_start { 0 } else { fade_in },
+            fade_out,
+            fade_shape: self.wave.fade_shape,
+        });
     }
 
     fn stop(&self) {

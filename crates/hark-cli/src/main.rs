@@ -463,8 +463,7 @@ fn run() -> Result<()> {
             let clip = hark_core::audition::Clip {
                 start: start.map(|s| pcm.frame_at(s)).unwrap_or(0),
                 end: end.map(|s| pcm.frame_at(s)).unwrap_or(frames),
-                pcm: std::sync::Arc::new(pcm),
-                looped: false,
+                ..hark_core::audition::Clip::whole(std::sync::Arc::new(pcm))
             };
             eprintln!("playing on {} at {} Hz", player.device_name, player.sample_rate);
             player.play(clip);

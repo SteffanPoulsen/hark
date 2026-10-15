@@ -1,12 +1,14 @@
-//! The bottom waveform: whole-file envelope, zoomable view, a draggable selection with fade
-//! handles, and the playhead.
+//! The bottom waveform: whole-file envelope, zoomable view, a draggable selection, fade handles
+//! in their own lane above the wave so nothing else competes for the grab, and the playhead.
 
-use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
+use egui::{Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
 use hark_core::pcm::FadeShape;
 use hark_core::Peaks;
 
-const HANDLE_PX: f32 = 7.0;
-const EDGE_GRAB_PX: f32 = 6.0;
+const LANE_H: f32 = 20.0;
+const HANDLE_W: f32 = 14.0;
+const HANDLE_GRAB_PX: f32 = 16.0;
+const EDGE_GRAB_PX: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Drag {
@@ -61,12 +63,38 @@ impl WaveState {
     }
 }
 
+/// What the pointer would grab at `p`, before any drag starts.
+fn hit(state: &WaveState, lane: Rect, p: Pos2, x_of: &dyn Fn(f64) -> f32) -> Option<Drag> {
+    let (a, b) = state.selection?;
+    if lane.contains(p) {
+        let din = (p.x - x_of(a + state.fade_in)).abs();
+        let dout = (p.x - x_of(b - state.fade_out)).abs();
+        return if din <= HANDLE_GRAB_PX && din <= dout {
+            Some(Drag::FadeIn)
+        } else if dout <= HANDLE_GRAB_PX {
+            Some(Drag::FadeOut)
+        } else {
+            None
+        };
+    }
+    if (p.x - x_of(a)).abs() <= EDGE_GRAB_PX {
+        Some(Drag::Start)
+    } else if (p.x - x_of(b)).abs() <= EDGE_GRAB_PX {
+        Some(Drag::End)
+    } else {
+        None
+    }
+}
+
 pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration: f64, playhead: Option<f64>, height: f32) -> WaveEvent {
     let width = ui.available_width();
     let (resp, painter) = ui.allocate_painter(Vec2::new(width, height), Sense::click_and_drag());
-    let rect = resp.rect;
+    let full = resp.rect;
+    let lane = Rect::from_min_max(full.left_top(), Pos2::new(full.right(), full.top() + LANE_H));
+    let rect = Rect::from_min_max(Pos2::new(full.left(), lane.bottom()), full.right_bottom());
     let visuals = ui.visuals();
-    painter.rect_filled(rect, 3.0, visuals.extreme_bg_color);
+    painter.rect_filled(full, 3.0, visuals.extreme_bg_color);
+    painter.rect_filled(lane, 0.0, visuals.faint_bg_color);
 
     let Some(peaks) = peaks else {
         painter.text(rect.center(), Align2::CENTER_CENTER, "no file", FontId::proportional(14.0), visuals.weak_text_color());
@@ -76,6 +104,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
     if state.view.1 <= state.view.0 {
         state.view = (0.0, duration);
     }
+
     // Zoom and pan with the wheel while hovering, against the view as it was.
     if resp.hovered() {
         let (v0, v1) = state.view;
@@ -120,13 +149,18 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
     }
 
     // Selection, fades, handles.
+    let hovered_hit = resp.hover_pos().and_then(|p| hit(state, lane, p, &x_of));
+    let active = state.drag.or(hovered_hit);
     if let Some((a, b)) = state.selection {
+        let sel_color = Color32::from_rgb(255, 200, 90);
         let xa = x_of(a).clamp(rect.left(), rect.right());
         let xb = x_of(b).clamp(rect.left(), rect.right());
         let sel = Rect::from_min_max(Pos2::new(xa, rect.top()), Pos2::new(xb, rect.bottom()));
         painter.rect_filled(sel, 0.0, Color32::from_rgba_unmultiplied(255, 200, 90, 36));
-        painter.vline(xa, rect.y_range(), Stroke::new(1.0, Color32::from_rgb(255, 200, 90)));
-        painter.vline(xb, rect.y_range(), Stroke::new(1.0, Color32::from_rgb(255, 200, 90)));
+        let edge = |which: Drag| if active == Some(which) { Stroke::new(2.5, Color32::WHITE) } else { Stroke::new(1.0, sel_color) };
+        painter.vline(xa, rect.y_range(), edge(Drag::Start));
+        painter.vline(xb, rect.y_range(), edge(Drag::End));
+
         let fade_color = Color32::from_rgb(255, 230, 140);
         let curve = |from: f64, to: f64, rising: bool| {
             let n = 24;
@@ -145,17 +179,23 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
         if state.fade_out > 0.0 {
             painter.add(curve(b - state.fade_out, b, false));
         }
-        let handle = |x: f32, pointing_right: bool| {
-            let y = rect.top() + 2.0;
+        let handle = |x: f32, pointing_right: bool, hot: bool| {
             let dir = if pointing_right { 1.0 } else { -1.0 };
-            Shape::convex_polygon(
-                vec![Pos2::new(x, y), Pos2::new(x + dir * HANDLE_PX * 1.6, y), Pos2::new(x, y + HANDLE_PX * 1.6)],
-                fade_color,
-                Stroke::NONE,
-            )
+            let top = lane.top() + 3.0;
+            let bottom = lane.bottom() - 3.0;
+            let fill = if hot { Color32::WHITE } else { fade_color };
+            vec![
+                Shape::convex_polygon(vec![Pos2::new(x, top), Pos2::new(x + dir * HANDLE_W, top), Pos2::new(x, bottom)], fill, Stroke::NONE),
+                Shape::Vec(Shape::dashed_line(&[Pos2::new(x, lane.bottom()), Pos2::new(x, rect.bottom())], Stroke::new(1.0, fill.gamma_multiply(0.6)), 4.0, 4.0)),
+            ]
         };
-        painter.add(handle(x_of(a + state.fade_in), true));
-        painter.add(handle(x_of(b - state.fade_out), false));
+        for s in handle(x_of(a + state.fade_in), true, active == Some(Drag::FadeIn)) {
+            painter.add(s);
+        }
+        for s in handle(x_of(b - state.fade_out), false, active == Some(Drag::FadeOut)) {
+            painter.add(s);
+        }
+        painter.text(lane.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, "fades", FontId::proportional(10.0), visuals.weak_text_color());
     }
 
     // Playhead.
@@ -178,33 +218,30 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
             Color32::from_rgb(255, 220, 140),
         );
     }
-    painter.rect_stroke(rect, 3.0, Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color), StrokeKind::Inside);
+    painter.rect_stroke(full, 3.0, Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color), StrokeKind::Inside);
+
+    // Cursor.
+    match active {
+        Some(Drag::Start) | Some(Drag::End) | Some(Drag::FadeIn) | Some(Drag::FadeOut) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
+        Some(Drag::Move { .. }) => ui.ctx().set_cursor_icon(CursorIcon::Grabbing),
+        _ if resp.hovered() && lane.contains(resp.hover_pos().unwrap_or(Pos2::ZERO)) => {}
+        _ if resp.hovered() => ui.ctx().set_cursor_icon(CursorIcon::Text),
+        _ => {}
+    }
 
     // Interaction.
     let mut event = WaveEvent::None;
     if resp.drag_started() {
         if let Some(p) = resp.interact_pointer_pos() {
             let t = t_of(p.x).clamp(0.0, duration);
-            state.drag = Some(match state.selection {
-                Some((a, b)) => {
-                    let near = |x: f32| (p.x - x).abs() <= EDGE_GRAB_PX;
-                    let in_handle_band = p.y <= rect.top() + HANDLE_PX * 2.0;
-                    if in_handle_band && (p.x - x_of(a + state.fade_in)).abs() <= HANDLE_PX * 1.6 {
-                        Drag::FadeIn
-                    } else if in_handle_band && (p.x - x_of(b - state.fade_out)).abs() <= HANDLE_PX * 1.6 {
-                        Drag::FadeOut
-                    } else if near(x_of(a)) {
-                        Drag::Start
-                    } else if near(x_of(b)) {
-                        Drag::End
-                    } else if t > a && t < b && ui.input(|i| i.modifiers.shift) {
-                        Drag::Move { grab: t - a }
-                    } else {
-                        Drag::New { anchor: t }
-                    }
-                }
-                None => Drag::New { anchor: t },
-            });
+            state.drag = match hit(state, lane, p, &x_of) {
+                Some(d) => Some(d),
+                None if lane.contains(p) => None,
+                None => match state.selection {
+                    Some((a, b)) if t > a && t < b && ui.input(|i| i.modifiers.shift) => Some(Drag::Move { grab: t - a }),
+                    _ => Some(Drag::New { anchor: t }),
+                },
+            };
         }
     }
     if resp.dragged() {
@@ -256,7 +293,9 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
     }
     if resp.clicked() {
         if let Some(p) = resp.interact_pointer_pos() {
-            event = WaveEvent::Seek(t_of(p.x).clamp(0.0, duration));
+            if !lane.contains(p) {
+                event = WaveEvent::Seek(t_of(p.x).clamp(0.0, duration));
+            }
         }
     }
     if resp.double_clicked() {

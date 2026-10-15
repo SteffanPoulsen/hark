@@ -1,5 +1,7 @@
 //! One always-open output stream. Clips are handed over already at the device rate and start
-//! on the next callback, so retriggering a hundred one-shots in a row costs nothing.
+//! on the next callback, so retriggering a hundred one-shots in a row costs nothing. Every
+//! start, stop and retrigger is declicked with a short ramp, and a clip's own fades play back
+//! so the selection sounds the way it will export.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -9,7 +11,9 @@ use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 
-use crate::pcm::Pcm;
+use crate::pcm::{FadeShape, Pcm};
+
+const DECLICK_SECS: f64 = 0.005;
 
 #[derive(Clone)]
 pub struct Clip {
@@ -17,6 +21,28 @@ pub struct Clip {
     pub start: usize,
     pub end: usize,
     pub looped: bool,
+    /// Fade lengths in frames, measured from `start` and back from `end`.
+    pub fade_in: usize,
+    pub fade_out: usize,
+    pub fade_shape: FadeShape,
+}
+
+impl Clip {
+    pub fn whole(pcm: Arc<Pcm>) -> Clip {
+        let end = pcm.frames();
+        Clip { pcm, start: 0, end, looped: false, fade_in: 0, fade_out: 0, fade_shape: FadeShape::EqualPower }
+    }
+
+    fn envelope(&self, pos: usize) -> f32 {
+        let mut g = 1.0;
+        if self.fade_in > 0 && pos < self.start + self.fade_in {
+            g *= self.fade_shape.gain((pos - self.start) as f32 / self.fade_in as f32);
+        }
+        if self.fade_out > 0 && pos + self.fade_out > self.end {
+            g *= self.fade_shape.gain((self.end - pos) as f32 / self.fade_out as f32);
+        }
+        g
+    }
 }
 
 enum Cmd {
@@ -43,31 +69,59 @@ pub struct Player {
 struct Voice {
     clip: Clip,
     pos: usize,
+    /// Frames rendered since the voice started, for the declick ramp in.
+    age: usize,
+}
+
+impl Voice {
+    fn sample_gain(&self, declick: usize) -> f32 {
+        let mut g = self.clip.envelope(self.pos);
+        if self.age < declick {
+            g *= self.age as f32 / declick as f32;
+        }
+        if !self.clip.looped && self.pos + declick > self.clip.end {
+            g *= (self.clip.end - self.pos) as f32 / declick as f32;
+        }
+        g
+    }
 }
 
 struct Mixer {
     rx: Receiver<Cmd>,
     shared: Arc<Shared>,
     voice: Option<Voice>,
+    /// A voice ramping out after a stop or retrigger, with frames left in the ramp.
+    dying: Option<(Voice, usize)>,
     channels: usize,
+    declick: usize,
 }
 
 impl Mixer {
+    fn retire(&mut self) {
+        if let Some(v) = self.voice.take() {
+            if v.pos < v.clip.end {
+                self.dying = Some((v, self.declick));
+            }
+        }
+    }
+
     fn fill(&mut self, out: &mut [f32]) {
         while let Ok(cmd) = self.rx.try_recv() {
             match cmd {
                 Cmd::Play(clip) => {
+                    self.retire();
                     let pos = clip.start;
-                    self.voice = Some(Voice { clip, pos });
+                    self.voice = Some(Voice { clip, pos, age: 0 });
                     self.shared.playing.store(true, Ordering::Relaxed);
                 }
                 Cmd::Stop => {
-                    self.voice = None;
+                    self.retire();
                     self.shared.playing.store(false, Ordering::Relaxed);
                 }
                 Cmd::Seek(frame) => {
                     if let Some(v) = &mut self.voice {
                         v.pos = frame.clamp(v.clip.start, v.clip.end);
+                        v.age = 0;
                     }
                 }
             }
@@ -75,6 +129,26 @@ impl Mixer {
         out.fill(0.0);
         let gain = f32::from_bits(self.shared.gain.load(Ordering::Relaxed));
         let oc = self.channels;
+
+        if let Some((v, left)) = &mut self.dying {
+            let ic = v.clip.pcm.channels as usize;
+            for frame in out.chunks_mut(oc) {
+                if *left == 0 || v.pos >= v.clip.end {
+                    break;
+                }
+                let g = gain * v.clip.envelope(v.pos) * (*left as f32 / self.declick as f32);
+                let src = &v.clip.pcm.samples[v.pos * ic..(v.pos + 1) * ic];
+                for (i, o) in frame.iter_mut().enumerate() {
+                    *o += src[i.min(ic - 1)] * g;
+                }
+                v.pos += 1;
+                *left -= 1;
+            }
+            if *left == 0 || v.pos >= v.clip.end {
+                self.dying = None;
+            }
+        }
+
         let Some(v) = &mut self.voice else { return };
         let ic = v.clip.pcm.channels as usize;
         let samples = &v.clip.pcm.samples;
@@ -88,16 +162,13 @@ impl Mixer {
                     break;
                 }
             }
+            let g = gain * v.sample_gain(self.declick);
             let src = &samples[v.pos * ic..(v.pos + 1) * ic];
-            match ic {
-                1 => frame.iter_mut().for_each(|o| *o = src[0] * gain),
-                _ => {
-                    for (i, o) in frame.iter_mut().enumerate() {
-                        *o = src[i.min(ic - 1)] * gain;
-                    }
-                }
+            for (i, o) in frame.iter_mut().enumerate() {
+                *o += src[i.min(ic - 1)] * g;
             }
             v.pos += 1;
+            v.age += 1;
         }
         self.shared.position.store(v.pos, Ordering::Relaxed);
         if done {
@@ -124,7 +195,14 @@ impl Player {
             gain: AtomicU32::new(1.0f32.to_bits()),
         });
         let (tx, rx) = channel();
-        let mixer = Mixer { rx, shared: shared.clone(), voice: None, channels: config.channels as usize };
+        let mixer = Mixer {
+            rx,
+            shared: shared.clone(),
+            voice: None,
+            dying: None,
+            channels: config.channels as usize,
+            declick: (DECLICK_SECS * config.sample_rate as f64).round().max(1.0) as usize,
+        };
         let stream = match default.sample_format() {
             cpal::SampleFormat::F32 => build::<f32>(&device, &config, mixer)?,
             cpal::SampleFormat::I16 => build::<i16>(&device, &config, mixer)?,
