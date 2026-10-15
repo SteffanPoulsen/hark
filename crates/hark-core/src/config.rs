@@ -15,6 +15,9 @@ pub struct Root {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TagDef {
     pub name: String,
+    /// `#rrggbb`; a tag without one takes a color from its position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     /// Export preset this tag selects by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
@@ -175,7 +178,7 @@ impl Default for Config {
                 ..ExportPreset::default()
             },
         );
-        let tag = |name: &str, preset: &str| TagDef { name: name.into(), preset: Some(preset.into()) };
+        let tag = |name: &str, preset: &str| TagDef { name: name.into(), color: None, preset: Some(preset.into()) };
         Config {
             roots: Vec::new(),
             output_root: None,
@@ -213,6 +216,10 @@ impl Config {
 
     pub fn root_of(&self, path: &Path) -> Option<&Root> {
         self.roots.iter().filter(|r| path.starts_with(&r.path)).max_by_key(|r| r.path.as_os_str().len())
+    }
+
+    pub fn tag(&self, name: &str) -> Option<&TagDef> {
+        self.tags.iter().find(|t| t.name == name)
     }
 
     pub fn preset(&self, name: &str) -> Option<&ExportPreset> {

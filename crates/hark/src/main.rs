@@ -27,12 +27,14 @@ const EXPORT_CARD_W: f32 = 330.0;
 
 fn main() -> eframe::Result {
     let mut open: Option<PathBuf> = None;
+    let mut settings = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--open" => open = args.next().map(PathBuf::from),
+            "--settings" => settings = true,
             "-h" | "--help" => {
-                println!("hark [--open <audio file or folder>]");
+                println!("hark [--open <audio file or folder>] [--settings]");
                 return Ok(());
             }
             other => open = Some(PathBuf::from(other)),
@@ -51,9 +53,19 @@ fn main() -> eframe::Result {
             if let Some(p) = open {
                 app.open_path(&p);
             }
+            app.settings_open = settings;
             Ok(Box::new(app))
         }),
     )
+}
+
+enum TagAction {
+    Color(usize, String),
+    Preset(usize, Option<String>),
+    Rename(usize, String),
+    Move(usize, usize),
+    Remove(usize),
+    Add,
 }
 
 struct App {
@@ -91,6 +103,8 @@ struct App {
     status_is_error: bool,
     last_export: Option<Result<String, String>>,
     scanning: bool,
+    settings_open: bool,
+    tag_edit: Option<(usize, String)>,
     file_count: usize,
 }
 
@@ -147,6 +161,8 @@ impl App {
             last_export: None,
             scanning,
             file_count: 0,
+            settings_open: false,
+            tag_edit: None,
         }
     }
 
@@ -574,6 +590,9 @@ impl App {
                 self.list_dirty = true;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if Self::icon_button(ui, icons::GEAR, "", self.settings_open).on_hover_text("settings").clicked() {
+                    self.settings_open = !self.settings_open;
+                }
                 if Self::icon_button(ui, icons::FOLDER_PLUS, "add folder", false).clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
                         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "root".into());
@@ -715,7 +734,8 @@ impl App {
             self.scroll_to_selected = false;
         }
         let theme = self.theme.clone();
-        let tag_index: HashMap<String, usize> = self.config.tags.iter().enumerate().map(|(i, t)| (t.name.clone(), i)).collect();
+        let tag_colors: HashMap<String, Color32> = self.config.tags.iter().enumerate().map(|(i, t)| (t.name.clone(), self.theme.color_of(i, Some(t)))).collect();
+        let unknown_color = self.theme.tag_color(self.theme.tag_colors.len() - 1);
         let files = &self.files;
         let selected = self.selected;
         let chip = |ui: &mut egui::Ui, text: &str, color: Color32| {
@@ -759,8 +779,7 @@ impl App {
                     row.col(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         for t in &f.tags {
-                            let k = tag_index.get(t).copied().unwrap_or(theme.tag_colors.len() - 1);
-                            chip(ui, t, theme.tag_color(k));
+                            chip(ui, t, tag_colors.get(t).copied().unwrap_or(unknown_color));
                         }
                     });
                     let info = f.info.as_ref();
@@ -838,7 +857,7 @@ impl App {
                         let mut toggled = None;
                         for (k, t) in defs.iter().enumerate().rev() {
                             let on = tags.contains(&t.name);
-                            if self.chip(ui, &t.name, self.theme.tag_color(k), on, true).on_hover_text(format!("key {}", k + 1)).clicked() {
+                            if self.chip(ui, &t.name, self.theme.color_of(k, Some(t)), on, true).on_hover_text(format!("key {}", k + 1)).clicked() {
                                 toggled = Some(t.name.clone());
                             }
                         }
@@ -1021,6 +1040,148 @@ impl App {
         });
     }
 
+    fn ui_settings(&mut self, ctx: &egui::Context) {
+        if !self.settings_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Settings").open(&mut open).resizable(true).default_width(520.0).show(ctx, |ui| {
+            ui.label(theme::semibold("Tags").size(15.0));
+            ui.label(RichText::new("Order is the 1 to 9 hotkey order. Renaming rewrites the marks; removing drops them.").color(self.theme.muted).size(12.0));
+            ui.add_space(6.0);
+            let used: HashMap<String, usize> = self.db.tags_in_use().unwrap_or_default().into_iter().collect();
+            let mut action: Option<TagAction> = None;
+            let n = self.config.tags.len();
+            egui::Grid::new("tags-grid").num_columns(6).spacing([10.0, 6.0]).show(ui, |ui| {
+                for k in 0..n {
+                    let def = self.config.tags[k].clone();
+                    let color = self.theme.color_of(k, Some(&def));
+                    ui.label(RichText::new(if k < 9 { format!("{}", k + 1) } else { String::new() }).color(self.theme.muted).monospace());
+                    let mut c = color;
+                    if ui.color_edit_button_srgba(&mut c).changed() {
+                        action = Some(TagAction::Color(k, theme::to_hex(c)));
+                    }
+                    let editing = self.tag_edit.as_ref().map(|(i, _)| *i == k).unwrap_or(false);
+                    if editing {
+                        let (_, buf) = self.tag_edit.as_mut().unwrap();
+                        let resp = ui.add(egui::TextEdit::singleline(buf).desired_width(140.0));
+                        let done = resp.lost_focus() || ui.input(|i| i.key_pressed(Key::Enter));
+                        if done {
+                            let new = buf.trim().to_string();
+                            action = Some(TagAction::Rename(k, new));
+                        }
+                    } else if ui.add(egui::Button::new(RichText::new(&def.name)).min_size(egui::vec2(140.0, 0.0))).on_hover_text("click to rename").clicked() {
+                        self.tag_edit = Some((k, def.name.clone()));
+                    }
+                    egui::ComboBox::from_id_salt(("tag-preset", k)).width(110.0).selected_text(def.preset.clone().unwrap_or_else(|| "no preset".into())).show_ui(ui, |ui| {
+                        if ui.selectable_label(def.preset.is_none(), "no preset").clicked() {
+                            action = Some(TagAction::Preset(k, None));
+                        }
+                        for name in self.config.presets.keys() {
+                            if ui.selectable_label(def.preset.as_deref() == Some(name), name).clicked() {
+                                action = Some(TagAction::Preset(k, Some(name.clone())));
+                            }
+                        }
+                    });
+                    let n_used = used.get(&def.name).copied().unwrap_or(0);
+                    ui.label(RichText::new(format!("{n_used} file{}", if n_used == 1 { "" } else { "s" })).color(self.theme.muted).size(12.0));
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(k > 0, egui::Button::new(theme::icon(icons::CARET_UP)).small()).clicked() {
+                            action = Some(TagAction::Move(k, k - 1));
+                        }
+                        if ui.add_enabled(k + 1 < n, egui::Button::new(theme::icon(icons::CARET_DOWN)).small()).clicked() {
+                            action = Some(TagAction::Move(k, k + 1));
+                        }
+                        if ui.add(egui::Button::new(theme::icon(icons::TRASH)).small()).on_hover_text("remove the tag and its marks").clicked() {
+                            action = Some(TagAction::Remove(k));
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+            ui.add_space(4.0);
+            if ui.add(egui::Button::new(theme::icon_text(icons::PLUS, "new tag", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER))).clicked() {
+                action = Some(TagAction::Add);
+            }
+            if let Some(a) = action {
+                self.apply_tag_action(a);
+            }
+            ui.add_space(12.0);
+            ui.label(theme::semibold("Export").size(15.0));
+            egui::Grid::new("general-grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                ui.label(RichText::new("default preset").color(self.theme.muted));
+                let mut changed = false;
+                egui::ComboBox::from_id_salt("default-preset").selected_text(&self.config.default_preset).show_ui(ui, |ui| {
+                    for name in self.config.presets.keys().cloned().collect::<Vec<_>>() {
+                        if ui.selectable_value(&mut self.config.default_preset, name.clone(), name).clicked() {
+                            changed = true;
+                        }
+                    }
+                });
+                ui.end_row();
+                ui.label(RichText::new("ui zoom").color(self.theme.muted));
+                ui.label(format!("{:.2}  (Ctrl+= / Ctrl+-)", ctx.zoom_factor()));
+                ui.end_row();
+                if changed {
+                    let _ = self.config.save();
+                }
+            });
+        });
+        if !open {
+            self.settings_open = false;
+            self.tag_edit = None;
+        }
+    }
+
+    fn apply_tag_action(&mut self, action: TagAction) {
+        match action {
+            TagAction::Color(k, hex) => self.config.tags[k].color = Some(hex),
+            TagAction::Preset(k, p) => self.config.tags[k].preset = p,
+            TagAction::Rename(k, new) => {
+                let old = self.config.tags[k].name.clone();
+                self.tag_edit = None;
+                if !new.is_empty() && new != old && !self.config.tags.iter().any(|t| t.name == new) {
+                    match self.db.rename_tag(&old, &new) {
+                        Ok(_) => {
+                            self.config.tags[k].name = new.clone();
+                            if self.filter_tag.as_deref() == Some(old.as_str()) {
+                                self.filter_tag = Some(new);
+                            }
+                        }
+                        Err(e) => self.set_status(format!("rename tag: {e:#}"), true),
+                    }
+                }
+            }
+            TagAction::Move(from, to) => {
+                let t = self.config.tags.remove(from);
+                self.config.tags.insert(to, t);
+            }
+            TagAction::Remove(k) => {
+                let t = self.config.tags.remove(k);
+                if let Err(e) = self.db.remove_tag(&t.name) {
+                    self.set_status(format!("remove tag: {e:#}"), true);
+                }
+                if self.filter_tag.as_deref() == Some(t.name.as_str()) {
+                    self.filter_tag = None;
+                }
+            }
+            TagAction::Add => {
+                let mut name = "new".to_string();
+                let mut n = 2;
+                while self.config.tags.iter().any(|t| t.name == name) {
+                    name = format!("new{n}");
+                    n += 1;
+                }
+                self.config.tags.push(hark_core::TagDef { name: name.clone(), color: None, preset: None });
+                self.tag_edit = Some((self.config.tags.len() - 1, name));
+            }
+        }
+        if let Err(e) = self.config.save() {
+            self.set_status(format!("save config: {e:#}"), true);
+        }
+        self.list_dirty = true;
+    }
+
     fn ui_status(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.add_space(6.0);
@@ -1076,6 +1237,8 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin::symmetric(8, 0))).show(ui, |ui| {
             self.ui_list(ui);
         });
+
+        self.ui_settings(&ctx);
 
         if self.is_playing() || !self.pending.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(16));

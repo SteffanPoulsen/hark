@@ -60,8 +60,11 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Defined tags and how many files carry each.
-    Tags,
+    /// Defined tags and how many files carry each; add, change, rename, reorder or remove them.
+    Tags {
+        #[command(subcommand)]
+        cmd: Option<TagsCmd>,
+    },
     /// Export presets.
     Presets {
         #[command(subcommand)]
@@ -108,6 +111,32 @@ enum RootsCmd {
         #[arg(long)]
         name: Option<String>,
     },
+    Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum TagsCmd {
+    List,
+    Add {
+        name: String,
+        #[arg(long)]
+        color: Option<String>,
+        #[arg(long)]
+        preset: Option<String>,
+    },
+    /// Change a tag's color or preset; an empty value clears it.
+    Set {
+        name: String,
+        #[arg(long)]
+        color: Option<String>,
+        #[arg(long)]
+        preset: Option<String>,
+    },
+    /// Rename a tag and rewrite the marks that carry it.
+    Rename { old: String, new: String },
+    /// Move a tag to a position (0-based); position decides the 1-9 hotkey.
+    Move { name: String, position: usize },
+    /// Remove a tag definition and the marks that carry it.
     Remove { name: String },
 }
 
@@ -340,15 +369,65 @@ fn run() -> Result<()> {
             db.set_favorite(&hash, !off)?;
             println!("{}: {}", file.display(), if off { "unmarked" } else { "★" });
         }
-        Cmd::Tags => {
-            let config = Config::load()?;
-            let used = Db::open()?.tags_in_use()?;
+        Cmd::Tags { cmd } => {
+            let mut config = Config::load()?;
+            let db = Db::open()?;
+            let find = |config: &Config, name: &str| config.tags.iter().position(|t| t.name == name).ok_or_else(|| anyhow!("no tag {name}"));
+            match cmd.unwrap_or(TagsCmd::List) {
+                TagsCmd::List => {}
+                TagsCmd::Add { name, color, preset } => {
+                    if config.tags.iter().any(|t| t.name == name) {
+                        return Err(anyhow!("tag {name} exists"));
+                    }
+                    config.tags.push(hark_core::TagDef { name, color, preset });
+                    config.save()?;
+                }
+                TagsCmd::Set { name, color, preset } => {
+                    let i = find(&config, &name)?;
+                    if let Some(c) = color {
+                        config.tags[i].color = if c.is_empty() { None } else { Some(c) };
+                    }
+                    if let Some(p) = preset {
+                        config.tags[i].preset = if p.is_empty() { None } else { Some(p) };
+                    }
+                    config.save()?;
+                }
+                TagsCmd::Rename { old, new } => {
+                    let i = find(&config, &old)?;
+                    if config.tags.iter().any(|t| t.name == new) {
+                        return Err(anyhow!("tag {new} exists"));
+                    }
+                    config.tags[i].name = new.clone();
+                    config.save()?;
+                    let n = db.rename_tag(&old, &new)?;
+                    if !json {
+                        println!("renamed {old} to {new} on {n} files");
+                    }
+                }
+                TagsCmd::Move { name, position } => {
+                    let i = find(&config, &name)?;
+                    let t = config.tags.remove(i);
+                    let at = position.min(config.tags.len());
+                    config.tags.insert(at, t);
+                    config.save()?;
+                }
+                TagsCmd::Remove { name } => {
+                    let i = find(&config, &name)?;
+                    config.tags.remove(i);
+                    config.save()?;
+                    let n = db.remove_tag(&name)?;
+                    if !json {
+                        println!("removed {name} from {n} files");
+                    }
+                }
+            }
+            let used = db.tags_in_use()?;
             if json {
                 print_json(&serde_json::json!({ "defined": config.tags, "in_use": used }))?;
             } else {
-                for t in &config.tags {
+                for (k, t) in config.tags.iter().enumerate() {
                     let n = used.iter().find(|(u, _)| u == &t.name).map(|(_, n)| *n).unwrap_or(0);
-                    println!("{:<12} {:>5} files  preset {}", t.name, n, t.preset.as_deref().unwrap_or("-"));
+                    println!("{:>2} {:<12} {:>5} files  {:<8} preset {}", k + 1, t.name, n, t.color.as_deref().unwrap_or("-"), t.preset.as_deref().unwrap_or("-"));
                 }
                 for (u, n) in used.iter().filter(|(u, _)| !config.tags.iter().any(|t| &t.name == u)) {
                     println!("{u:<12} {n:>5} files  (undefined)");

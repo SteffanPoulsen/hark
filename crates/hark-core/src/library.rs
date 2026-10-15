@@ -291,6 +291,14 @@ impl Db {
         Ok(())
     }
 
+    pub fn rename_tag(&self, old: &str, new: &str) -> Result<usize> {
+        Ok(self.conn.execute("UPDATE OR IGNORE file_tags SET tag = ?2 WHERE tag = ?1", params![old, new])?)
+    }
+
+    pub fn remove_tag(&self, tag: &str) -> Result<usize> {
+        Ok(self.conn.execute("DELETE FROM file_tags WHERE tag = ?1", params![tag])?)
+    }
+
     pub fn tags_in_use(&self) -> Result<Vec<(String, usize)>> {
         let mut stmt = self.conn.prepare("SELECT tag, count(*) FROM file_tags GROUP BY tag ORDER BY tag")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))?;

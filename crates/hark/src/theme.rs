@@ -30,7 +30,7 @@ pub const MEDIUM: &str = "inter-medium";
 pub const ICONS: &str = "icons";
 pub const ICONS_FILL: &str = "phosphor-fill";
 
-fn hex(s: &str) -> Option<Color32> {
+pub fn hex(s: &str) -> Option<Color32> {
     let s = s.trim().trim_start_matches('#');
     if s.len() != 6 {
         return None;
@@ -92,6 +92,11 @@ impl Theme {
 
     pub fn tag_color(&self, index: usize) -> Color32 {
         self.tag_colors[index % self.tag_colors.len()]
+    }
+
+    /// A tag's color: its own when set, else one picked by its position.
+    pub fn color_of(&self, index: usize, def: Option<&hark_core::TagDef>) -> Color32 {
+        def.and_then(|d| d.color.as_deref()).and_then(hex).unwrap_or_else(|| self.tag_color(index))
     }
 
     pub fn apply(&self, ctx: &egui::Context) {
@@ -191,6 +196,10 @@ pub fn semibold(text: impl Into<String>) -> egui::RichText {
 
 pub fn icon_fill(icon: &str) -> egui::RichText {
     egui::RichText::new(icon).family(FontFamily::Name(ICONS_FILL.into()))
+}
+
+pub fn to_hex(c: Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
 }
 
 pub fn icon(icon: &str) -> egui::RichText {
