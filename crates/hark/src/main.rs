@@ -1433,11 +1433,19 @@ impl App {
 
         ui.add_space(10.0);
         let can = matches!(req, Some(Ok(_)));
+        let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 40.0));
+        let hot = can && ui.rect_contains_pointer(rect);
+        let fill = match (can, hot) {
+            (true, true) => theme.accent.gamma_multiply(1.15).to_opaque(),
+            (true, false) => theme.accent,
+            (false, _) => theme.overlay,
+        };
         let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 15.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), if can { theme.on_accent() } else { theme.muted }))
-            .fill(if can { theme.accent } else { theme.overlay })
+            .fill(fill)
+            .stroke(Stroke::NONE)
             .corner_radius(CornerRadius::same(6))
-            .min_size(egui::vec2(ui.available_width(), 40.0));
-        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 40.0), egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+            .min_size(rect.size());
+        ui.allocate_ui_with_layout(rect.size(), egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
             if ui.add_enabled(can, button).on_hover_text("E").clicked() {
                 self.export();
             }
