@@ -27,6 +27,8 @@ use worker::{Done, Job, Loaded, Worker};
 const CACHE_BYTES: usize = 48_000 * 60 * 20 * 2 * 4;
 const PRELOAD: usize = 3;
 const EXPORT_CARD_W: f32 = 380.0;
+/// Height of the top bar's row of controls; the bar is this plus its margins.
+const TOP_BAR_H: f32 = 32.0;
 /// Search results are cut here so typing stays quick; folder and favorites views are whole.
 const SEARCH_LIMIT: usize = 2000;
 
@@ -200,6 +202,9 @@ struct App {
     settings_page: settings::Page,
     /// The mark beside the wordmark, white on transparent, tinted at draw time.
     mark: egui::TextureHandle,
+    /// Centre line of the project switcher on the last frame; the brand sits on it, since
+    /// egui does not centre buttons on the row they are in.
+    brand_line: Option<f32>,
     search_id: egui::Id,
     tag_edit: Option<(usize, String)>,
     /// Playback was running when the device was reopened; resume once the file reloads.
@@ -277,6 +282,7 @@ impl App {
             file_count: 0,
             settings_open: false,
             mark,
+            brand_line: None,
             settings_page: settings::Page::General,
             search_id: egui::Id::new("search"),
             tag_edit: None,
@@ -745,7 +751,7 @@ impl App {
     fn ui_top(&mut self, ui: &mut egui::Ui) {
         // One fixed row height, so every item centres on the same line whatever is placed
         // after it (egui centres each item in the row height known when it is placed).
-        const ROW_H: f32 = 30.0;
+        const ROW_H: f32 = TOP_BAR_H;
         ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP;
             // The brand is one word: the mark stands on the letters' baseline and reaches
@@ -764,7 +770,7 @@ impl App {
             let mark_w = ink_h * w as f32 / h as f32;
             let gap = 5.0;
             let (rect, _) = ui.allocate_exact_size(egui::vec2(mark_w + gap + word.size().x, control_h), Sense::hover());
-            let galley_top = rect.center().y - (ink_top + ink_bottom) / 2.0;
+            let galley_top = self.brand_line.unwrap_or(rect.center().y) - (ink_top + ink_bottom) / 2.0;
             let mark_rect = egui::Rect::from_min_size(egui::pos2(rect.left(), galley_top + ink_top), egui::vec2(mark_w, ink_h));
             egui::Image::new(&self.mark).tint(self.theme.accent2).paint_at(ui, mark_rect);
             ui.painter().galley(egui::pos2(mark_rect.right() + gap, galley_top), word, self.theme.accent);
@@ -1638,7 +1644,7 @@ impl App {
         if width > 0.0 {
             combo = combo.width(width);
         }
-        combo.show_ui(ui, |ui| {
+        let shown = combo.show_ui(ui, |ui| {
             if ui.selectable_label(self.config.active.is_none(), "Default").clicked() {
                 action = Some(ProjectAction::Default);
             }
@@ -1666,6 +1672,9 @@ impl App {
                 action = Some(ProjectAction::New);
             }
         });
+        if id == "project" {
+            self.brand_line = Some(shown.response.rect.center().y);
+        }
         action
     }
 
@@ -1868,7 +1877,7 @@ impl eframe::App for App {
 
         let pad = theme::PAD;
         let bar = egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(pad, 8));
-        egui::Panel::top("top").frame(bar).show(ui, |ui| {
+        egui::Panel::top("top").resizable(false).exact_size(TOP_BAR_H + 16.0).frame(bar).show(ui, |ui| {
             self.ui_top(ui);
         });
         egui::Panel::bottom("status").frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(pad, 4))).show(ui, |ui| {
