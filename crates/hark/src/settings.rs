@@ -350,9 +350,6 @@ impl App {
             row(ui, &theme, false, "Normalise", "Peak scales to a sample ceiling; LUFS matches integrated loudness under a true-peak ceiling.", |ui| {
                 ui.horizontal(|ui| preset_ui::normalize(ui, "settings", &mut p));
             });
-            row(ui, &theme, false, "Trim silence", "Cuts leading and trailing silence below the threshold, keeping a pad around the sound.", |ui| {
-                ui.horizontal(|ui| preset_ui::trim_silence(ui, &mut p));
-            });
             row(ui, &theme, false, "Fade shape", "The curve of the selection's fades; the transport can override it per export.", |ui| {
                 preset_ui::fade_shape(ui, "settings", &mut p);
             });

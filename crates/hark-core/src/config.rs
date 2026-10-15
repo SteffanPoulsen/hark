@@ -58,12 +58,6 @@ pub enum Normalize {
     Lufs { target_lufs: f64, true_peak_ceiling_dbfs: f64 },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
-pub struct TrimSilence {
-    pub threshold_dbfs: f64,
-    pub pad_ms: f64,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ExportPreset {
     #[serde(default)]
@@ -78,8 +72,6 @@ pub struct ExportPreset {
     pub mono: Option<DownmixMode>,
     #[serde(default)]
     pub normalize: Normalize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trim_silence: Option<TrimSilence>,
     #[serde(default = "default_true")]
     pub dither: bool,
     #[serde(default)]
@@ -109,7 +101,6 @@ impl Default for ExportPreset {
             sample_rate: None,
             mono: None,
             normalize: Normalize::None,
-            trim_silence: None,
             dither: true,
             fade_shape: FadeShape::EqualPower,
             path_template: default_template(),

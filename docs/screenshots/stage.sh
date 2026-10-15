@@ -16,8 +16,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 STAGE=${STAGE:-/tmp/hark-stage}
 home="$STAGE/home"
-lib="$home/Audio/Hollowmere"
-game="$home/Games/Hollowmere"
+lib="$home/Audio/Emberwake"
+game="$home/Games/Emberwake"
 cli="$repo/target/release/hark-cli"
 app="$repo/target/release/hark"
 export XDG_CONFIG_HOME="$STAGE/xdg/config" XDG_DATA_HOME="$STAGE/xdg/data" XDG_CACHE_HOME="$STAGE/xdg/cache"
@@ -126,8 +126,8 @@ music() {
 config() {
   rm -rf "$STAGE/xdg" "$game"
   mkdir -p "$game"
-  "$cli" projects new "$game/Hollowmere.hark" --output "$game/Assets/Audio" >/dev/null
-  "$cli" roots add "$lib" --name "Hollowmere SFX" >/dev/null
+  "$cli" projects new "$game/Emberwake.hark" --output "$game/Assets/Audio" >/dev/null
+  "$cli" roots add "$lib" --name "Emberwake SFX" >/dev/null
   "$cli" scan >/dev/null
   local t
   for t in sfx ambient music voice ui foley; do "$cli" tags remove "$t" >/dev/null; done
@@ -160,7 +160,7 @@ config() {
   "$cli" export "$lib/UI/ui_confirm.wav" --preset sfx --into ui >/dev/null
   "$cli" export "$lib/Impacts/impact_metal_heavy_02.wav" --preset sfx --into sfx/combat >/dev/null
   "$cli" config --default-preset sfx --ui-zoom 1.0 >/dev/null
-  echo "config: project $game/Hollowmere.hark, xdg under $STAGE/xdg"
+  echo "config: project $game/Emberwake.hark, xdg under $STAGE/xdg"
 }
 
 run() {
@@ -168,7 +168,7 @@ run() {
   [ "${1:-}" = settings ] && extra=(--settings presets)
   pkill -x hark 2>/dev/null || true
   sleep 0.3
-  HOME="$home" "$app" --project "$game/Hollowmere.hark" --open "$lib/Impacts/sword_hits_take03.wav" --in 1.43 --out 2.62 --fade-in 0.008 --fade-out 0.18 "${extra[@]}" >/dev/null 2>&1 &
+  HOME="$home" "$app" --project "$game/Emberwake.hark" --open "$lib/Impacts/sword_hits_take03.wav" --in 1.43 --out 2.62 --fade-in 0.008 --fade-out 0.18 "${extra[@]}" >/dev/null 2>&1 &
   disown
 }
 

@@ -18,8 +18,8 @@ Auditioning a big library in a DAW means importing first, and in a file manager 
 - **Library, not import.** Folders stay where they are and are never modified. The list shows duration, channels, rate, bit depth, codec and loudness; search covers everything, and a filter narrows by favorites, tags, type and channels.
 - **Favorites and tags** from the keyboard. Tags are yours to define, with a colour each. Marks key on the file's content, so a renamed or moved file keeps them.
 - **Projects.** A `.hark` file beside the game holds its library folders, its output folder and its own favorites. Switch between games from the top bar.
-- **Waveform selection with fades.** Drag a region, set fade in and out, zoom, loop, seek by clicking, and scale the level with the fader beside the waveform.
-- **Preset-driven export.** WAV or FLAC, bit depth with dither, resampling, mono downmix, silence trim, peak or EBU R128 loudness normalisation under a true-peak ceiling, and a file name template. Override any of it for one export.
+- **Waveform selection with fades.** Drag a region or trim it to the sound, set fade in and out, zoom, loop, seek by clicking, and scale the level with the fader beside the waveform.
+- **Preset-driven export.** WAV or FLAC, bit depth with dither, resampling, mono downmix, peak or EBU R128 loudness normalisation under a true-peak ceiling, and a file name template. Override any of it for one export.
 - **An origin inside every export.** A `hark` RIFF chunk and a BWF `bext` description in WAV, an APPLICATION block and a Vorbis comment in FLAC: source path and hash, pack, selection, fades, preset and measured gain. `hark-cli reexport` runs that recipe again with changes.
 - **A CLI for all of it.** `hark-cli` exposes the same core with `--json` on every command, so a script or an agent can search, mark, analyse and export without a window.
 
@@ -51,6 +51,7 @@ Start `hark`, add a library folder with the button under the tree, pick a folder
 | A | Autoplay |
 | `[` and `]` | Set the selection start or end at the playhead |
 | Z | Zoom to the selection |
+| T | Trim the selection, or the whole file, to the sound |
 | Delete | Clear the selection and fades |
 | E | Export the selection with the chosen preset |
 
@@ -82,10 +83,10 @@ hark-cli reexport ~/Projects/game/Assets/Audio/sfx/*.wav --preset sfx
 ```
 $ hark-cli inspect Assets/Audio/sfx/combat/impact_metal_heavy_02.wav
   wave pcm_s24le · 48000 Hz · 1 ch · 24 bit · 1.600s
-  bext: hark: Hollowmere SFX:Impacts/impact_metal_heavy_02.wav
-  origin: hark: Hollowmere SFX:Impacts/impact_metal_heavy_02.wav
+  bext: hark: Emberwake SFX:Impacts/impact_metal_heavy_02.wav
+  origin: hark: Emberwake SFX:Impacts/impact_metal_heavy_02.wav
     exported 2026-10-15T20:08:46+02:00 by hark 0.1.0 with preset sfx
-    source ~/Audio/Hollowmere/Impacts/impact_metal_heavy_02.wav (230480 bytes, blake3 a1e93ed24193076e)
+    source ~/Audio/Emberwake/Impacts/impact_metal_heavy_02.wav (230480 bytes, blake3 a1e93ed24193076e)
     fades 0.000s / 0.000s · gain -1.33 dB (true-peak limited)
 ```
 

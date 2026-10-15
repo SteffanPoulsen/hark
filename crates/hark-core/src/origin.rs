@@ -49,8 +49,6 @@ pub struct Measured {
     pub output_lufs: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_true_peak_dbfs: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trimmed: Option<SelectionRef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

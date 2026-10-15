@@ -185,15 +185,30 @@ impl Pcm {
         Pcm { sample_rate: self.sample_rate, channels: 1, samples: out }
     }
 
-    /// First and last frame with any sample above `threshold` (linear), or `None` when silent.
-    pub fn non_silent_bounds(&self, threshold: f32) -> Option<(usize, usize)> {
+    /// The span of sound inside `start..end` seconds: the first and last frame with a sample
+    /// above `TRIM_THRESHOLD_DBFS`, with `TRIM_PAD_SECS` kept on each side inside the span.
+    /// `None` when the span is silent.
+    pub fn sound_span(&self, start_secs: f64, end_secs: f64) -> Option<(f64, f64)> {
         let c = self.channels as usize;
+        let (from, to) = (self.frame_at(start_secs), self.frame_at(end_secs).min(self.frames()));
+        if to <= from {
+            return None;
+        }
+        let threshold = db_to_gain(TRIM_THRESHOLD_DBFS);
         let loud = |f: &[f32]| f.iter().any(|s| s.abs() > threshold);
-        let first = self.samples.chunks(c).position(loud)?;
-        let last = self.samples.chunks(c).rposition(loud)?;
-        Some((first, last + 1))
+        let mut frames = self.samples[from * c..to * c].chunks(c);
+        let first = frames.clone().position(loud)?;
+        let last = frames.rposition(loud)?;
+        let rate = self.sample_rate as f64;
+        let a = ((from + first) as f64 / rate - TRIM_PAD_SECS).max(start_secs);
+        let b = ((from + last + 1) as f64 / rate + TRIM_PAD_SECS).min(end_secs);
+        Some((a, b))
     }
 }
+
+/// A trim cuts what stays below this level, and keeps this much around the sound.
+pub const TRIM_THRESHOLD_DBFS: f64 = -60.0;
+pub const TRIM_PAD_SECS: f64 = 0.01;
 
 pub fn db_to_gain(db: f64) -> f32 {
     10f64.powf(db / 20.0) as f32

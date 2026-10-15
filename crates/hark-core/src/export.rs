@@ -22,6 +22,8 @@ pub struct ExportRequest {
     pub source: PathBuf,
     pub root: Option<Root>,
     pub selection: Option<Selection>,
+    /// Shrink the selection, or the whole file, to its sound before anything else.
+    pub trim: bool,
     pub fade_in_secs: f64,
     pub fade_out_secs: f64,
     /// The level chosen by hand, in dB; applied unless the preset normalises.
@@ -59,6 +61,7 @@ impl ExportRequest {
             source: source.to_path_buf(),
             root: config.root_of(source).cloned(),
             selection: None,
+            trim: false,
             fade_in_secs: 0.0,
             fade_out_secs: 0.0,
             gain_db: 0.0,
@@ -129,6 +132,13 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
     let source_meta = std::fs::metadata(&req.source).with_context(|| format!("stat {}", req.source.display()))?;
     let source = crate::decode::decode(&req.source)?;
     let preset = req.effective_preset();
+    let mut req = req.clone();
+    if req.trim {
+        let (start, end) = req.selection.map(|s| (s.start_secs, s.end_secs)).unwrap_or((0.0, source.duration_secs()));
+        let (start_secs, end_secs) = source.sound_span(start, end).ok_or_else(|| anyhow!("silent at {} dBFS; nothing to trim to", crate::pcm::TRIM_THRESHOLD_DBFS))?;
+        req.selection = Some(Selection { start_secs, end_secs });
+    }
+    let req = &req;
     let (pcm, warnings, measured) = process(&source, req, &preset)?;
     let output_loudness = loudness::measure(&pcm).ok();
     let measured = Measured {
@@ -204,24 +214,6 @@ fn process(source: &Pcm, req: &ExportRequest, preset: &ExportPreset) -> Result<(
         None => source.clone(),
     };
 
-    if let Some(trim) = preset.trim_silence {
-        let threshold = db_to_gain(trim.threshold_dbfs);
-        let pad = ((trim.pad_ms / 1000.0) * pcm.sample_rate as f64).round() as usize;
-        match pcm.non_silent_bounds(threshold) {
-            Some((a, b)) => {
-                let a = a.saturating_sub(pad);
-                let b = (b + pad).min(pcm.frames());
-                let base = req.selection.map(|s| s.start_secs).unwrap_or(0.0);
-                measured.trimmed = Some(SelectionRef {
-                    start_secs: base + a as f64 / pcm.sample_rate as f64,
-                    end_secs: base + b as f64 / pcm.sample_rate as f64,
-                });
-                pcm = pcm.slice_frames(a, b);
-            }
-            None => warnings.push("source is silent at the trim threshold; nothing trimmed".into()),
-        }
-    }
-
     if req.fade_in_secs > 0.0 {
         pcm.fade_in((req.fade_in_secs * pcm.sample_rate as f64).round() as usize, preset.fade_shape);
     }
@@ -294,6 +286,7 @@ pub fn request_from_origin(origin: &Origin, output_root: &Path, output_path: Opt
             (Some(name), Some(path)) => Some(Root { name: name.clone(), path: path.clone() }),
             _ => None,
         },
+        trim: false,
         selection: origin.selection.map(|s| Selection { start_secs: s.start_secs, end_secs: s.end_secs }),
         fade_in_secs: origin.fade_in_secs,
         fade_out_secs: origin.fade_out_secs,

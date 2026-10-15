@@ -343,6 +343,20 @@ impl App {
     }
 
     /// A message holds the footer for a while, then the key hints come back.
+    /// Shrinks the selection, or the whole file, to the sound in it.
+    fn trim_selection(&mut self) {
+        let Some(cur) = &self.current else { return };
+        let Source::Whole(pcm) = &cur.source else {
+            self.set_status("Trim needs the file decoded whole; this one streams", true);
+            return;
+        };
+        let (start, end) = self.wave.selection.unwrap_or((0.0, cur.duration_secs));
+        match pcm.sound_span(start, end) {
+            Some(span) => self.wave.selection = Some(span),
+            None => self.set_status(format!("Silent below {} dBFS; nothing to trim to", hark_core::pcm::TRIM_THRESHOLD_DBFS), true),
+        }
+    }
+
     fn set_status(&mut self, msg: impl Into<String>, error: bool) {
         self.status = msg.into();
         self.status_is_error = error;
@@ -739,6 +753,9 @@ impl App {
         }
         if pressed(Key::Z) {
             self.wave.zoom_to_selection();
+        }
+        if pressed(Key::T) {
+            self.trim_selection();
         }
         if pressed(Key::Delete) || pressed(Key::Backspace) {
             self.wave.selection = None;
@@ -1446,6 +1463,9 @@ impl App {
             }
             if icon_btn(ui, icons::MAGNIFYING_GLASS_PLUS, false).on_hover_text("Zoom to selection (Z)").clicked() {
                 self.wave.zoom_to_selection();
+            }
+            if icon_btn(ui, icons::ARROWS_IN_LINE_HORIZONTAL, false).on_hover_text(format!("Trim the selection to the sound (T): below {} dBFS cut, {} ms kept", hark_core::pcm::TRIM_THRESHOLD_DBFS, hark_core::pcm::TRIM_PAD_SECS * 1000.0)).clicked() {
+                self.trim_selection();
             }
             group(ui);
             ui.label(RichText::new("Fade").color(self.theme.muted));

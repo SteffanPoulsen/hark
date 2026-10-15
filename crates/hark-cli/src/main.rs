@@ -244,12 +244,6 @@ struct PresetValues {
     /// True-peak ceiling in dBTP for LUFS normalisation.
     #[arg(long, allow_hyphen_values = true)]
     ceiling: Option<f64>,
-    /// Trim threshold in dBFS (--trim=-60), or "off".
-    #[arg(long, allow_hyphen_values = true)]
-    trim: Option<String>,
-    /// Pad kept around the trimmed sound, in ms.
-    #[arg(long)]
-    pad: Option<f64>,
     #[arg(long)]
     dither: Option<bool>,
     /// linear, equal_power or logarithmic.
@@ -299,20 +293,6 @@ impl PresetValues {
             (_, Some(_), _) | (_, _, Some(_)) => return Err(anyhow!("target and ceiling need peak or lufs normalisation")),
             _ => {}
         }
-        if let Some(t) = &self.trim {
-            p.trim_silence = if t == "off" {
-                None
-            } else {
-                let threshold_dbfs = t.parse().map_err(|_| anyhow!("trim must be a threshold in dBFS or off"))?;
-                Some(hark_core::config::TrimSilence { threshold_dbfs, pad_ms: p.trim_silence.map(|x| x.pad_ms).unwrap_or(10.0) })
-            };
-        }
-        if let Some(pad) = self.pad {
-            match &mut p.trim_silence {
-                Some(t) => t.pad_ms = pad,
-                None => return Err(anyhow!("pad needs trim")),
-            }
-        }
         if let Some(d) = self.dither {
             p.dither = d;
         }
@@ -337,6 +317,9 @@ struct ExportArgs {
     /// Selection end in seconds.
     #[arg(long = "out")]
     end: Option<f64>,
+    /// Shrink the selection, or the whole file, to its sound: below -60 dBFS cut, 10 ms kept.
+    #[arg(long)]
+    trim: bool,
     #[arg(long, default_value_t = 0.0)]
     fade_in: f64,
     #[arg(long, default_value_t = 0.0)]
@@ -794,6 +777,7 @@ fn run() -> Result<()> {
                     sel.end_secs = hark_core::probe(&file)?.duration_secs;
                 }
             }
+            req.trim = a.trim;
             req.fade_in_secs = a.fade_in;
             req.fade_out_secs = a.fade_out;
             req.gain_db = a.gain;

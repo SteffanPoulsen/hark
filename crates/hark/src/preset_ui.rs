@@ -2,7 +2,7 @@
 //! presets page. Each returns whether it changed the preset.
 
 use egui::RichText;
-use hark_core::config::{Normalize, OutputFormat, TrimSilence};
+use hark_core::config::{Normalize, OutputFormat};
 use hark_core::pcm::{DownmixMode, FadeShape};
 use hark_core::ExportPreset;
 
@@ -116,21 +116,6 @@ pub fn normalize(ui: &mut egui::Ui, id: &str, p: &mut ExportPreset) -> bool {
             changed |= number(ui, target_lufs, -40.0..=0.0, " LU", 66.0);
             changed |= number(ui, true_peak_ceiling_dbfs, -12.0..=0.0, " dBTP", 72.0);
         }
-    }
-    changed
-}
-
-/// On or off, then the threshold and the pad kept around the sound.
-pub fn trim_silence(ui: &mut egui::Ui, p: &mut ExportPreset) -> bool {
-    let mut changed = false;
-    let mut on = p.trim_silence.is_some();
-    if crate::theme::check(ui, &mut on, "").changed() {
-        p.trim_silence = on.then_some(TrimSilence { threshold_dbfs: -60.0, pad_ms: 10.0 });
-        changed = true;
-    }
-    if let Some(t) = &mut p.trim_silence {
-        changed |= number(ui, &mut t.threshold_dbfs, -96.0..=0.0, " dBFS", 72.0);
-        changed |= ui.add_sized(egui::vec2(60.0, CONTROL_H), egui::DragValue::new(&mut t.pad_ms).speed(1.0).range(0.0..=1000.0).fixed_decimals(0).suffix(" ms")).changed();
     }
     changed
 }
