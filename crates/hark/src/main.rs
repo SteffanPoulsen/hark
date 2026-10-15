@@ -745,24 +745,26 @@ impl App {
     fn ui_top(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP;
-            // The brand is one word: the mark stands on the text baseline and reaches the
-            // ascender line, and that block, not the font box, is centred on the controls.
-            // Inter's box is 0.97 em above the baseline and 0.24 em below; its ascenders reach
-            // 0.73 em.
+            // The brand is one word: the mark stands on the letters' baseline and reaches
+            // their ascender line, measured from the glyphs' own ink, and that block, not the
+            // font box, is centred on the controls.
             let control_h = 28.0;
             let font = FontId::new(18.0, egui::FontFamily::Name(theme::SEMIBOLD.into()));
             let word = ui.fonts_mut(|f| f.layout_no_wrap("hark".into(), font.clone(), self.theme.accent));
-            let ascender = font.size * 0.73;
+            let (ink_top, ink_bottom) = word
+                .rows
+                .iter()
+                .flat_map(|r| r.row.glyphs.iter().map(move |g| (r.pos.y + g.pos.y + g.uv_rect.offset.y, g.uv_rect.size.y)))
+                .fold((f32::MAX, f32::MIN), |(t, b), (top, h)| (t.min(top), b.max(top + h)));
+            let ink_h = (ink_bottom - ink_top).max(1.0);
             let [w, h] = self.mark.size();
-            let mark_w = ascender * w as f32 / h as f32;
+            let mark_w = ink_h * w as f32 / h as f32;
             let gap = 5.0;
             let (rect, _) = ui.allocate_exact_size(egui::vec2(mark_w + gap + word.size().x, control_h), Sense::hover());
-            let baseline = rect.center().y + ascender / 2.0;
-            // The glyphs sit a touch above egui's baseline estimate; the mark follows them.
-            let mark_rect = egui::Rect::from_min_size(egui::pos2(rect.left(), baseline - ascender - font.size * 0.08), egui::vec2(mark_w, ascender));
+            let galley_top = rect.center().y - (ink_top + ink_bottom) / 2.0;
+            let mark_rect = egui::Rect::from_min_size(egui::pos2(rect.left(), galley_top + ink_top), egui::vec2(mark_w, ink_h));
             egui::Image::new(&self.mark).tint(self.theme.accent2).paint_at(ui, mark_rect);
-            let box_top = baseline - word.size().y * (0.97 / (0.97 + 0.24));
-            ui.painter().galley(egui::pos2(mark_rect.right() + gap, box_top), word, self.theme.accent);
+            ui.painter().galley(egui::pos2(mark_rect.right() + gap, galley_top), word, self.theme.accent);
             if let Some(action) = self.project_menu(ui, "project", 0.0) {
                 self.apply_project_action(action);
             }
