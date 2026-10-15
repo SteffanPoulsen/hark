@@ -784,7 +784,7 @@ impl App {
                     let f = &files[i];
                     row.set_selected(selected == Some(i));
                     let (_, star) = row.col(|ui| {
-                        let hot = ui.ui_contains_pointer();
+                        let hot = ui.rect_contains_pointer(ui.max_rect());
                         let color = match (f.favorite, hot) {
                             (true, true) => theme.accent2.gamma_multiply(1.4).to_opaque(),
                             (true, false) | (false, true) => theme.accent2,
