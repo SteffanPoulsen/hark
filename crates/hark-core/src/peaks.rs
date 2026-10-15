@@ -25,6 +25,52 @@ pub struct Bin {
     pub rms: f32,
 }
 
+impl Bin {
+    fn of_sample(s: f32) -> Bin {
+        Bin { min: s, max: s, rms: s.abs() }
+    }
+
+    /// One bin covering all of `items`: their extremes and the RMS of their RMS values.
+    fn merged(items: impl Iterator<Item = Bin>) -> Bin {
+        let (mut acc, mut sq, mut n) = (Bin { min: f32::MAX, max: f32::MIN, rms: 0.0 }, 0.0f32, 0usize);
+        for b in items {
+            acc.min = acc.min.min(b.min);
+            acc.max = acc.max.max(b.max);
+            sq += b.rms * b.rms;
+            n += 1;
+        }
+        acc.rms = (sq / n.max(1) as f32).sqrt();
+        acc
+    }
+}
+
+/// The same reduction `Peaks::columns` makes, from the samples themselves: exact per column
+/// at any zoom, for views where a column covers less than a bin.
+pub fn sample_columns(pcm: &Pcm, channel: usize, start_secs: f64, end_secs: f64, columns: usize) -> Vec<Bin> {
+    let c = pcm.channels.max(1) as usize;
+    let channel = channel.min(c - 1);
+    reduce(pcm.frames(), 1.0 / pcm.sample_rate as f64, start_secs, end_secs, columns, |f| Bin::of_sample(pcm.samples[f * c + channel]))
+}
+
+/// Splits `[start_secs, end_secs)` into `columns` and merges the units each one touches;
+/// columns past the last unit are empty.
+fn reduce(units: usize, unit_secs: f64, start_secs: f64, end_secs: f64, columns: usize, unit: impl Fn(usize) -> Bin) -> Vec<Bin> {
+    let span = (end_secs - start_secs).max(1e-9);
+    (0..columns)
+        .map(|i| {
+            let t0 = start_secs + span * i as f64 / columns as f64;
+            let t1 = start_secs + span * (i + 1) as f64 / columns as f64;
+            let u0 = (t0 / unit_secs).floor().max(0.0) as usize;
+            let u1 = ((t1 / unit_secs).ceil() as usize).min(units).max(u0 + 1);
+            if u0 < units {
+                Bin::merged((u0..u1).map(&unit))
+            } else {
+                Bin::default()
+            }
+        })
+        .collect()
+}
+
 impl Peaks {
     pub const DEFAULT_BIN: u32 = 256;
 
@@ -42,29 +88,7 @@ impl Peaks {
     pub fn columns(&self, channel: usize, start_secs: f64, end_secs: f64, columns: usize) -> Vec<Bin> {
         let bins = &self.bins[channel.min(self.bins.len().saturating_sub(1))];
         let bin_secs = self.bin_frames as f64 / self.sample_rate as f64;
-        let mut out = Vec::with_capacity(columns);
-        let span = (end_secs - start_secs).max(1e-9);
-        for i in 0..columns {
-            let t0 = start_secs + span * i as f64 / columns as f64;
-            let t1 = start_secs + span * (i + 1) as f64 / columns as f64;
-            let b0 = (t0 / bin_secs).floor().max(0.0) as usize;
-            let b1 = ((t1 / bin_secs).ceil() as usize).min(bins.len()).max(b0 + 1);
-            let mut acc = Bin::default();
-            if b0 < bins.len() {
-                acc.min = f32::MAX;
-                acc.max = f32::MIN;
-                let slice = &bins[b0..b1];
-                let mut sq = 0.0f32;
-                for b in slice {
-                    acc.min = acc.min.min(b.min);
-                    acc.max = acc.max.max(b.max);
-                    sq += b.rms * b.rms;
-                }
-                acc.rms = (sq / slice.len() as f32).sqrt();
-            }
-            out.push(acc);
-        }
-        out
+        reduce(bins.len(), bin_secs, start_secs, end_secs, columns, |i| bins[i])
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {

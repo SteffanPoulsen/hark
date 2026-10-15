@@ -172,7 +172,7 @@ pub struct Config {
 }
 
 fn default_stream_above_secs() -> f64 {
-    30.0
+    600.0
 }
 
 fn default_ui_zoom() -> f32 {

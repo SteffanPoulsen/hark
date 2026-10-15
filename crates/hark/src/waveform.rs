@@ -1,10 +1,12 @@
-//! The bottom waveform: a filled envelope with an RMS band at coarse zoom, the sample curve at
-//! fine zoom, a draggable selection, fade handles in their own lane above the wave so nothing
+//! The bottom waveform: a filled envelope with an RMS band, reduced per pixel column from the
+//! peaks or, once a column covers less than a bin, from the samples; the sample curve at the
+//! finest zoom; a draggable selection, fade handles in their own lane above the wave so nothing
 //! else competes for the grab, and the playhead. Wheel zooms, middle drag and shift-wheel pan.
 
 use egui::epaint::{Mesh, Vertex, WHITE_UV};
 use egui::{Align2, Color32, CursorIcon, FontId, PointerButton, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
 use hark_core::pcm::FadeShape;
+use hark_core::peaks::sample_columns;
 use hark_core::{Pcm, Peaks};
 
 const LANE_H: f32 = 20.0;
@@ -157,7 +159,8 @@ fn draw_lane_dividers(painter: &egui::Painter, rect: Rect, channels: usize, colo
     }
 }
 
-fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, rect: Rect, v0: f64, v1: f64, gain: f32, colors: &WaveColors) {
+/// With `samples`, the columns come from them instead of the peaks' bins.
+fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, samples: Option<&Pcm>, rect: Rect, v0: f64, v1: f64, gain: f32, colors: &WaveColors) {
     let channels = peaks.channels.max(1) as usize;
     let lane_h = rect.height() / channels as f32;
     let cols = rect.width().max(1.0) as usize;
@@ -165,7 +168,10 @@ fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, rect: Rect, v0: f64, v1
         let mid = rect.top() + lane_h * (ch as f32 + 0.5);
         let amp = lane_h * 0.46;
         painter.hline(rect.x_range(), mid, Stroke::new(1.0, colors.axis));
-        let bins = peaks.columns(ch, v0, v1, cols);
+        let bins = match samples {
+            Some(pcm) => sample_columns(pcm, ch, v0, v1, cols),
+            None => peaks.columns(ch, v0, v1, cols),
+        };
         let xs: Vec<f32> = (0..cols).map(|i| rect.left() + i as f32 + 0.5).collect();
         let top: Vec<f32> = bins.iter().map(|b| mid - (b.max * gain).clamp(-1.0, 1.0) * amp).collect();
         let bottom: Vec<f32> = bins.iter().map(|b| mid - (b.min * gain).clamp(-1.0, 1.0) * amp).collect();
@@ -263,7 +269,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
     let frames_per_px = span * peaks.sample_rate as f64 / rect.width().max(1.0) as f64;
     match samples {
         Some(pcm) if frames_per_px * (pcm.sample_rate as f64 / peaks.sample_rate as f64) <= SAMPLE_VIEW_FRAMES_PER_PX => draw_samples(&painter, pcm, rect, v0, v1, state.gain, colors),
-        _ => draw_envelope(&painter, peaks, rect, v0, v1, state.gain, colors),
+        _ => draw_envelope(&painter, peaks, samples.filter(|_| frames_per_px < peaks.bin_frames as f64), rect, v0, v1, state.gain, colors),
     }
 
     // Selection, fades, handles.
@@ -324,13 +330,13 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
     // Time ruler.
     let font = FontId::monospace(10.0);
     painter.text(rect.left_top() + Vec2::new(4.0, 2.0), Align2::LEFT_TOP, fmt_time(v0), font.clone(), visuals.weak_text_color());
-    painter.text(rect.right_top() + Vec2::new(-4.0, 2.0), Align2::RIGHT_TOP, fmt_time(v1), font.clone(), visuals.weak_text_color());
+    painter.text(rect.right_top() + Vec2::new(-4.0, 2.0), Align2::RIGHT_TOP, fmt_time(v1), font, visuals.weak_text_color());
     if let Some((a, b)) = state.selection {
         painter.text(
-            rect.center_bottom() + Vec2::new(0.0, -2.0),
+            rect.center_bottom() + Vec2::new(0.0, -3.0),
             Align2::CENTER_BOTTOM,
             format!("{} – {}  ({})", fmt_time(a), fmt_time(b), fmt_time(b - a)),
-            font,
+            FontId::monospace(13.0),
             colors.fade,
         );
     }
