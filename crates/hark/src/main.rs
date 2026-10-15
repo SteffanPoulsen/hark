@@ -853,7 +853,16 @@ impl App {
         let transport_h = 34.0;
         let wave_h = (ui.available_height() - transport_h - 8.0).max(80.0);
         let peaks = self.current.as_ref().map(|c| c.peaks.clone());
-        let event = waveform::show(ui, &mut self.wave, peaks.as_deref(), duration, playhead, wave_h);
+        let samples = self.current.as_ref().map(|c| c.device.clone());
+        let colors = waveform::WaveColors {
+            peak: self.theme.accent.gamma_multiply(0.55),
+            rms: self.theme.accent.gamma_multiply(0.95),
+            selection: self.theme.accent2,
+            fade: self.theme.accent2.gamma_multiply(1.3).to_opaque(),
+            playhead: self.theme.err,
+            axis: self.theme.line,
+        };
+        let event = waveform::show(ui, &mut self.wave, peaks.as_deref(), samples.as_deref(), duration, playhead, wave_h, &colors);
         if let WaveEvent::Seek(t) = event {
             self.play(Some(t));
         }

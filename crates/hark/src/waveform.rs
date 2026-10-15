@@ -1,14 +1,18 @@
-//! The bottom waveform: whole-file envelope, zoomable view, a draggable selection, fade handles
-//! in their own lane above the wave so nothing else competes for the grab, and the playhead.
+//! The bottom waveform: a filled envelope with an RMS band at coarse zoom, the sample curve at
+//! fine zoom, a draggable selection, fade handles in their own lane above the wave so nothing
+//! else competes for the grab, and the playhead. Wheel zooms, middle drag and shift-wheel pan.
 
-use egui::{Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
+use egui::epaint::{Mesh, Vertex, WHITE_UV};
+use egui::{Align2, Color32, CursorIcon, FontId, PointerButton, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
 use hark_core::pcm::FadeShape;
-use hark_core::Peaks;
+use hark_core::{Pcm, Peaks};
 
 const LANE_H: f32 = 20.0;
 const HANDLE_W: f32 = 14.0;
 const HANDLE_GRAB_PX: f32 = 16.0;
 const EDGE_GRAB_PX: f32 = 8.0;
+/// Below this many frames per pixel the real samples are drawn instead of the envelope.
+const SAMPLE_VIEW_FRAMES_PER_PX: f64 = 3.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Drag {
@@ -36,6 +40,15 @@ pub enum WaveEvent {
     Seek(f64),
 }
 
+pub struct WaveColors {
+    pub peak: Color32,
+    pub rms: Color32,
+    pub selection: Color32,
+    pub fade: Color32,
+    pub playhead: Color32,
+    pub axis: Color32,
+}
+
 impl WaveState {
     pub fn reset(&mut self, duration: f64) {
         self.view = (0.0, duration.max(1e-3));
@@ -60,6 +73,22 @@ impl WaveState {
                 self.view = (a - pad, b + pad);
             }
         }
+    }
+
+    fn zoom_at(&mut self, anchor: f64, factor: f64, duration: f64) {
+        let (v0, v1) = self.view;
+        let span = v1 - v0;
+        let new_span = (span / factor).clamp(0.0005, duration);
+        let frac = (anchor - v0) / span;
+        let a = (anchor - frac * new_span).clamp(0.0, duration - new_span);
+        self.view = (a, a + new_span);
+    }
+
+    fn pan(&mut self, dt: f64, duration: f64) {
+        let (v0, v1) = self.view;
+        let span = v1 - v0;
+        let a = (v0 + dt).clamp(0.0, duration - span);
+        self.view = (a, a + span);
     }
 }
 
@@ -86,14 +115,82 @@ fn hit(state: &WaveState, lane: Rect, p: Pos2, x_of: &dyn Fn(f64) -> f32) -> Opt
     }
 }
 
-pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration: f64, playhead: Option<f64>, height: f32) -> WaveEvent {
+/// A filled band between two polylines sharing x positions, as one mesh.
+fn band(xs: &[f32], top: &[f32], bottom: &[f32], color: Color32) -> Shape {
+    let mut mesh = Mesh::default();
+    for i in 0..xs.len() {
+        mesh.vertices.push(Vertex { pos: Pos2::new(xs[i], top[i]), uv: WHITE_UV, color });
+        mesh.vertices.push(Vertex { pos: Pos2::new(xs[i], bottom[i]), uv: WHITE_UV, color });
+        if i > 0 {
+            let b = (i * 2) as u32;
+            mesh.add_triangle(b - 2, b - 1, b);
+            mesh.add_triangle(b - 1, b + 1, b);
+        }
+    }
+    Shape::mesh(mesh)
+}
+
+fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, rect: Rect, v0: f64, v1: f64, colors: &WaveColors) {
+    let channels = peaks.channels.max(1) as usize;
+    let lane_h = rect.height() / channels as f32;
+    let cols = rect.width().max(1.0) as usize;
+    for ch in 0..channels {
+        let mid = rect.top() + lane_h * (ch as f32 + 0.5);
+        let amp = lane_h * 0.46;
+        painter.hline(rect.x_range(), mid, Stroke::new(1.0, colors.axis));
+        let bins = peaks.columns(ch, v0, v1, cols);
+        let xs: Vec<f32> = (0..cols).map(|i| rect.left() + i as f32 + 0.5).collect();
+        let top: Vec<f32> = bins.iter().map(|b| mid - b.max.clamp(-1.0, 1.0) * amp).collect();
+        let bottom: Vec<f32> = bins.iter().map(|b| mid - b.min.clamp(-1.0, 1.0) * amp).collect();
+        painter.add(band(&xs, &top, &bottom, colors.peak));
+        let rms_top: Vec<f32> = bins.iter().map(|b| mid - b.rms.clamp(0.0, 1.0) * amp).collect();
+        let rms_bottom: Vec<f32> = bins.iter().map(|b| mid + b.rms.clamp(0.0, 1.0) * amp).collect();
+        painter.add(band(&xs, &rms_top, &rms_bottom, colors.rms));
+        let outline: Vec<Pos2> = xs.iter().zip(&top).map(|(&x, &y)| Pos2::new(x, y)).collect();
+        painter.add(Shape::line(outline, Stroke::new(1.0, colors.peak.gamma_multiply(1.3))));
+        let outline: Vec<Pos2> = xs.iter().zip(&bottom).map(|(&x, &y)| Pos2::new(x, y)).collect();
+        painter.add(Shape::line(outline, Stroke::new(1.0, colors.peak.gamma_multiply(1.3))));
+    }
+}
+
+fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64, colors: &WaveColors) {
+    let channels = pcm.channels.max(1) as usize;
+    let lane_h = rect.height() / channels as f32;
+    let rate = pcm.sample_rate as f64;
+    let frames = pcm.frames();
+    let f0 = ((v0 * rate).floor().max(0.0) as usize).min(frames);
+    let f1 = ((v1 * rate).ceil().max(0.0) as usize + 1).min(frames);
+    let span = v1 - v0;
+    let x_of = |f: usize| rect.left() + ((f as f64 / rate - v0) / span) as f32 * rect.width();
+    let frames_per_px = (f1 - f0) as f64 / rect.width().max(1.0) as f64;
+    for ch in 0..channels {
+        let mid = rect.top() + lane_h * (ch as f32 + 0.5);
+        let amp = lane_h * 0.46;
+        painter.hline(rect.x_range(), mid, Stroke::new(1.0, colors.axis));
+        let pts: Vec<Pos2> = (f0..f1).map(|f| Pos2::new(x_of(f), mid - pcm.samples[f * channels + ch].clamp(-1.0, 1.0) * amp)).collect();
+        if pts.len() >= 2 {
+            let xs: Vec<f32> = pts.iter().map(|p| p.x).collect();
+            let top: Vec<f32> = pts.iter().map(|p| p.y.min(mid)).collect();
+            let bottom: Vec<f32> = pts.iter().map(|p| p.y.max(mid)).collect();
+            painter.add(band(&xs, &top, &bottom, colors.rms.gamma_multiply(0.6)));
+            painter.add(Shape::line(pts.clone(), Stroke::new(1.5, colors.peak.gamma_multiply(1.4))));
+        }
+        if frames_per_px < 0.25 {
+            for p in &pts {
+                painter.circle_filled(*p, 2.0, colors.peak.gamma_multiply(1.6));
+            }
+        }
+    }
+}
+
+pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: Option<&Pcm>, duration: f64, playhead: Option<f64>, height: f32, colors: &WaveColors) -> WaveEvent {
     let width = ui.available_width();
     let (resp, painter) = ui.allocate_painter(Vec2::new(width, height), Sense::click_and_drag());
     let full = resp.rect;
     let lane = Rect::from_min_max(full.left_top(), Pos2::new(full.right(), full.top() + LANE_H));
     let rect = Rect::from_min_max(Pos2::new(full.left(), lane.bottom()), full.right_bottom());
-    let visuals = ui.visuals();
-    painter.rect_filled(full, 3.0, visuals.extreme_bg_color);
+    let visuals = ui.visuals().clone();
+    painter.rect_filled(full, 4.0, visuals.extreme_bg_color);
     painter.rect_filled(lane, 0.0, visuals.faint_bg_color);
 
     let Some(peaks) = peaks else {
@@ -105,65 +202,55 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
         state.view = (0.0, duration);
     }
 
-    // Zoom and pan with the wheel while hovering, against the view as it was.
+    // Wheel: zoom around the pointer; shift-wheel (which egui turns horizontal) and middle drag pan.
     if resp.hovered() {
+        let (zoom, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
         let (v0, v1) = state.view;
         let span = v1 - v0;
-        let (zoom, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
-        if zoom != 1.0 {
-            if let Some(p) = resp.hover_pos() {
-                let anchor = v0 + ((p.x - rect.left()) / rect.width()) as f64 * span;
-                let new_span = (span / zoom as f64).clamp(0.002, duration);
-                let frac = (anchor - v0) / span;
-                let a = (anchor - frac * new_span).clamp(0.0, duration - new_span);
-                state.view = (a, a + new_span);
+        if let Some(p) = resp.hover_pos() {
+            let anchor = v0 + ((p.x - rect.left()) / rect.width()) as f64 * span;
+            if zoom != 1.0 {
+                state.zoom_at(anchor, zoom as f64, duration);
+            } else if scroll.y != 0.0 {
+                state.zoom_at(anchor, (scroll.y as f64 * 0.004).exp(), duration);
             }
-        } else if scroll.x != 0.0 || scroll.y != 0.0 {
-            let delta = if scroll.x != 0.0 { scroll.x } else { scroll.y };
-            let dt = -(delta / rect.width()) as f64 * span;
-            let a = (v0 + dt).clamp(0.0, duration - span);
-            state.view = (a, a + span);
         }
+        if scroll.x != 0.0 {
+            state.pan(-(scroll.x / rect.width()) as f64 * span, duration);
+        }
+    }
+    if resp.dragged_by(PointerButton::Middle) {
+        let (v0, v1) = state.view;
+        let dx = resp.drag_delta().x;
+        state.pan(-(dx / rect.width()) as f64 * (v1 - v0), duration);
+        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
     }
     let (v0, v1) = state.view;
     let span = v1 - v0;
     let x_of = |t: f64| rect.left() + ((t - v0) / span) as f32 * rect.width();
     let t_of = |x: f32| v0 + ((x - rect.left()) / rect.width()) as f64 * span;
 
-    // Envelope.
-    let channels = peaks.channels.max(1) as usize;
-    let lane_h = rect.height() / channels as f32;
-    let cols = rect.width().max(1.0) as usize;
-    let wave_color = Color32::from_rgb(96, 190, 214);
-    let dim = Color32::from_rgb(60, 110, 125);
-    for ch in 0..channels {
-        let mid = rect.top() + lane_h * (ch as f32 + 0.5);
-        let amp = lane_h * 0.47;
-        painter.hline(rect.x_range(), mid, Stroke::new(1.0, dim.gamma_multiply(0.5)));
-        for (i, (lo, hi)) in peaks.columns(ch, v0, v1, cols).into_iter().enumerate() {
-            let x = rect.left() + i as f32 + 0.5;
-            let y0 = mid - hi.clamp(-1.0, 1.0) * amp;
-            let y1 = mid - lo.clamp(-1.0, 1.0) * amp;
-            painter.line_segment([Pos2::new(x, y0), Pos2::new(x, y1.max(y0 + 1.0))], Stroke::new(1.0, wave_color));
-        }
+    // The wave itself.
+    let frames_per_px = span * peaks.sample_rate as f64 / rect.width().max(1.0) as f64;
+    match samples {
+        Some(pcm) if frames_per_px * (pcm.sample_rate as f64 / peaks.sample_rate as f64) <= SAMPLE_VIEW_FRAMES_PER_PX => draw_samples(&painter, pcm, rect, v0, v1, colors),
+        _ => draw_envelope(&painter, peaks, rect, v0, v1, colors),
     }
 
     // Selection, fades, handles.
     let hovered_hit = resp.hover_pos().and_then(|p| hit(state, lane, p, &x_of));
     let active = state.drag.or(hovered_hit);
     if let Some((a, b)) = state.selection {
-        let sel_color = Color32::from_rgb(255, 200, 90);
         let xa = x_of(a).clamp(rect.left(), rect.right());
         let xb = x_of(b).clamp(rect.left(), rect.right());
         let sel = Rect::from_min_max(Pos2::new(xa, rect.top()), Pos2::new(xb, rect.bottom()));
-        painter.rect_filled(sel, 0.0, Color32::from_rgba_unmultiplied(255, 200, 90, 36));
-        let edge = |which: Drag| if active == Some(which) { Stroke::new(2.5, Color32::WHITE) } else { Stroke::new(1.0, sel_color) };
+        painter.rect_filled(sel, 0.0, colors.selection.gamma_multiply(0.18));
+        let edge = |which: Drag| if active == Some(which) { Stroke::new(2.5, Color32::WHITE) } else { Stroke::new(1.0, colors.selection) };
         painter.vline(xa, rect.y_range(), edge(Drag::Start));
         painter.vline(xb, rect.y_range(), edge(Drag::End));
 
-        let fade_color = Color32::from_rgb(255, 230, 140);
         let curve = |from: f64, to: f64, rising: bool| {
-            let n = 24;
+            let n = 32;
             let pts: Vec<Pos2> = (0..=n)
                 .map(|i| {
                     let t = i as f32 / n as f32;
@@ -171,7 +258,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
                     Pos2::new(x_of(from + (to - from) * t as f64), rect.bottom() - g * rect.height())
                 })
                 .collect();
-            Shape::line(pts, Stroke::new(1.5, fade_color))
+            Shape::line(pts, Stroke::new(1.5, colors.fade))
         };
         if state.fade_in > 0.0 {
             painter.add(curve(a, a + state.fade_in, true));
@@ -183,7 +270,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
             let dir = if pointing_right { 1.0 } else { -1.0 };
             let top = lane.top() + 3.0;
             let bottom = lane.bottom() - 3.0;
-            let fill = if hot { Color32::WHITE } else { fade_color };
+            let fill = if hot { Color32::WHITE } else { colors.fade };
             vec![
                 Shape::convex_polygon(vec![Pos2::new(x, top), Pos2::new(x + dir * HANDLE_W, top), Pos2::new(x, bottom)], fill, Stroke::NONE),
                 Shape::Vec(Shape::dashed_line(&[Pos2::new(x, lane.bottom()), Pos2::new(x, rect.bottom())], Stroke::new(1.0, fill.gamma_multiply(0.6)), 4.0, 4.0)),
@@ -201,7 +288,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
     // Playhead.
     if let Some(t) = playhead {
         if t >= v0 && t <= v1 {
-            painter.vline(x_of(t), rect.y_range(), Stroke::new(1.5, Color32::from_rgb(255, 80, 80)));
+            painter.vline(x_of(t), rect.y_range(), Stroke::new(1.5, colors.playhead));
         }
     }
 
@@ -215,10 +302,10 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
             Align2::CENTER_BOTTOM,
             format!("{} – {}  ({})", fmt_time(a), fmt_time(b), fmt_time(b - a)),
             font,
-            Color32::from_rgb(255, 220, 140),
+            colors.fade,
         );
     }
-    painter.rect_stroke(full, 3.0, Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color), StrokeKind::Inside);
+    painter.rect_stroke(full, 4.0, Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color), StrokeKind::Inside);
 
     // Cursor.
     match active {
@@ -229,9 +316,9 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
         _ => {}
     }
 
-    // Interaction.
+    // Left-button interaction.
     let mut event = WaveEvent::None;
-    if resp.drag_started() {
+    if resp.drag_started_by(PointerButton::Primary) {
         if let Some(p) = resp.interact_pointer_pos() {
             let t = t_of(p.x).clamp(0.0, duration);
             state.drag = match hit(state, lane, p, &x_of) {
@@ -244,7 +331,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
             };
         }
     }
-    if resp.dragged() {
+    if resp.dragged_by(PointerButton::Primary) {
         if let (Some(drag), Some(p)) = (state.drag, resp.interact_pointer_pos()) {
             let t = t_of(p.x).clamp(0.0, duration);
             match drag {
@@ -283,7 +370,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
             state.clamp_fades();
         }
     }
-    if resp.drag_stopped() {
+    if resp.drag_stopped_by(PointerButton::Primary) {
         if let Some((a, b)) = state.selection {
             if b - a < 1e-4 {
                 state.selection = None;
@@ -291,14 +378,14 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, duration:
         }
         state.drag = None;
     }
-    if resp.clicked() {
+    if resp.clicked_by(PointerButton::Primary) {
         if let Some(p) = resp.interact_pointer_pos() {
             if !lane.contains(p) {
                 event = WaveEvent::Seek(t_of(p.x).clamp(0.0, duration));
             }
         }
     }
-    if resp.double_clicked() {
+    if resp.double_clicked_by(PointerButton::Primary) {
         state.view = (0.0, duration);
     }
     event
