@@ -29,6 +29,8 @@ pub struct Theme {
 pub const PAD: i8 = 12;
 /// Space between groups of controls.
 pub const GAP: f32 = 14.0;
+/// Inner margin of a card.
+pub const CARD_PAD: i8 = 16;
 /// Height of a row in the tree and the list.
 pub const ROW_H: f32 = 26.0;
 

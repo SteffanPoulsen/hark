@@ -91,7 +91,7 @@ impl App {
                 self.project_edit = None;
             }
             let theme = self.theme.clone();
-            egui::Panel::left("settings-nav").resizable(false).default_size(NAV_W).frame(egui::Frame::new().fill(theme.bg_deep).inner_margin(Margin::same(12))).show(ctx, |ui| {
+            egui::Panel::left("settings-nav").resizable(false).exact_size(NAV_W).frame(egui::Frame::new().fill(theme.bg_deep).inner_margin(Margin::same(12))).show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.add_space(4.0);
                 ui.label(RichText::new("Options").color(theme.muted).size(12.0));

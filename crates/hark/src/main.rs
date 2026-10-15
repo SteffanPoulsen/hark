@@ -505,7 +505,7 @@ impl App {
         let secs = req.selection.map(|s| s.end_secs - s.start_secs).unwrap_or(info.duration_secs);
         let channels = if preset.mono.is_some() { 1 } else { info.channels };
         let rate = preset.sample_rate.unwrap_or(info.sample_rate);
-        let mut out = format!("{} · {} ch · {:.1} kHz · {} bit", waveform::fmt_time(secs), channels, rate as f64 / 1000.0, preset.bits);
+        let mut out = format!("{} · {} ch · {:.1}k · {} bit", waveform::fmt_time(secs), channels, rate as f64 / 1000.0, preset.bits);
         if preset.format == hark_core::config::OutputFormat::Wav {
             let bytes = secs * rate as f64 * channels as f64 * preset.bits as f64 / 8.0;
             out.push_str(&if bytes >= 1e6 { format!(" · ≈ {:.1} MB", bytes / 1e6) } else { format!(" · ≈ {:.0} KB", bytes / 1e3) });
@@ -1093,12 +1093,20 @@ impl App {
         }
     }
 
+    /// Two cards side by side: the file with its waveform and transport, and the export.
     fn ui_bottom(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::right("export").resizable(false).default_size(EXPORT_CARD_W).frame(egui::Frame::new().inner_margin(Margin { left: theme::PAD, right: 0, top: 0, bottom: 0 })).show(ui, |ui| {
-            self.ui_export_card(ui);
+        let card = egui::Frame::new().fill(self.theme.surface).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(theme::CARD_PAD));
+        egui::Panel::right("export").resizable(false).exact_size(EXPORT_CARD_W).frame(egui::Frame::new().inner_margin(Margin { left: theme::PAD, right: 0, top: 0, bottom: 0 })).show(ui, |ui| {
+            card.show(ui, |ui| {
+                ui.set_min_height(ui.available_height());
+                self.ui_export_card(ui);
+            });
         });
         egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(Margin::ZERO)).show(ui, |ui| {
-            self.ui_wave_column(ui);
+            card.show(ui, |ui| {
+                ui.set_min_height(ui.available_height());
+                self.ui_wave_column(ui);
+            });
         });
     }
 
@@ -1281,34 +1289,60 @@ impl App {
         });
     }
 
-    /// The card fills its panel: preset and target at the top, the export button, then the
-    /// session's exports, each a click away from its folder.
+    /// Inside the export card: the preset, a labelled column of what will be written, the
+    /// button, and the session's exports, each a click away from its folder.
     fn ui_export_card(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme.clone();
-        egui::Frame::new().fill(theme.surface).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(14)).show(ui, |ui| {
-            ui.set_min_height(ui.available_height());
-            ui.spacing_mut().item_spacing.y = 6.0;
-            let small = |text: String, color: Color32| egui::Label::new(RichText::new(text).color(color).size(12.5)).truncate();
+        ui.spacing_mut().item_spacing.y = 6.0;
+        let small = |text: String, color: Color32| egui::Label::new(RichText::new(text).color(color).size(12.5)).truncate();
+        let key = |ui: &mut egui::Ui, text: &str| {
+            ui.add_sized(egui::vec2(52.0, 20.0), egui::Label::new(RichText::new(text).color(theme.muted).size(12.5)));
+        };
+        let rule = |ui: &mut egui::Ui| {
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+        };
 
-            ui.horizontal(|ui| {
-                ui.label(theme::semibold("Export").size(15.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    egui::ComboBox::from_id_salt("preset").width(150.0).selected_text(&self.preset).show_ui(ui, |ui| {
-                        for name in self.config.presets.keys().cloned().collect::<Vec<_>>() {
-                            ui.selectable_value(&mut self.preset, name.clone(), name);
-                        }
-                    });
+        ui.horizontal(|ui| {
+            ui.label(theme::semibold("Export").size(15.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                egui::ComboBox::from_id_salt("preset").width(150.0).selected_text(&self.preset).show_ui(ui, |ui| {
+                    for name in self.config.presets.keys().cloned().collect::<Vec<_>>() {
+                        ui.selectable_value(&mut self.preset, name.clone(), name);
+                    }
                 });
             });
-            if let Some(p) = self.config.preset(&self.preset).cloned() {
-                for l in preset_summary(&p) {
-                    ui.add(small(l, theme.muted));
-                }
+        });
+        if let Some(p) = self.config.preset(&self.preset).cloned() {
+            for l in preset_summary(&p) {
+                ui.add(small(l, theme.muted));
             }
+        }
+        rule(ui);
 
-            ui.add_space(theme::GAP - 6.0);
-            let out = self.config.output_root().map(|p| p.display().to_string());
-            let folder = egui::Button::new(theme::icon_text(icons::FOLDER, out.as_deref().unwrap_or("choose an output folder…"), 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(ui.available_width(), 28.0)).truncate();
+        let req = self.export_request();
+        let file = self.selected.map(|i| self.files[i].clone());
+        let (target, span, outcome) = match (&req, &file) {
+            (Some(Ok(r)), Some(f)) => {
+                let rel = r.output_path();
+                let rel = rel.strip_prefix(&r.output_root).map(|p| p.to_path_buf()).unwrap_or(rel);
+                let span = match r.selection {
+                    Some(s) => format!("{} – {}", waveform::fmt_time(s.start_secs), waveform::fmt_time(s.end_secs)),
+                    None => "whole file".into(),
+                };
+                (rel.display().to_string(), span, self.export_outcome(r, f))
+            }
+            _ => ("…".into(), "whole file".into(), "…".into()),
+        };
+        let stem = file.as_ref().and_then(|f| f.path.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "file name".into());
+        let out = self.config.output_root().map(|p| p.display().to_string());
+        let have = file.is_some();
+        // Grid cells report an unbounded width, so the value column is sized here, outside.
+        let value_w = ui.available_width() - 52.0 - 8.0;
+        egui::Grid::new("export-grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            key(ui, "folder");
+            let folder = egui::Button::new(theme::icon_text(icons::FOLDER, out.as_deref().unwrap_or("choose…"), 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(value_w, 26.0)).truncate();
             let folder = ui.add(folder);
             let folder = match &out {
                 Some(o) => folder.on_hover_text(o),
@@ -1320,78 +1354,68 @@ impl App {
                     let _ = self.config.save();
                 }
             }
-
-            let req = self.export_request();
-            let file = self.selected.map(|i| self.files[i].clone());
-            let (target, span, outcome) = match (&req, &file) {
-                (Some(Ok(r)), Some(f)) => {
-                    let rel = r.output_path();
-                    let rel = rel.strip_prefix(&r.output_root).map(|p| p.to_path_buf()).unwrap_or(rel);
-                    let span = match r.selection {
-                        Some(s) => format!("{} – {}", waveform::fmt_time(s.start_secs), waveform::fmt_time(s.end_secs)),
-                        None => "whole file".into(),
-                    };
-                    (format!("→ {}", rel.display()), span, self.export_outcome(r, f))
-                }
-                _ => ("→ …".into(), "whole file".into(), "–".into()),
-            };
-            let stem = file.as_ref().and_then(|f| f.path.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "file name".into());
-            ui.add_enabled_ui(file.is_some(), |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("name").color(theme.muted).size(12.5));
-                    ui.add(egui::TextEdit::singleline(&mut self.export_name).hint_text(stem).desired_width(ui.available_width()));
-                });
-                ui.add(small(target, theme.text));
-                ui.horizontal(|ui| {
-                    ui.add(small(span, theme.muted));
+            ui.end_row();
+            key(ui, "name");
+            ui.add_enabled(have, egui::TextEdit::singleline(&mut self.export_name).hint_text(stem).desired_width(value_w));
+            ui.end_row();
+            key(ui, "to");
+            ui.add_enabled(have, small(target, theme.text));
+            ui.end_row();
+            key(ui, "range");
+            ui.add_enabled_ui(have, |ui| {
+                ui.allocate_ui_with_layout(egui::vec2(value_w, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(small(span, theme.text));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.checkbox(&mut self.overwrite, RichText::new("overwrite").size(12.5));
                     });
                 });
-                ui.add(small(outcome, theme.muted));
             });
-            if let Some(Err(e)) = &req {
-                ui.add(small(e.clone(), theme.warn));
-            }
-            if let Some(Err(e)) = &self.last_export {
-                ui.add(small(e.clone(), theme.err));
-            }
+            ui.end_row();
+            key(ui, "writes");
+            ui.add_enabled(have, small(outcome, theme.text));
+            ui.end_row();
+        });
+        if let Some(Err(e)) = &req {
+            ui.add(small(e.clone(), theme.warn));
+        }
+        if let Some(Err(e)) = &self.last_export {
+            ui.add(small(e.clone(), theme.err));
+        }
+        rule(ui);
 
-            ui.add_space(theme::GAP - 6.0);
-            let can = matches!(req, Some(Ok(_)));
-            let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 15.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), if can { Color32::WHITE } else { theme.muted }))
-                .fill(if can { theme.accent } else { theme.overlay })
-                .corner_radius(CornerRadius::same(6))
-                .min_size(egui::vec2(ui.available_width(), 40.0));
-            ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 40.0), egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
-                if ui.add_enabled(can, button).on_hover_text("E").clicked() {
-                    self.export();
-                }
-            });
+        let can = matches!(req, Some(Ok(_)));
+        let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 15.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), if can { Color32::WHITE } else { theme.muted }))
+            .fill(if can { theme.accent } else { theme.overlay })
+            .corner_radius(CornerRadius::same(6))
+            .min_size(egui::vec2(ui.available_width(), 40.0));
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 40.0), egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+            if ui.add_enabled(can, button).on_hover_text("E").clicked() {
+                self.export();
+            }
+        });
+        rule(ui);
 
-            ui.add_space(theme::GAP - 6.0);
-            ui.label(RichText::new("exported this session").color(theme.muted).size(12.0));
-            let root = self.config.output_root().map(|p| p.to_path_buf());
-            let mut show: Option<PathBuf> = None;
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                if self.recent_exports.is_empty() {
-                    ui.add(small("nothing yet".into(), theme.muted.gamma_multiply(0.7)));
-                }
-                for (p, gain) in &self.recent_exports {
-                    let shown = root.as_ref().and_then(|r| p.strip_prefix(r).ok()).map(|x| x.display().to_string()).unwrap_or_else(|| p.display().to_string());
-                    let row = egui::Button::new(theme::icon_text(icons::CHECK, &shown, 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).frame(false).truncate().min_size(egui::vec2(ui.available_width(), 24.0));
-                    if ui.add(row).on_hover_text(format!("{}\n{gain}\nclick to show in folder", p.display())).clicked() {
-                        show = Some(p.clone());
-                    }
-                }
-            });
-            if let Some(p) = show {
-                if let Err(e) = reveal(&p) {
-                    self.set_status(format!("show in folder: {e}"), true);
+        ui.label(RichText::new("Exported this session").color(theme.muted).size(12.5));
+        let root = self.config.output_root().map(|p| p.to_path_buf());
+        let mut show: Option<PathBuf> = None;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            if self.recent_exports.is_empty() {
+                ui.add(small("nothing yet".into(), theme.muted.gamma_multiply(0.6)));
+            }
+            for (p, gain) in &self.recent_exports {
+                let shown = root.as_ref().and_then(|r| p.strip_prefix(r).ok()).map(|x| x.display().to_string()).unwrap_or_else(|| p.display().to_string());
+                let row = egui::Button::new(theme::icon_text(icons::CHECK, &shown, 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).frame(false).truncate().min_size(egui::vec2(ui.available_width(), 24.0));
+                if ui.add(row).on_hover_text(format!("{}\n{gain}\nclick to show in folder", p.display())).clicked() {
+                    show = Some(p.clone());
                 }
             }
         });
+        if let Some(p) = show {
+            if let Err(e) = reveal(&p) {
+                self.set_status(format!("show in folder: {e}"), true);
+            }
+        }
     }
 
     fn switch_project(&mut self, name: &str) {
@@ -1593,7 +1617,7 @@ impl eframe::App for App {
         egui::Panel::bottom("status").frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(pad, 4))).show(ui, |ui| {
             self.ui_status(ui);
         });
-        egui::Panel::bottom("bottom").resizable(true).default_size(350.0).frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 8 })).show(ui, |ui| {
+        egui::Panel::bottom("bottom").resizable(true).default_size(440.0).frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 8 })).show(ui, |ui| {
             self.ui_bottom(ui);
         });
         egui::Panel::left("tree").resizable(true).default_size(250.0).frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin { left: 4, right: 4, top: 8, bottom: 8 })).show(ui, |ui| {
