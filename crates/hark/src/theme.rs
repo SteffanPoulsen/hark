@@ -62,10 +62,10 @@ impl Default for Theme {
             line: hex("#3a3a3a").unwrap(),
             muted: hex("#9a9a9a").unwrap(),
             text: hex("#dcddde").unwrap(),
-            accent: hex("#d08a62").unwrap(),
-            accent_soft: hex("#3b2b22").unwrap(),
-            accent2: hex("#6fb3a2").unwrap(),
-            accent2_soft: hex("#1f3630").unwrap(),
+            accent: hex("#d98a56").unwrap(),
+            accent_soft: hex("#3d2a1f").unwrap(),
+            accent2: hex("#5fbfa8").unwrap(),
+            accent2_soft: hex("#1c3a32").unwrap(),
             ok: hex("#6fbf73").unwrap(),
             warn: hex("#e8c75c").unwrap(),
             err: hex("#f05a5a").unwrap(),
@@ -266,7 +266,7 @@ impl egui::Widget for Check<'_> {
         }
         if ui.is_rect_visible(rect) {
             let visuals = ui.style().interact(&response);
-            let accent = ui.visuals().hyperlink_color;
+            let accent = ui.visuals().selection.stroke.color;
             let square = egui::Rect::from_center_size(egui::pos2(rect.left() + BOX / 2.0, rect.center().y), egui::Vec2::splat(BOX));
             let (fill, stroke) = if *self.on {
                 (accent, Stroke::new(1.0, accent))
