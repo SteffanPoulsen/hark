@@ -194,6 +194,9 @@ impl Theme {
             s.spacing.window_margin = Margin::same(12);
             s.spacing.menu_margin = Margin::same(8);
             s.spacing.indent = 16.0;
+            s.spacing.icon_width = 18.0;
+            s.spacing.icon_width_inner = 10.0;
+            s.spacing.icon_spacing = 8.0;
             s.spacing.slider_width = 120.0;
             s.interaction.selectable_labels = false;
         });
@@ -225,6 +228,58 @@ pub fn tool_button_widget(icon: &str, label: &str) -> egui::Button<'static> {
         icon_text(icon, label, 14.0, FontFamily::Proportional, Color32::PLACEHOLDER).into()
     };
     egui::Button::new(text).min_size(egui::vec2(30.0, 28.0))
+}
+
+/// A check box drawn to be seen: a bordered square, filled with the accent and ticked when on.
+pub struct Check<'a> {
+    on: &'a mut bool,
+    text: egui::WidgetText,
+}
+
+impl<'a> Check<'a> {
+    pub fn new(on: &'a mut bool, text: impl Into<egui::WidgetText>) -> Self {
+        Check { on, text: text.into() }
+    }
+}
+
+impl egui::Widget for Check<'_> {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        const BOX: f32 = 18.0;
+        const GAP: f32 = 8.0;
+        let galley = self.text.into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button);
+        let text_w = if galley.is_empty() { 0.0 } else { galley.size().x + GAP };
+        let size = egui::vec2(BOX + text_w, BOX.max(galley.size().y).max(ui.spacing().interact_size.y));
+        let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+        if response.clicked() {
+            *self.on = !*self.on;
+            response.mark_changed();
+        }
+        if ui.is_rect_visible(rect) {
+            let visuals = ui.style().interact(&response);
+            let accent = ui.visuals().selection.stroke.color;
+            let square = egui::Rect::from_center_size(egui::pos2(rect.left() + BOX / 2.0, rect.center().y), egui::Vec2::splat(BOX));
+            let (fill, stroke) = if *self.on {
+                (accent, Stroke::new(1.0, accent))
+            } else {
+                (visuals.bg_fill, Stroke::new(1.0, if response.hovered() { visuals.fg_stroke.color } else { ui.visuals().widgets.noninteractive.bg_stroke.color }))
+            };
+            ui.painter().rect(square, CornerRadius::same(4), fill, stroke, egui::StrokeKind::Inside);
+            if *self.on {
+                let c = square.center();
+                let tick = [egui::pos2(c.x - 4.5, c.y + 0.5), egui::pos2(c.x - 1.5, c.y + 3.5), egui::pos2(c.x + 4.5, c.y - 3.5)];
+                ui.painter().add(egui::Shape::line(tick.to_vec(), Stroke::new(2.0, Color32::from_rgb(0x1e, 0x1e, 0x1e))));
+            }
+            if !galley.is_empty() {
+                let pos = egui::pos2(square.right() + GAP, rect.center().y - galley.size().y / 2.0);
+                ui.painter().galley(pos, galley, visuals.text_color());
+            }
+        }
+        response
+    }
+}
+
+pub fn check(ui: &mut egui::Ui, on: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response {
+    ui.add(Check::new(on, text))
 }
 
 pub fn tool_button(ui: &mut egui::Ui, icon: &str, label: &str) -> egui::Response {

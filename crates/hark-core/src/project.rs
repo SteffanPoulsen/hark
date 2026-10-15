@@ -16,6 +16,9 @@ pub struct Project {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_root: Option<PathBuf>,
+    /// The folder under the output root the last export went to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_folder: Option<PathBuf>,
     /// Library folders this project cares about; empty means the whole library.
     #[serde(default)]
     pub scope: Vec<PathBuf>,
@@ -23,7 +26,7 @@ pub struct Project {
 
 impl Project {
     pub fn new(name: &str) -> Project {
-        Project { id: fresh_id(), name: name.to_string(), output_root: None, scope: Vec::new() }
+        Project { id: fresh_id(), name: name.to_string(), output_root: None, export_folder: None, scope: Vec::new() }
     }
 
     /// Reads a project file; the output folder comes back absolute.

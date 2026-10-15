@@ -11,7 +11,7 @@ Linux (Wayland) first, Windows supported from the same codebase. No accounts, no
 - **Mark** favorites and tags from the keyboard or a right-click menu on any file, which also shows the file in its folder or copies its path. Tags are yours to define, each with a color, edited in the settings window. Marks follow a file through renames because they key on content, not path. The library itself is read-only: hark never renames, moves or deletes a source file.
 - **Projects** are `.hark` files you keep beside the game: an output folder (stored relative to the file), a library scope (the folders that matter for this game), and favorites of their own. With no project open, hark works on the whole library with a default output folder. Switch, open or create projects from the top bar; tags and presets stay global.
 - **Select** a region on the waveform, drag fade handles for fade in and out, zoom with the wheel.
-- **Export** through a preset: WAV or FLAC, bit depth with dither, resampling, mono downmix, trim silence, peak or EBU R128 loudness normalisation with a true-peak ceiling, and a path template such as `{tag}/{name}` under your output folder. The card starts from a preset and lets you change format, rate, channels and level for this export (the dropdown then reads "custom", with a way to keep the values as a new preset), shows where the file lands with a one-off name, and the last export is a click away from its folder. Presets are edited on their own settings page.
+- **Export** through a preset: WAV or FLAC, bit depth with dither, resampling, mono downmix, trim silence, peak or EBU R128 loudness normalisation with a true-peak ceiling, and a file name template such as `{name}` or `{relpath}/{name}`. The card starts from a preset and lets you change format, rate, channels and level for this export (the dropdown then reads "Custom", with a way to keep the values as a new preset). The file goes into a folder you pick under the output folder, from a list of the folders that exist there or the native dialog to create one; the pick is remembered per project. Tags never decide where a file goes. Presets are edited on their own settings page.
 - **Remember**: every export embeds its origin, in a `hark` RIFF chunk plus a BWF `bext` description for WAV and an APPLICATION block plus Vorbis comment for FLAC. Months later, `hark-cli inspect` on the file tells you the source path, the pack, the selection, the fades, the preset and the measured gain. `hark-cli reexport` runs that recipe again with changes.
 - **Script it**: `hark-cli` exposes the same core with no window, with `--json` on everything, so an agent or a build step can search, mark, analyse and export.
 
@@ -58,7 +58,7 @@ hark-cli projects scope add ~/Audio/Libraries/Footsteps
 hark-cli tags add footstep --color '#79b86a'
 hark-cli presets add sfx-quiet --from sfx
 hark-cli presets set sfx-quiet --normalize lufs --target=-20 --ceiling=-1 --rate 48000
-hark-cli export "Footsteps/gravel_03.wav" --preset sfx --in 0.2 --out 1.4 --fade-out 0.1
+hark-cli export "Footsteps/gravel_03.wav" --preset sfx --into sfx/footsteps --in 0.2 --out 1.4 --fade-out 0.1
 hark-cli inspect ~/Projects/game/Assets/Audio/sfx/gravel_03.wav
 hark-cli reexport ~/Projects/game/Assets/Audio/sfx/*.wav --preset sfx
 ```

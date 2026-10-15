@@ -329,6 +329,9 @@ struct ExportArgs {
     fade_in: f64,
     #[arg(long, default_value_t = 0.0)]
     fade_out: f64,
+    /// Folder under the output root to write into; remembered for the next export.
+    #[arg(long)]
+    into: Option<PathBuf>,
     /// Full output path, replacing the preset's template.
     #[arg(long)]
     to: Option<PathBuf>,
@@ -804,6 +807,14 @@ fn run() -> Result<()> {
             }
             req.fade_in_secs = a.fade_in;
             req.fade_out_secs = a.fade_out;
+            if let Some(into) = &a.into {
+                let into = into.strip_prefix(&req.output_root).map(|p| p.to_path_buf()).unwrap_or_else(|_| into.clone());
+                if into.is_absolute() {
+                    return Err(anyhow!("--into must be a folder under the output root"));
+                }
+                req.subfolder = Some(into.clone());
+                config.set_export_folder(Some(into))?;
+            }
             req.output_path = a.to;
             req.overwrite = a.overwrite;
             let result = hark_core::export::run(&req)?;

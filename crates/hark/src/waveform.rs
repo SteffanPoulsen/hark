@@ -288,7 +288,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
     for s in handle(x_of(b - state.fade_out), false, active == Some(Drag::FadeOut)) {
         painter.add(s);
     }
-    painter.text(lane.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, "fades", FontId::proportional(10.0), visuals.weak_text_color());
+    painter.text(lane.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, "Fades", FontId::proportional(10.0), visuals.weak_text_color());
 
     // Playhead.
     if let Some(t) = playhead {

@@ -32,9 +32,9 @@ impl std::str::FromStr for FadeShape {
 impl FadeShape {
     pub fn name(self) -> &'static str {
         match self {
-            FadeShape::Linear => "linear",
-            FadeShape::EqualPower => "equal power",
-            FadeShape::Logarithmic => "logarithmic",
+            FadeShape::Linear => "Linear",
+            FadeShape::EqualPower => "Equal power",
+            FadeShape::Logarithmic => "Logarithmic",
         }
     }
 
@@ -83,10 +83,10 @@ impl std::str::FromStr for DownmixMode {
 impl DownmixMode {
     pub fn name(self) -> &'static str {
         match self {
-            DownmixMode::Average => "mono, average",
-            DownmixMode::SumMinus3 => "mono, sum −3 dB",
-            DownmixMode::Left => "left channel",
-            DownmixMode::Right => "right channel",
+            DownmixMode::Average => "Mono, average",
+            DownmixMode::SumMinus3 => "Mono, sum −3 dB",
+            DownmixMode::Left => "Left channel",
+            DownmixMode::Right => "Right channel",
         }
     }
 }

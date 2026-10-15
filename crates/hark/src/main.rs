@@ -336,7 +336,7 @@ impl App {
         let files = match self.db.search(&q) {
             Ok(f) => f,
             Err(e) => {
-                self.set_status(format!("library: {e:#}"), true);
+                self.set_status(format!("Library: {e:#}"), true);
                 Vec::new()
             }
         };
@@ -471,7 +471,7 @@ impl App {
                 self.refresh_record(i);
                 self.fav_count = self.db.favorite_count(self.db.project()).unwrap_or(0);
             }
-            Err(e) => self.set_status(format!("favorite: {e:#}"), true),
+            Err(e) => self.set_status(format!("Favorite: {e:#}"), true),
         }
     }
 
@@ -486,7 +486,7 @@ impl App {
         let on = !self.files[i].tags.iter().any(|t| t == tag);
         match self.db.ensure_hash(&path).and_then(|h| self.db.set_tag(&h, tag, on)) {
             Ok(()) => self.refresh_record(i),
-            Err(e) => self.set_status(format!("tag: {e:#}"), true),
+            Err(e) => self.set_status(format!("Tag: {e:#}"), true),
         }
     }
 
@@ -531,10 +531,10 @@ impl App {
     fn export(&mut self) {
         match self.export_request() {
             Some(Ok(req)) => {
-                self.set_status(format!("exporting {}", req.output_path().display()), false);
+                self.set_status(format!("Exporting {}", req.output_path().display()), false);
                 self.worker.send(Job::Export(req));
             }
-            Some(Err(e)) => self.set_status(format!("export: {e}"), true),
+            Some(Err(e)) => self.set_status(format!("Export: {e}"), true),
             None => {}
         }
     }
@@ -577,9 +577,9 @@ impl App {
                             gain.push_str(w);
                         }
                         let shown = self.config.output_root().and_then(|root| r.output.strip_prefix(root).ok()).unwrap_or(&r.output);
-                        self.set_status(format!("exported {}  ·  {gain}", shown.display()), false);
+                        self.set_status(format!("Exported {}  ·  {gain}", shown.display()), false);
                     }
-                    Err(e) => self.set_status(format!("export failed: {e}"), true),
+                    Err(e) => self.set_status(format!("Export failed: {e}"), true),
                 },
                 Done::Scanned(reports) => {
                     self.scanning = false;
@@ -717,7 +717,7 @@ impl App {
             box_frame.show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.label(theme::icon(icons::MAGNIFYING_GLASS).color(self.theme.muted));
-                let search = ui.add(egui::TextEdit::singleline(&mut self.search).id(self.search_id).frame(egui::Frame::NONE).hint_text("search the library").desired_width(240.0));
+                let search = ui.add(egui::TextEdit::singleline(&mut self.search).id(self.search_id).frame(egui::Frame::NONE).hint_text("Search the library").desired_width(240.0));
                 if search.changed() {
                     self.list_dirty = true;
                 }
@@ -733,7 +733,7 @@ impl App {
             });
             self.ui_filter(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if Self::icon_button(ui, icons::GEAR, "", self.settings_open).on_hover_text("settings").clicked() {
+                if Self::icon_button(ui, icons::GEAR, "", self.settings_open).on_hover_text("Settings").clicked() {
                     self.settings_open = !self.settings_open;
                 }
             });
@@ -760,7 +760,7 @@ impl App {
 
     fn ui_filter(&mut self, ui: &mut egui::Ui) {
         let n = self.filter.count();
-        let label = if n == 0 { "filter".to_string() } else { format!("filter · {n}") };
+        let label = if n == 0 { "Filter".to_string() } else { format!("Filter · {n}") };
         let button = Self::icon_button(ui, icons::FUNNEL, &label, n > 0);
         let muted = self.theme.muted;
         let heading = |ui: &mut egui::Ui, text: &str| {
@@ -768,35 +768,39 @@ impl App {
             ui.label(RichText::new(text).color(muted).size(12.0));
         };
         let mut changed = false;
-        egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(200.0).show(|ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
-            changed |= ui.checkbox(&mut self.filter.favorites, theme::icon_text(icons::STAR, "favorites", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).changed();
-            heading(ui, "tags");
+        let popup = egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(220.0);
+        if std::env::var_os("HARK_OPEN_POPUP").map(|v| v == "filter").unwrap_or(false) {
+            egui::Popup::open_id(ui.ctx(), popup.get_id());
+        }
+        popup.show(|ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            changed |= theme::check(ui, &mut self.filter.favorites, theme::icon_text(icons::STAR, "Favorites", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).changed();
+            heading(ui, "Tags");
             for (k, t) in self.config.tags.clone().iter().enumerate() {
                 let mut on = self.filter.tags.contains(&t.name);
-                if ui.checkbox(&mut on, RichText::new(&t.name).color(self.theme.color_of(k, Some(t)).gamma_multiply(1.3).to_opaque())).changed() {
+                if theme::check(ui, &mut on, RichText::new(&t.name).color(self.theme.color_of(k, Some(t)).gamma_multiply(1.3).to_opaque())).changed() {
                     toggle_in(&mut self.filter.tags, t.name.clone());
                     changed = true;
                 }
             }
-            heading(ui, "file type");
+            heading(ui, "File type");
             for (name, _) in FILE_TYPES {
                 let mut on = self.filter.types.contains(&name);
-                if ui.checkbox(&mut on, name).changed() {
+                if theme::check(ui, &mut on, name).changed() {
                     toggle_in(&mut self.filter.types, name);
                     changed = true;
                 }
             }
-            heading(ui, "channels");
+            heading(ui, "Channels");
             for c in ChannelClass::ALL {
                 let mut on = self.filter.channels.contains(&c);
-                if ui.checkbox(&mut on, c.name()).changed() {
+                if theme::check(ui, &mut on, c.name()).changed() {
                     toggle_in(&mut self.filter.channels, c);
                     changed = true;
                 }
             }
             ui.add_space(4.0);
-            if ui.add_enabled(n > 0, egui::Button::new("clear")).clicked() {
+            if ui.add_enabled(n > 0, egui::Button::new("Clear")).clicked() {
                 self.filter.clear();
                 changed = true;
             }
@@ -812,11 +816,11 @@ impl App {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let w = (ui.available_width() - 6.0) / 2.0;
-                if ui.add(theme::tool_button_widget(icons::FOLDER_PLUS, "add folder").min_size(egui::vec2(w, 30.0))).on_hover_text("add a library folder").clicked() {
+                if ui.add(theme::tool_button_widget(icons::FOLDER_PLUS, "Add folder").min_size(egui::vec2(w, 30.0))).on_hover_text("Add a library folder").clicked() {
                     self.add_root();
                 }
                 let can = !self.scanning && !self.config.roots.is_empty();
-                if ui.add_enabled(can, theme::tool_button_widget(icons::ARROWS_CLOCKWISE, "rescan").min_size(egui::vec2(w, 30.0))).on_hover_text("walk the library folders again").clicked() {
+                if ui.add_enabled(can, theme::tool_button_widget(icons::ARROWS_CLOCKWISE, "Rescan").min_size(egui::vec2(w, 30.0))).on_hover_text("Walk the library folders again").clicked() {
                     self.rescan();
                 }
             });
@@ -919,7 +923,7 @@ impl App {
     fn ui_list(&mut self, ui: &mut egui::Ui) {
         let n = self.files.len();
         let heading = if !self.search.trim().is_empty() {
-            if n >= SEARCH_LIMIT { format!("first {n} results") } else { format!("{n} results") }
+            if n >= SEARCH_LIMIT { format!("First {n} results") } else { format!("{n} results") }
         } else {
             match &self.location {
                 Some(Location::Folder(d)) => {
@@ -930,7 +934,7 @@ impl App {
                     }
                 }
                 Some(Location::Favorites) => format!("Favorites of {}   ·   {n} files", self.config.project_name()),
-                None => "pick a folder".to_string(),
+                None => "Pick a folder".to_string(),
             }
         };
         ui.horizontal(|ui| {
@@ -979,7 +983,7 @@ impl App {
         };
         builder
             .header(24.0, |mut h| {
-                for title in ["", "name", "tags", "length", "ch", "rate", "bits", "codec", "LUFS"] {
+                for title in ["", "Name", "Tags", "Length", "Ch", "Rate", "Bits", "Codec", "LUFS"] {
                     h.col(|ui| {
                         ui.label(RichText::new(title).color(theme.muted).size(12.0));
                     });
@@ -1073,12 +1077,12 @@ impl App {
             FileAction::Tag(t) => self.toggle_tag_of(i, &t),
             FileAction::Reveal => {
                 if let Err(e) = reveal(&f.path) {
-                    self.set_status(format!("show in folder: {e}"), true);
+                    self.set_status(format!("Show in folder: {e}"), true);
                 }
             }
             FileAction::CopyPath => {
                 let p = f.path.display().to_string();
-                self.set_status(format!("copied {p}"), false);
+                self.set_status(format!("Copied {p}"), false);
             }
         }
     }
@@ -1132,10 +1136,10 @@ impl App {
             } else if let Some(i) = self.selected {
                 if self.pending.contains(&self.files[i].path) {
                     ui.spinner();
-                    ui.label(RichText::new("loading").color(self.theme.muted));
+                    ui.label(RichText::new("Loading").color(self.theme.muted));
                 }
             } else {
-                ui.label(RichText::new("no file").color(self.theme.muted));
+                ui.label(RichText::new("No file").color(self.theme.muted));
             }
         });
         if chips_below {
@@ -1182,7 +1186,7 @@ impl App {
         let file = self.files[i].clone();
         let mut action = None;
         let menu_button = |ui: &mut egui::Ui, action: &mut Option<FileAction>| {
-            let b = theme::tool_button(ui, icons::TAG, "tags").on_hover_text("favorite, tags and more; also on right-click of a row");
+            let b = theme::tool_button(ui, icons::TAG, "Tags").on_hover_text("Favorite, tags and more; also on right-click of a row");
             egui::Popup::menu(&b).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                 *action = file_menu(ui, &file, &defs, &self.theme);
             });
@@ -1219,24 +1223,24 @@ impl App {
                 ui.add_space(theme::GAP - ui.spacing().item_spacing.x);
             };
             let play = if playing { icons::STOP } else { icons::PLAY };
-            if icon_btn(ui, play, false).on_hover_text("play / stop (Space)").clicked() {
+            if icon_btn(ui, play, false).on_hover_text("Play / stop (Space)").clicked() {
                 if playing {
                     self.stop();
                 } else {
                     self.play(None);
                 }
             }
-            if icon_btn(ui, icons::REPEAT, self.loop_on).on_hover_text("loop (L)").clicked() {
+            if icon_btn(ui, icons::REPEAT, self.loop_on).on_hover_text("Loop (L)").clicked() {
                 self.loop_on = !self.loop_on;
             }
-            if ui.add(egui::Button::new("auto").selected(self.autoplay).min_size(egui::vec2(0.0, CONTROL_H))).on_hover_text("autoplay on selection (A)").clicked() {
+            if ui.add(egui::Button::new("Auto").selected(self.autoplay).min_size(egui::vec2(0.0, CONTROL_H))).on_hover_text("Autoplay on selection (A)").clicked() {
                 self.autoplay = !self.autoplay;
             }
             let t = playhead.unwrap_or(0.0);
             ui.add_sized(egui::vec2(52.0, CONTROL_H), egui::Label::new(RichText::new(waveform::fmt_time(t)).monospace().color(if playing { self.theme.text } else { self.theme.muted })));
             ui.scope(|ui| {
                 ui.spacing_mut().slider_width = 90.0;
-                ui.add(egui::Slider::new(&mut self.gain_db, -36.0..=12.0).suffix(" dB").show_value(true).trailing_fill(false)).on_hover_text("audition gain");
+                ui.add(egui::Slider::new(&mut self.gain_db, -36.0..=12.0).suffix(" dB").show_value(true).trailing_fill(false)).on_hover_text("Audition gain");
             });
             if ui.input(|i| i.pointer.any_released()) {
                 if let Some(p) = &self.player {
@@ -1244,7 +1248,7 @@ impl App {
                 }
             }
             group(ui);
-            ui.label(RichText::new("sel").color(self.theme.muted));
+            ui.label(RichText::new("Sel").color(self.theme.muted));
             let mut sel = self.wave.selection.unwrap_or((0.0, 0.0));
             let had = self.wave.selection.is_some();
             let a = ui.add(secs_field(&mut sel.0, duration));
@@ -1252,27 +1256,27 @@ impl App {
             if (a.changed() || b.changed()) && (had || sel.1 > sel.0) {
                 self.wave.selection = if sel.1 > sel.0 { Some(sel) } else { None };
             }
-            if icon_btn(ui, icons::X, false).on_hover_text("clear selection (Del)").clicked() {
+            if icon_btn(ui, icons::X, false).on_hover_text("Clear selection (Del)").clicked() {
                 self.wave.selection = None;
             }
-            if icon_btn(ui, icons::MAGNIFYING_GLASS_PLUS, false).on_hover_text("zoom to selection (Z)").clicked() {
+            if icon_btn(ui, icons::MAGNIFYING_GLASS_PLUS, false).on_hover_text("Zoom to selection (Z)").clicked() {
                 self.wave.zoom_to_selection();
             }
             group(ui);
-            ui.label(RichText::new("fade").color(self.theme.muted));
+            ui.label(RichText::new("Fade").color(self.theme.muted));
             ui.add(secs_field(&mut self.wave.fade_in, duration));
             ui.add(secs_field(&mut self.wave.fade_out, duration));
             egui::ComboBox::from_id_salt("fade-shape")
                 .width(64.0)
                 .selected_text(match self.wave.fade_shape {
-                    hark_core::pcm::FadeShape::EqualPower => "eq",
-                    hark_core::pcm::FadeShape::Linear => "lin",
-                    hark_core::pcm::FadeShape::Logarithmic => "log",
+                    hark_core::pcm::FadeShape::EqualPower => "Eq",
+                    hark_core::pcm::FadeShape::Linear => "Lin",
+                    hark_core::pcm::FadeShape::Logarithmic => "Log",
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::EqualPower, "equal power");
-                    ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::Linear, "linear");
-                    ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::Logarithmic, "log");
+                    ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::EqualPower, "Equal power");
+                    ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::Linear, "Linear");
+                    ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::Logarithmic, "Logarithmic");
                 });
             self.wave.clamp_fades(duration);
         });
@@ -1306,20 +1310,20 @@ impl App {
         let mut edited = false;
         let p = &mut self.preset;
         egui::Grid::new("export-preset").num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
-            key(ui, "format");
+            key(ui, "Format");
             ui.horizontal(|ui| {
                 edited |= preset_ui::format(ui, "card", p);
                 edited |= preset_ui::bits(ui, "card", p);
                 edited |= preset_ui::dither(ui, p);
             });
             ui.end_row();
-            key(ui, "rate");
+            key(ui, "Rate");
             edited |= preset_ui::sample_rate(ui, "card", p);
             ui.end_row();
-            key(ui, "channels");
+            key(ui, "Channels");
             edited |= preset_ui::channels(ui, "card", p);
             ui.end_row();
-            key(ui, "level");
+            key(ui, "Level");
             ui.horizontal(|ui| edited |= preset_ui::normalize(ui, "card", p));
             ui.end_row();
         });
@@ -1333,19 +1337,18 @@ impl App {
         // The target row: the template's folder, the name field, the extension.
         let (dir, ext, outcome) = match (&req, &file) {
             (Some(Ok(r)), Some(f)) => {
-                let rel = r.output_path();
-                let rel = rel.strip_prefix(&r.output_root).map(|p| p.to_path_buf()).unwrap_or(rel);
-                let dir = rel.parent().filter(|d| !d.as_os_str().is_empty()).map(|d| format!("{}/", d.display())).unwrap_or_default();
+                let templated = PathBuf::from(hark_core::export::render_template(&r.preset.path_template, r));
+                let dir = templated.parent().filter(|d| !d.as_os_str().is_empty()).map(|d| format!("{}/", d.display())).unwrap_or_default();
                 (dir, format!(".{}", r.effective_preset().format.extension()), self.export_outcome(r, f))
             }
             _ => (String::new(), String::new(), "…".into()),
         };
-        let stem = file.as_ref().and_then(|f| f.path.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "file name".into());
+        let stem = file.as_ref().and_then(|f| f.path.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "File name".into());
         let out = self.config.output_root().map(|p| p.display().to_string());
         let have = file.is_some();
         egui::Grid::new("export-target").num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
-            key(ui, "folder");
-            let folder = egui::Button::new(theme::icon_text(icons::FOLDER, out.as_deref().unwrap_or("choose…"), 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(value_w, CONTROL_H)).truncate();
+            key(ui, "Folder");
+            let folder = egui::Button::new(theme::icon_text(icons::FOLDER, out.as_deref().unwrap_or("Choose…"), 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(value_w, CONTROL_H)).truncate();
             let folder = ui.add(folder);
             let folder = match &out {
                 Some(o) => folder.on_hover_text(o),
@@ -1354,27 +1357,67 @@ impl App {
             if folder.clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     if let Err(e) = self.config.set_output_root(Some(path)) {
-                        self.set_status(format!("output folder: {e:#}"), true);
+                        self.set_status(format!("Output folder: {e:#}"), true);
                     }
                 }
             }
             ui.end_row();
-            key(ui, "to");
+            key(ui, "To");
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                let dir_w = ui.fonts_mut(|f| f.layout_no_wrap(dir.clone(), FontId::proportional(12.5), theme.muted).size().x).min(value_w * 0.45);
-                ui.add_sized(egui::vec2(dir_w, CONTROL_H), egui::Label::new(RichText::new(&dir).color(theme.muted).size(12.5)).truncate()).on_hover_text("the preset's path template");
                 let ext_w = 34.0;
-                let name_w = (value_w - dir_w - ext_w - 4.0).max(60.0);
-                ui.add_enabled(have, egui::TextEdit::singleline(&mut self.export_name).hint_text(&stem).desired_width(name_w).vertical_align(egui::Align::Center).min_size(egui::vec2(0.0, CONTROL_H)));
+                let folder_w = (value_w * 0.45).max(90.0);
+                let root = self.config.output_root().map(|p| p.to_path_buf());
+                let current = self.config.export_folder().map(|p| p.to_path_buf());
+                let shown = current.as_ref().map(|p| format!("{}/", p.display())).unwrap_or_else(|| "/".into());
+                let mut pick: Option<Option<PathBuf>> = None;
+                let mut browse = false;
+                ui.add_enabled_ui(root.is_some(), |ui| {
+                    egui::ComboBox::from_id_salt("export-subfolder").width(folder_w).truncate().selected_text(RichText::new(shown).size(12.5)).show_ui(ui, |ui| {
+                        if ui.selectable_label(current.is_none(), "/").clicked() {
+                            pick = Some(None);
+                        }
+                        for sub in root.as_deref().map(subfolders).unwrap_or_default() {
+                            if ui.selectable_label(current.as_deref() == Some(&sub), format!("{}/", sub.display())).clicked() {
+                                pick = Some(Some(sub));
+                            }
+                        }
+                        ui.separator();
+                        if ui.selectable_label(false, theme::icon_text(icons::FOLDER_OPEN, "Browse…", 13.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).on_hover_text("Pick or create a folder under the output folder").clicked() {
+                            browse = true;
+                        }
+                    });
+                });
+                if browse {
+                    if let Some(root) = &root {
+                        if let Some(path) = rfd::FileDialog::new().set_directory(root).pick_folder() {
+                            match path.strip_prefix(root) {
+                                Ok(rel) => pick = Some((!rel.as_os_str().is_empty()).then(|| rel.to_path_buf())),
+                                Err(_) => self.set_status(format!("{} is not under the output folder", path.display()), true),
+                            }
+                        }
+                    }
+                }
+                if let Some(folder) = pick {
+                    if let Err(e) = self.config.set_export_folder(folder) {
+                        self.set_status(format!("Export folder: {e:#}"), true);
+                    }
+                }
+                let mut rest = value_w - folder_w - ext_w - 4.0;
+                if !dir.is_empty() {
+                    let dir_w = ui.fonts_mut(|f| f.layout_no_wrap(dir.clone(), FontId::proportional(12.5), theme.muted).size().x).min(rest * 0.4);
+                    ui.add_sized(egui::vec2(dir_w, CONTROL_H), egui::Label::new(RichText::new(&dir).color(theme.muted).size(12.5)).truncate()).on_hover_text("From the preset's path template");
+                    rest -= dir_w + 2.0;
+                }
+                ui.add_enabled(have, egui::TextEdit::singleline(&mut self.export_name).hint_text(&stem).desired_width(rest.max(50.0)).vertical_align(egui::Align::Center).min_size(egui::vec2(0.0, CONTROL_H)));
                 ui.add_sized(egui::vec2(ext_w, CONTROL_H), egui::Label::new(RichText::new(&ext).color(theme.muted).size(12.5)));
             });
             ui.end_row();
-            key(ui, "writes");
+            key(ui, "Writes");
             ui.horizontal(|ui| {
                 ui.add_enabled(have, small(outcome, theme.text));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_enabled(have, egui::Checkbox::new(&mut self.overwrite, RichText::new("overwrite").size(12.5)));
+                    ui.add_enabled(have, theme::Check::new(&mut self.overwrite, RichText::new("Overwrite").size(12.5)));
                 });
             });
             ui.end_row();
@@ -1404,7 +1447,7 @@ impl App {
     /// The preset combo: the saved presets, "custom" once the values were edited, and a way to
     /// keep the edited values as a new preset.
     fn preset_picker(&mut self, ui: &mut egui::Ui) {
-        let label = self.preset_name.clone().unwrap_or_else(|| "custom".into());
+        let label = self.preset_name.clone().unwrap_or_else(|| "Custom".into());
         let mut pick: Option<String> = None;
         let mut save_as = false;
         egui::ComboBox::from_id_salt("preset").width(150.0).selected_text(label).show_ui(ui, |ui| {
@@ -1414,9 +1457,9 @@ impl App {
                 }
             }
             if self.preset_name.is_none() {
-                let _ = ui.selectable_label(true, "custom");
+                let _ = ui.selectable_label(true, "Custom");
                 ui.separator();
-                if ui.selectable_label(false, theme::icon_text(icons::FLOPPY_DISK, "save as preset…", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
+                if ui.selectable_label(false, theme::icon_text(icons::FLOPPY_DISK, "Save as preset…", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
                     save_as = true;
                 }
             }
@@ -1467,10 +1510,10 @@ impl App {
                 }
             }
             ui.separator();
-            if ui.selectable_label(false, theme::icon_text(icons::FOLDER_OPEN, "open…", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
+            if ui.selectable_label(false, theme::icon_text(icons::FOLDER_OPEN, "Open…", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
                 action = Some(ProjectAction::Browse);
             }
-            if ui.selectable_label(false, theme::icon_text(icons::PLUS, "new…", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
+            if ui.selectable_label(false, theme::icon_text(icons::PLUS, "New…", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
                 action = Some(ProjectAction::New);
             }
         });
@@ -1499,7 +1542,7 @@ impl App {
             }
         };
         if let Err(e) = result {
-            self.set_status(format!("project: {e:#}"), true);
+            self.set_status(format!("Project: {e:#}"), true);
         }
         self.db.set_project(self.config.project_id());
         self.project_edit = None;
@@ -1522,7 +1565,7 @@ impl App {
                                 *t = new.clone();
                             }
                         }
-                        Err(e) => self.set_status(format!("rename tag: {e:#}"), true),
+                        Err(e) => self.set_status(format!("Rename tag: {e:#}"), true),
                     }
                 }
             }
@@ -1533,7 +1576,7 @@ impl App {
             TagAction::Remove(k) => {
                 let t = self.config.tags.remove(k);
                 if let Err(e) = self.db.remove_tag(&t.name) {
-                    self.set_status(format!("remove tag: {e:#}"), true);
+                    self.set_status(format!("Remove tag: {e:#}"), true);
                 }
                 self.filter.tags.retain(|x| *x != t.name);
             }
@@ -1549,7 +1592,7 @@ impl App {
             }
         }
         if let Err(e) = self.config.save() {
-            self.set_status(format!("save config: {e:#}"), true);
+            self.set_status(format!("Save config: {e:#}"), true);
         }
         self.list_dirty = true;
     }
@@ -1561,14 +1604,14 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let device = match (&self.player, &self.audio_error) {
                     (Some(p), _) => theme::icon_text(icons::SPEAKER_HIGH, &format!("{}  ·  {} Hz", p.device_name, p.sample_rate), 12.0, egui::FontFamily::Proportional, self.theme.muted),
-                    (None, Some(e)) => theme::icon_text(icons::SPEAKER_HIGH, &format!("no audio: {e}"), 12.0, egui::FontFamily::Proportional, self.theme.err),
-                    _ => theme::icon_text(icons::SPEAKER_HIGH, "no audio", 12.0, egui::FontFamily::Proportional, self.theme.err),
+                    (None, Some(e)) => theme::icon_text(icons::SPEAKER_HIGH, &format!("No audio: {e}"), 12.0, egui::FontFamily::Proportional, self.theme.err),
+                    _ => theme::icon_text(icons::SPEAKER_HIGH, "No audio", 12.0, egui::FontFamily::Proportional, self.theme.err),
                 };
                 ui.label(device);
                 ui.separator();
                 if self.scanning {
                     ui.spinner();
-                    ui.label(RichText::new("scanning").color(self.theme.muted).size(12.0));
+                    ui.label(RichText::new("Scanning").color(self.theme.muted).size(12.0));
                 } else {
                     ui.label(RichText::new(format!("{} files", self.file_count)).color(self.theme.muted).size(12.0));
                 }
@@ -1594,25 +1637,25 @@ fn file_menu(ui: &mut egui::Ui, file: &FileRecord, defs: &[hark_core::TagDef], t
     ui.set_min_width(180.0);
     let mut action = None;
     let mut fav = file.favorite;
-    if ui.checkbox(&mut fav, theme::icon_text(icons::STAR, "favorite", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).on_hover_text("F").changed() {
+    if theme::check(ui, &mut fav, theme::icon_text(icons::STAR, "Favorite", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).on_hover_text("F").changed() {
         action = Some(FileAction::Favorite);
     }
     ui.separator();
     for (k, t) in defs.iter().enumerate() {
         let mut on = file.tags.contains(&t.name);
         let color = theme.color_of(k, Some(t)).gamma_multiply(1.3).to_opaque();
-        let label = ui.checkbox(&mut on, RichText::new(&t.name).color(color));
+        let label = theme::check(ui, &mut on, RichText::new(&t.name).color(color));
         let label = if k < 9 { label.on_hover_text(format!("key {}", k + 1)) } else { label };
         if label.changed() {
             action = Some(FileAction::Tag(t.name.clone()));
         }
     }
     ui.separator();
-    if ui.button(theme::icon_text(icons::FOLDER_OPEN, "show in folder", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
+    if ui.button(theme::icon_text(icons::FOLDER_OPEN, "Show in folder", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
         action = Some(FileAction::Reveal);
         ui.close();
     }
-    if ui.button(theme::icon_text(icons::COPY, "copy path", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
+    if ui.button(theme::icon_text(icons::COPY, "Copy path", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
         ui.ctx().copy_text(file.path.display().to_string());
         action = Some(FileAction::CopyPath);
         ui.close();
@@ -1622,6 +1665,29 @@ fn file_menu(ui: &mut egui::Ui, file: &FileRecord, defs: &[hark_core::TagDef], t
 
 /// Opens the file's folder in the desktop's file manager, selecting the file where that is
 /// supported.
+/// Folders under `root`, a few levels deep, relative and sorted; enough to pick a target from.
+fn subfolders(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, root: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir() && !p.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(true)).collect();
+        dirs.sort();
+        for d in dirs {
+            if out.len() >= 300 {
+                return;
+            }
+            if let Ok(rel) = d.strip_prefix(root) {
+                out.push(rel.to_path_buf());
+            }
+            if depth > 1 {
+                walk(&d, root, depth - 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, 3, &mut out);
+    out
+}
+
 fn reveal(path: &Path) -> std::io::Result<()> {
     use std::process::Command;
     #[cfg(target_os = "windows")]

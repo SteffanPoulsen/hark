@@ -12,7 +12,7 @@ const DOWNMIX: [DownmixMode; 4] = [DownmixMode::Average, DownmixMode::SumMinus3,
 const SHAPES: [FadeShape; 3] = [FadeShape::EqualPower, FadeShape::Linear, FadeShape::Logarithmic];
 
 pub fn rate_label(rate: Option<u32>) -> String {
-    rate.map(|r| format!("{} kHz", trim_zeros(r as f64 / 1000.0))).unwrap_or_else(|| "source rate".into())
+    rate.map(|r| format!("{} kHz", trim_zeros(r as f64 / 1000.0))).unwrap_or_else(|| "Source rate".into())
 }
 
 fn trim_zeros(v: f64) -> String {
@@ -63,7 +63,7 @@ pub fn bits(ui: &mut egui::Ui, id: &str, p: &mut ExportPreset) -> bool {
 pub fn sample_rate(ui: &mut egui::Ui, id: &str, p: &mut ExportPreset) -> bool {
     let mut changed = false;
     combo((id, "rate"), 110.0, rate_label(p.sample_rate)).show_ui(ui, |ui| {
-        changed |= pick(ui, &mut p.sample_rate, None, "source rate");
+        changed |= pick(ui, &mut p.sample_rate, None, "Source rate");
         for r in RATES {
             changed |= pick(ui, &mut p.sample_rate, Some(r), &rate_label(Some(r)));
         }
@@ -73,9 +73,9 @@ pub fn sample_rate(ui: &mut egui::Ui, id: &str, p: &mut ExportPreset) -> bool {
 
 pub fn channels(ui: &mut egui::Ui, id: &str, p: &mut ExportPreset) -> bool {
     let mut changed = false;
-    let label = p.mono.map(|m| m.name().to_string()).unwrap_or_else(|| "source channels".into());
+    let label = p.mono.map(|m| m.name().to_string()).unwrap_or_else(|| "Source channels".into());
     combo((id, "channels"), 140.0, label).show_ui(ui, |ui| {
-        changed |= pick(ui, &mut p.mono, None, "source channels");
+        changed |= pick(ui, &mut p.mono, None, "Source channels");
         for m in DOWNMIX {
             changed |= pick(ui, &mut p.mono, Some(m), m.name());
         }
@@ -84,7 +84,7 @@ pub fn channels(ui: &mut egui::Ui, id: &str, p: &mut ExportPreset) -> bool {
 }
 
 pub fn dither(ui: &mut egui::Ui, p: &mut ExportPreset) -> bool {
-    ui.add_enabled(p.bits < 32, egui::Checkbox::new(&mut p.dither, RichText::new("dither").size(13.0))).changed()
+    ui.add_enabled(p.bits < 32, crate::theme::Check::new(&mut p.dither, RichText::new("Dither").size(13.0))).changed()
 }
 
 /// Mode, then the target and, for LUFS, the true-peak ceiling.
@@ -96,9 +96,9 @@ pub fn normalize(ui: &mut egui::Ui, id: &str, p: &mut ExportPreset) -> bool {
         Normalize::Lufs { .. } => 2,
     };
     let mut want = mode;
-    combo((id, "normalize"), 72.0, ["none", "peak", "LUFS"][mode].to_string()).show_ui(ui, |ui| {
-        pick(ui, &mut want, 0, "none");
-        pick(ui, &mut want, 1, "peak");
+    combo((id, "normalize"), 72.0, ["None", "Peak", "LUFS"][mode].to_string()).show_ui(ui, |ui| {
+        pick(ui, &mut want, 0, "None");
+        pick(ui, &mut want, 1, "Peak");
         pick(ui, &mut want, 2, "LUFS");
     });
     if want != mode {
@@ -124,7 +124,7 @@ pub fn normalize(ui: &mut egui::Ui, id: &str, p: &mut ExportPreset) -> bool {
 pub fn trim_silence(ui: &mut egui::Ui, p: &mut ExportPreset) -> bool {
     let mut changed = false;
     let mut on = p.trim_silence.is_some();
-    if ui.checkbox(&mut on, "").changed() {
+    if crate::theme::check(ui, &mut on, "").changed() {
         p.trim_silence = on.then_some(TrimSilence { threshold_dbfs: -60.0, pad_ms: 10.0 });
         changed = true;
     }

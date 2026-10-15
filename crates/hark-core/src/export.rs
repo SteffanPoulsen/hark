@@ -27,6 +27,8 @@ pub struct ExportRequest {
     pub preset_name: Option<String>,
     pub preset: ExportPreset,
     pub output_root: PathBuf,
+    /// The folder under the output root the file goes to.
+    pub subfolder: Option<PathBuf>,
     /// A full output path that replaces the template.
     pub output_path: Option<PathBuf>,
     pub tags: Vec<String>,
@@ -60,6 +62,7 @@ impl ExportRequest {
             preset_name: Some(preset_name),
             preset,
             output_root,
+            subfolder: config.export_folder().map(|p| p.to_path_buf()),
             output_path: None,
             tags,
             favorite,
@@ -74,7 +77,10 @@ impl ExportRequest {
             return p.clone();
         }
         let rendered = render_template(&self.preset.path_template, self);
-        let mut path = self.output_root.join(rendered);
+        let mut path = match &self.subfolder {
+            Some(sub) => self.output_root.join(sub).join(rendered),
+            None => self.output_root.join(rendered),
+        };
         path.set_extension(self.preset.format.extension());
         path
     }
@@ -101,14 +107,10 @@ pub fn render_template(template: &str, req: &ExportRequest) -> String {
         Some(r) => req.source.parent().and_then(|p| p.strip_prefix(&r.path).ok()).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
         None => String::new(),
     };
-    let tag = req.tags.first().cloned().unwrap_or_else(|| "untagged".into());
-    let tags = if req.tags.is_empty() { "untagged".to_string() } else { req.tags.join("+") };
     let root = req.root.as_ref().map(|r| r.name.clone()).unwrap_or_default();
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let out = template
         .replace("{name}", &stem)
-        .replace("{tag}", &tag)
-        .replace("{tags}", &tags)
         .replace("{root}", &root)
         .replace("{folder}", &folder)
         .replace("{relpath}", &relpath)
@@ -151,6 +153,7 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
         fade_out_secs: req.fade_out_secs,
         fade_shape: preset.fade_shape,
         preset_name: req.preset_name.clone(),
+        output_subfolder: req.subfolder.clone(),
         preset: preset.clone(),
         output: OutputRef {
             format: preset.format.extension().to_string(),
@@ -284,6 +287,7 @@ pub fn request_from_origin(origin: &Origin, output_root: &Path, output_path: Opt
         preset_name: origin.preset_name.clone(),
         preset: origin.preset.clone(),
         output_root: output_root.to_path_buf(),
+        subfolder: origin.output_subfolder.clone(),
         output_path,
         tags: origin.tags.clone(),
         favorite: origin.favorite,

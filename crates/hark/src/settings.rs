@@ -141,7 +141,7 @@ impl App {
             });
             row(ui, &theme, false, "Audition sample rate", "The rate the output device is opened at; sources are resampled to it for playback.", |ui| {
                 let current = self.config.audition_sample_rate;
-                let label = |r: Option<u32>| r.map(|r| format!("{:.1} kHz", r as f64 / 1000.0)).unwrap_or_else(|| "device default".into());
+                let label = |r: Option<u32>| r.map(|r| format!("{:.1} kHz", r as f64 / 1000.0)).unwrap_or_else(|| "Device default".into());
                 egui::ComboBox::from_id_salt("audition-rate").width(150.0).selected_text(label(current)).show_ui(ui, |ui| {
                     let mut pick = |ui: &mut egui::Ui, r: Option<u32>| {
                         if ui.selectable_label(current == r, label(r)).clicked() && current != r {
@@ -158,18 +158,18 @@ impl App {
             });
             let device = match (&self.player, &self.audio_error) {
                 (Some(p), _) => format!("{}  ·  {} Hz  ·  {} ch", p.device_name, p.sample_rate, p.channels),
-                (None, Some(e)) => format!("no audio: {e}"),
-                _ => "no audio".into(),
+                (None, Some(e)) => format!("No audio: {e}"),
+                _ => "No audio".into(),
             };
             row(ui, &theme, false, "Audio output", &device, |_| {});
             let palette = self.config.theme_file.as_ref().map(|p| p.display().to_string());
             row(ui, &theme, false, "Theme palette", "A palette file in the desktop theme format replaces the built-in colors.", |ui| {
-                if palette.is_some() && theme::tool_button(ui, icons::X, "").on_hover_text("use the built-in palette").clicked() {
+                if palette.is_some() && theme::tool_button(ui, icons::X, "").on_hover_text("Use the built-in palette").clicked() {
                     self.config.theme_file = None;
                     save = true;
                     retheme = true;
                 }
-                let label = palette.as_deref().and_then(|p| p.rsplit('/').next().map(str::to_string)).unwrap_or_else(|| "choose…".into());
+                let label = palette.as_deref().and_then(|p| p.rsplit('/').next().map(str::to_string)).unwrap_or_else(|| "Choose…".into());
                 let b = ui.add(egui::Button::new(theme::icon_text(icons::FILE, &label, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(0.0, 28.0)));
                 let b = match &palette {
                     Some(p) => b.on_hover_text(p),
@@ -223,10 +223,10 @@ impl App {
         let mut action: Option<ProjectAction> = None;
         card(ui, &theme, |ui| {
             row(ui, &theme, true, "Project", "The one the window and the CLI work in.", |ui| {
-                if theme::tool_button(ui, icons::PLUS, "new").on_hover_text("save a new project file").clicked() {
+                if theme::tool_button(ui, icons::PLUS, "New").on_hover_text("Save a new project file").clicked() {
                     action = Some(ProjectAction::New);
                 }
-                if theme::tool_button(ui, icons::FOLDER_OPEN, "open").on_hover_text("open a project file").clicked() {
+                if theme::tool_button(ui, icons::FOLDER_OPEN, "Open").on_hover_text("Open a project file").clicked() {
                     action = Some(ProjectAction::Browse);
                 }
                 if let Some(a) = self.project_menu(ui, "settings-project", 180.0) {
@@ -242,7 +242,7 @@ impl App {
         let mut set_output = false;
         let output_row = |ui: &mut egui::Ui, first: bool, set_output: &mut bool| {
             row(ui, &theme, first, "Output folder", "Exports land here, under the preset's path template.", |ui| {
-                let label = out.as_deref().unwrap_or("choose…");
+                let label = out.as_deref().unwrap_or("Choose…");
                 let b = ui.add(egui::Button::new(theme::icon_text(icons::FOLDER, label, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(0.0, 28.0)).truncate());
                 let b = match &out {
                     Some(o) => b.on_hover_text(o),
@@ -281,14 +281,14 @@ impl App {
                 }
             });
             row(ui, &theme, false, "File", &active.path.display().to_string(), |ui| {
-                if theme::tool_button(ui, icons::ARROW_SQUARE_OUT, "show").on_hover_text("show in folder").clicked() {
+                if theme::tool_button(ui, icons::ARROW_SQUARE_OUT, "Show").on_hover_text("Show in folder").clicked() {
                     reveal_file = true;
                 }
             });
             output_row(ui, false, &mut set_output);
             row(ui, &theme, false, "Favorites", &favs_text, |_| {});
             row(ui, &theme, false, "Scope", "Library folders this project cares about. Empty means the whole library.", |ui| {
-                if theme::tool_button(ui, icons::FOLDER_PLUS, "add folder").clicked() {
+                if theme::tool_button(ui, icons::FOLDER_PLUS, "Add folder").clicked() {
                     add_scope = true;
                 }
             });
@@ -298,7 +298,7 @@ impl App {
                     ui.label(theme::icon(icons::FOLDER).color(theme.muted));
                     ui.add(egui::Label::new(RichText::new(p.display().to_string()).size(13.0)).truncate());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::tool_button(ui, icons::X, "").on_hover_text("remove from the scope").clicked() {
+                        if theme::tool_button(ui, icons::X, "").on_hover_text("Remove from the scope").clicked() {
                             remove_scope = Some(i);
                         }
                     });
@@ -309,12 +309,12 @@ impl App {
                 ui.add_space(4.0);
             }
             row(ui, &theme, false, "Close project", "Back to the default state. The file stays in the list.", |ui| {
-                if theme::tool_button(ui, icons::X, "close").clicked() {
+                if theme::tool_button(ui, icons::X, "Close").clicked() {
                     action = Some(ProjectAction::Close);
                 }
             });
             row(ui, &theme, false, "Forget project", "Drops it from the list. The file, its exports and its favorites stay.", |ui| {
-                let b = egui::Button::new(theme::icon_text(icons::TRASH, "forget", 14.0, egui::FontFamily::Proportional, theme.err)).min_size(egui::vec2(0.0, 28.0));
+                let b = egui::Button::new(theme::icon_text(icons::TRASH, "Forget", 14.0, egui::FontFamily::Proportional, theme.err)).min_size(egui::vec2(0.0, 28.0));
                 if ui.add(b).clicked() {
                     action = Some(ProjectAction::Forget(active.path.clone()));
                 }
@@ -322,7 +322,7 @@ impl App {
         });
         if reveal_file {
             if let Err(e) = crate::reveal(&active.path) {
-                self.set_status(format!("show in folder: {e}"), true);
+                self.set_status(format!("Show in folder: {e}"), true);
             }
         }
         let mut changed = false;
@@ -362,13 +362,13 @@ impl App {
         if set_output {
             if let Some(path) = rfd::FileDialog::new().pick_folder() {
                 if let Err(e) = self.config.set_output_root(Some(path)) {
-                    self.set_status(format!("output folder: {e:#}"), true);
+                    self.set_status(format!("Output folder: {e:#}"), true);
                 }
             }
         }
         if changed.is_some() {
             if let Err(e) = self.config.save_project() {
-                self.set_status(format!("project: {e:#}"), true);
+                self.set_status(format!("Project: {e:#}"), true);
             }
             self.expanded = self.config.scope_folders().into_iter().map(|(_, p)| p).collect();
             self.list_dirty = true;
@@ -410,7 +410,7 @@ impl App {
                     ui.label(RichText::new(format!("{n_used} file{}", if n_used == 1 { "" } else { "s" })).color(theme.muted).size(12.5));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        if theme::tool_button(ui, icons::TRASH, "").on_hover_text("remove the tag and its marks").clicked() {
+                        if theme::tool_button(ui, icons::TRASH, "").on_hover_text("Remove the tag and its marks").clicked() {
                             action = Some(TagAction::Remove(k));
                         }
                         if ui.add_enabled(k + 1 < n, theme::tool_button_widget(icons::CARET_DOWN, "")).clicked() {
@@ -427,7 +427,7 @@ impl App {
                 ui.separator();
             }
             row(ui, &theme, true, "New tag", "Appears last; move it with the arrows.", |ui| {
-                if theme::tool_button(ui, icons::PLUS, "add").clicked() {
+                if theme::tool_button(ui, icons::PLUS, "Add").clicked() {
                     action = Some(TagAction::Add);
                 }
             });
@@ -446,7 +446,7 @@ impl App {
             self.preset_edit = self.config.default_preset.clone();
         }
         card(ui, &theme, |ui| {
-            row(ui, &theme, true, "Default preset", "Used for files whose tags select no preset.", |ui| {
+            row(ui, &theme, true, "Default preset", "Used by the CLI when none is given, and by the card at startup.", |ui| {
                 egui::ComboBox::from_id_salt("default-preset").width(150.0).selected_text(&self.config.default_preset).show_ui(ui, |ui| {
                     for name in &names {
                         if ui.selectable_value(&mut self.config.default_preset, name.clone(), name).clicked() {
@@ -469,10 +469,10 @@ impl App {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::tool_button(ui, icons::PLUS, "new").on_hover_text("a preset with the default values").clicked() {
+                if theme::tool_button(ui, icons::PLUS, "New").on_hover_text("A preset with the default values").clicked() {
                     add = Some(None);
                 }
-                if theme::tool_button(ui, icons::COPY, "duplicate").clicked() {
+                if theme::tool_button(ui, icons::COPY, "Duplicate").clicked() {
                     add = Some(Some(self.preset_edit.clone()));
                 }
             });
@@ -484,7 +484,7 @@ impl App {
         let Some(mut p) = self.config.presets.get(&editing).cloned() else { return };
         let before = p.clone();
         card(ui, &theme, |ui| {
-            row(ui, &theme, true, "Name", "Tags and the default follow the preset through a rename.", |ui| {
+            row(ui, &theme, true, "Name", "The default follows the preset through a rename.", |ui| {
                 let mut buf = self.preset_rename.clone().unwrap_or_else(|| editing.clone());
                 let resp = ui.add(egui::TextEdit::singleline(&mut buf).desired_width(180.0));
                 if resp.has_focus() {
@@ -515,11 +515,11 @@ impl App {
             row(ui, &theme, false, "Fade shape", "The curve of the selection's fades; the transport can override it per export.", |ui| {
                 preset_ui::fade_shape(ui, "settings", &mut p);
             });
-            row(ui, &theme, false, "Path template", "Where the file lands under the output folder. Hover the field for the placeholders.", |ui| {
+            row(ui, &theme, false, "Path template", "The file name, and any folders, inside the export folder. Hover the field for the placeholders.", |ui| {
                 preset_ui::path_template(ui, &mut p, 260.0);
             });
-            row(ui, &theme, false, "Remove preset", "Tags that selected it select none; the default moves to another preset.", |ui| {
-                let b = egui::Button::new(theme::icon_text(icons::TRASH, "remove", 14.0, egui::FontFamily::Proportional, theme.err)).min_size(egui::vec2(0.0, 28.0));
+            row(ui, &theme, false, "Remove preset", "The default moves to another preset.", |ui| {
+                let b = egui::Button::new(theme::icon_text(icons::TRASH, "Remove", 14.0, egui::FontFamily::Proportional, theme.err)).min_size(egui::vec2(0.0, 28.0));
                 if ui.add_enabled(names.len() > 1, b).clicked() {
                     remove = true;
                 }

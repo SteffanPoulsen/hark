@@ -84,9 +84,9 @@ pub struct ExportPreset {
     pub dither: bool,
     #[serde(default)]
     pub fade_shape: FadeShape,
-    /// Output path relative to the output root. Placeholders: `{name}` source stem, `{tag}` first
-    /// tag or `untagged`, `{tags}` all tags joined by `+`, `{root}` library root name, `{folder}`
-    /// source folder name, `{relpath}` source folder relative to its root, `{date}` `YYYY-MM-DD`.
+    /// Output path inside the export folder. Placeholders: `{name}` source stem, `{root}` library
+    /// root name, `{folder}` source folder name, `{relpath}` source folder relative to its root,
+    /// `{date}` `YYYY-MM-DD`.
     #[serde(default = "default_template")]
     pub path_template: String,
 }
@@ -98,7 +98,7 @@ fn default_true() -> bool {
     true
 }
 fn default_template() -> String {
-    "{tag}/{name}".to_string()
+    "{name}".to_string()
 }
 
 impl Default for ExportPreset {
@@ -134,6 +134,9 @@ pub struct Config {
     /// Where exports go with no project open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_root: Option<PathBuf>,
+    /// The folder under the output root the last export went to, with no project open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_folder: Option<PathBuf>,
     /// Project files hark knows: the switcher lists them.
     #[serde(default)]
     pub project_files: Vec<PathBuf>,
@@ -215,6 +218,7 @@ impl Default for Config {
         Config {
             roots: Vec::new(),
             output_root: None,
+            export_folder: None,
             project_files: Vec::new(),
             project: None,
             legacy_projects: Vec::new(),
@@ -239,7 +243,7 @@ impl Config {
         match std::fs::read(path) {
             Ok(bytes) => {
                 let mut cfg: Config = serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
-                if cfg.migrate() {
+                if cfg.migrate() | cfg.drop_tag_placeholders() {
                     cfg.save_to(path)?;
                 }
                 if let Some(file) = cfg.project.clone() {
@@ -286,7 +290,7 @@ impl Config {
                 continue;
             }
             let file = dir.join(format!("{name}.{}", crate::project::EXTENSION));
-            let project = Project { id: name.clone(), name: name.clone(), output_root, scope };
+            let project = Project { id: name.clone(), name: name.clone(), output_root, export_folder: None, scope };
             if let Err(e) = project.save(&file) {
                 eprintln!("project {name}: {e:#}");
                 continue;
@@ -300,6 +304,40 @@ impl Config {
         }
         self.legacy_active = None;
         true
+    }
+
+    /// Templates once put the first tag in the path; tags are metadata now, so that segment goes.
+    fn drop_tag_placeholders(&mut self) -> bool {
+        let mut changed = false;
+        for p in self.presets.values_mut() {
+            if p.path_template.contains("{tag") {
+                let parts: Vec<&str> = p.path_template.split('/').filter(|s| !s.contains("{tag")).collect();
+                p.path_template = if parts.is_empty() { default_template() } else { parts.join("/") };
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// The folder under the output root exports go to, remembered per project.
+    pub fn export_folder(&self) -> Option<&Path> {
+        match &self.active {
+            Some(a) => a.project.export_folder.as_deref(),
+            None => self.export_folder.as_deref(),
+        }
+    }
+
+    pub fn set_export_folder(&mut self, folder: Option<PathBuf>) -> Result<()> {
+        match &mut self.active {
+            Some(a) => {
+                a.project.export_folder = folder;
+                a.project.save(&a.path)
+            }
+            None => {
+                self.export_folder = folder;
+                self.save()
+            }
+        }
     }
 
     /// The favorites key: the open project's id, or the default's.

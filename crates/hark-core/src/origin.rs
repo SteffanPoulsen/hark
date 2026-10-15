@@ -65,6 +65,9 @@ pub struct Origin {
     pub fade_shape: FadeShape,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_name: Option<String>,
+    /// The folder under the output root the file was written to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_subfolder: Option<PathBuf>,
     pub preset: ExportPreset,
     pub output: OutputRef,
     #[serde(default)]
