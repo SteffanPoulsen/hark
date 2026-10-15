@@ -32,3 +32,4 @@ A Cargo workspace with one core and two thin frontends. The frontends never reim
 - Test audio is generated, not committed: see the sox and ffmpeg recipe in the session that built the first version, or make a few files with `sox -n -r 48000 -c 2 out.wav synth 0.4 sine 440 fade 0 0.4 0.3`.
 - `hark-cli roots add <folder>` then `hark-cli export <file> --preset sfx --output-root /tmp/out` exercises the whole core; `hark --open <file>` opens the window on a file for a visual check.
 - Config and database live under `~/.config/hark` and `~/.local/share/hark` on Linux; delete them to start fresh.
+- `docs/screenshots/stage.sh all` synthesizes a sample library with sox, stages a project over it under `/tmp/hark-stage` with its own XDG folders, and captures the README screenshots through Hyprland and grim; rerun it after a visible change so the images match the window.

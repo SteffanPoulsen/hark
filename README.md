@@ -1,21 +1,33 @@
 # hark
 
-Listen fast, export clean. A local, folder-based audio asset browser for game development: audition a library at keyboard speed, mark favorites and tags, select a region of the waveform with fades, and export it through a preset into your project with a consistent folder structure. Every exported file carries where it came from and how it was made, embedded in the file itself.
+**Listen fast, export clean.** A local audio asset browser for game development.
 
-Linux (Wayland) first, Windows supported from the same codebase. No accounts, no subscriptions, no cloud.
+![hark auditioning a sword take, one hit selected with fades, the export card set to the sfx preset](docs/screenshots/hero.png)
 
-## What it does
+hark sits between your sound libraries and your game project. Point it at the folders the libraries live in, arrow through them at keyboard speed, star and tag what works, select the part you want on the waveform, and export it through a preset into the project's audio folder with a consistent name, format and loudness. Every exported file carries where it came from and how it was made, embedded in the file itself, so months later `hark-cli inspect` still knows.
 
-- **Browse** the library folders of the open project in a tree. The list shows duration, channels, sample rate, bit depth, codec and loudness for every file, and search covers the whole library. A filter narrows any view by favorites, tags, file type and channels, and a Favorites row above the tree lists the project's stars.
-- **Audition** at speed: arrowing through the list plays each file instantly. One always-open audio stream, pre-decoded neighbours, cached waveform peaks. Loop, seek by clicking the waveform, a gain fader beside the waveform that scales what you see and hear and carries into the export unless the preset normalises. Large files stream from disk while they play instead of being decoded whole, so an hour-long recording starts as fast as a one-shot; the threshold is the decoded size, `stream_above_mb` in the config (256 MB by default, about ten minutes of 48 kHz stereo, also in the settings window).
-- **Mark** favorites and tags from the keyboard or a right-click menu on any file, which also shows the file in its folder or copies its path. Tags are yours to define, each with a color, edited in the settings window. Marks follow a file through renames because they key on content, not path. The library itself is read-only: hark never renames, moves or deletes a source file.
-- **Projects** are `.hark` files you keep beside the game: the library folders this game draws from, an output folder (stored relative to the file), and favorites of their own. A new project starts empty; add folders with the button under the tree and take one out with a right-click on it. With no project open, hark has a default set of folders and a default output folder of its own. Switch, open or create projects from the top bar; the name is the file's name; tags and presets stay global.
-- **Select** a region on the waveform, drag fade handles for fade in and out, zoom with the wheel.
-- **Export** through a preset: WAV or FLAC, bit depth with dither, resampling, mono downmix, trim silence, peak or EBU R128 loudness normalisation with a true-peak ceiling, and a file name template such as `{name}` or `{relpath}/{name}`. The card starts from a preset and lets you change format, rate, channels and level for this export (the dropdown then reads "Custom", with a way to keep the values as a new preset). The file goes into a folder you pick under the output folder, from a list of the folders that exist there or the native dialog to create one; the pick is remembered per project. Tags never decide where a file goes. Presets are edited on their own settings page.
-- **Remember**: every export embeds its origin, in a `hark` RIFF chunk plus a BWF `bext` description for WAV and an APPLICATION block plus Vorbis comment for FLAC. Months later, `hark-cli inspect` on the file tells you the source path, the pack, the selection, the fades, the preset and the measured gain. `hark-cli reexport` runs that recipe again with changes.
-- **Script it**: `hark-cli` exposes the same core with no window, with `--json` on everything, so an agent or a build step can search, mark, analyse and export.
+Linux (Wayland) first, Windows from the same code. No accounts, no subscriptions, no cloud. MIT.
 
-## Build
+## Why
+
+Auditioning a big library in a DAW means importing first, and in a file manager means waiting for a player to open; neither remembers what you liked. Exporting by hand gives a different level and format every time, and leaves a file in the project with no link back to the pack it came from. hark does the whole loop in one window, at the speed of the arrow keys, and writes the link into the file.
+
+## Features
+
+- **Instant audition.** Arrowing through the list plays each file as it lands: one always-open audio stream, pre-decoded neighbours, cached waveform peaks. Hour-long recordings stream from disk and start as fast as a one-shot.
+- **Library, not import.** Folders stay where they are and are never modified. The list shows duration, channels, rate, bit depth, codec and loudness; search covers everything, and a filter narrows by favorites, tags, type and channels.
+- **Favorites and tags** from the keyboard. Tags are yours to define, with a colour each. Marks key on the file's content, so a renamed or moved file keeps them.
+- **Projects.** A `.hark` file beside the game holds its library folders, its output folder and its own favorites. Switch between games from the top bar.
+- **Waveform selection with fades.** Drag a region, set fade in and out, zoom, loop, seek by clicking, and scale the level with the fader beside the waveform.
+- **Preset-driven export.** WAV or FLAC, bit depth with dither, resampling, mono downmix, silence trim, peak or EBU R128 loudness normalisation under a true-peak ceiling, and a file name template. Override any of it for one export.
+- **An origin inside every export.** A `hark` RIFF chunk and a BWF `bext` description in WAV, an APPLICATION block and a Vorbis comment in FLAC: source path and hash, pack, selection, fades, preset and measured gain. `hark-cli reexport` runs that recipe again with changes.
+- **A CLI for all of it.** `hark-cli` exposes the same core with `--json` on every command, so a script or an agent can search, mark, analyse and export without a window.
+
+![The presets page of the settings window](docs/screenshots/presets.png)
+
+## Install
+
+Downloads for Linux and Windows are on the [Releases](../../releases) page. To build from source:
 
 ```
 cargo build --release
@@ -25,7 +37,7 @@ Binaries land in `target/release/hark` (the window) and `target/release/hark-cli
 
 ## Use
 
-Start `hark`, add a library folder with the button under the tree, pick a folder, and arrow through the files. `hark --open <file>` starts on a file; `hark --project <file.hark>` opens a project; `hark --settings [general|tags|presets]` opens the settings window, a window of its own with those three pages. A project has no window of its own: its folders are the tree, its output folder is on the export card, and its name is its file's.
+Start `hark`, add a library folder with the button under the tree, pick a folder, and arrow through the files. `hark --open <file>` starts on a file, with `--in` and `--out` seconds for a selection and `--fade-in` and `--fade-out` for its fades; `hark --project <file.hark>` opens a project; `hark --settings [general|tags|presets]` opens the settings window, a window of its own with those three pages. A project has no window of its own: its folders are the tree, its output folder is on the export card, and its name is its file's.
 
 | Key | Action |
 |---|---|
@@ -65,9 +77,23 @@ hark-cli reexport ~/Projects/game/Assets/Audio/sfx/*.wav --preset sfx
 
 `hark-cli --help` lists everything; `--json` makes any command machine-readable.
 
+### What an export carries
+
+```
+$ hark-cli inspect Assets/Audio/sfx/combat/impact_metal_heavy_02.wav
+  wave pcm_s24le · 48000 Hz · 1 ch · 24 bit · 1.600s
+  bext: hark: Hollowmere SFX:Impacts/impact_metal_heavy_02.wav
+  origin: hark: Hollowmere SFX:Impacts/impact_metal_heavy_02.wav
+    exported 2026-10-15T20:08:46+02:00 by hark 0.1.0 with preset sfx
+    source ~/Audio/Hollowmere/Impacts/impact_metal_heavy_02.wav (230480 bytes, blake3 a1e93ed24193076e)
+    fades 0.000s / 0.000s · gain -1.33 dB (true-peak limited)
+```
+
+The same record is in the file as JSON, readable by anything that walks RIFF chunks or FLAC metadata blocks. A sidecar is never the only copy.
+
 ## Configuration
 
-`~/.config/hark/config.json` (or the platform equivalent) holds the default state's folders and output folder, the known project files and the open one, the tags, the export presets, the audition sample rate and the streaming threshold (`stream_above_mb`). The defaults define `clean`, `sfx`, `ambient`, `music` and `voice` presets and a matching set of tags. Edit the file or use `hark-cli config`. A project file is JSON too: an id (favorites key on it), its folders, the output folder and the last export folder; `hark-cli --project <file or name>` acts in one without opening it.
+`~/.config/hark/config.json` (or the platform equivalent) holds the default state's folders and output folder, the known project files and the open one, the tags, the export presets, the default preset, the window zoom, the audition sample rate and the streaming threshold (`stream_above_mb`, 256 MB of decoded audio by default, about ten minutes of 48 kHz stereo). The defaults define `clean`, `sfx`, `ambient`, `music` and `voice` presets and a matching set of tags. Edit the file, use the settings window, or `hark-cli config`. A project file is JSON too: an id (favorites key on it), its folders, the output folder and the last export folder; `hark-cli --project <file or name>` acts in one without opening it.
 
 The library database lives in the data directory and only indexes what the files already carry; deleting it loses nothing but the marks, which `hark-cli` can re-apply. Waveform peaks are cached in the cache directory.
 
@@ -76,6 +102,7 @@ The library database lives in the data directory and only indexes what the files
 - `crates/hark-core`: decoding (symphonia), peaks, loudness (ebur128), resampling (rubato), WAV and FLAC writing with embedded origin, the export pipeline, the library database (SQLite), config, and the audition engine (cpal).
 - `crates/hark-cli`: the command line, a thin layer over the core.
 - `crates/hark`: the window (egui), a thin layer over the core.
+- `docs/screenshots/stage.sh`: synthesizes a sample library, stages a project over it and captures the screenshots above, so they can be retaken after a change.
 
 ## Licence
 
