@@ -85,10 +85,10 @@ hark-cli reexport ~/Projects/game/Assets/Audio/sfx/*.wav --preset sfx
 ```
 $ hark-cli inspect Assets/Audio/sfx/combat/impact_metal_heavy_02.wav
   wave pcm_s24le · 48000 Hz · 1 ch · 24 bit · 1.600s
-  bext: hark: Emberwake SFX:Impacts/impact_metal_heavy_02.wav
-  origin: hark: Emberwake SFX:Impacts/impact_metal_heavy_02.wav
+  bext: hark: Pigeon Wizard SFX:Impacts/impact_metal_heavy_02.wav
+  origin: hark: Pigeon Wizard SFX:Impacts/impact_metal_heavy_02.wav
     exported 2026-10-15T20:08:46+02:00 by hark 0.1.0 with preset sfx
-    source ~/Audio/Emberwake/Impacts/impact_metal_heavy_02.wav (230480 bytes, blake3 a1e93ed24193076e)
+    source ~/Audio/Pigeon Wizard/Impacts/impact_metal_heavy_02.wav (230480 bytes, blake3 a1e93ed24193076e)
     fades 0.000s / 0.000s · gain -1.33 dB (true-peak limited)
 ```
 
