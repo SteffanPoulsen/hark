@@ -29,7 +29,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<ProjectsCmd>,
     },
-    /// Library roots.
+    /// Library folders of the open project, or of the default state.
     Roots {
         #[command(subcommand)]
         cmd: Option<RootsCmd>,
@@ -151,11 +151,9 @@ enum RootsCmd {
 enum ProjectsCmd {
     /// The known project files, the open one starred.
     List,
-    /// Write a new project file and open it.
+    /// Write a new, empty project file and open it.
     New {
         file: PathBuf,
-        #[arg(long)]
-        name: Option<String>,
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -167,20 +165,6 @@ enum ProjectsCmd {
     Forget { project: String },
     /// Set the output folder of the open project, or the default one.
     Output { dir: PathBuf },
-    /// The open project's library scope.
-    Scope {
-        #[command(subcommand)]
-        cmd: Option<ScopeCmd>,
-    },
-}
-
-#[derive(Subcommand)]
-enum ScopeCmd {
-    List,
-    Add { folder: PathBuf },
-    Remove { folder: PathBuf },
-    /// Back to the whole library.
-    Clear,
 }
 
 #[derive(Subcommand)]
@@ -450,9 +434,8 @@ fn run() -> Result<()> {
             let db = open_db(&project)?;
             match cmd.unwrap_or(ProjectsCmd::List) {
                 ProjectsCmd::List => {}
-                ProjectsCmd::New { file, name, output } => {
-                    let name = name.unwrap_or_else(|| hark_core::project::name_of_path(&file));
-                    config.create_project(&file, &name)?;
+                ProjectsCmd::New { file, output } => {
+                    config.create_project(&file)?;
                     if let Some(o) = output {
                         config.set_output_root(Some(abs_dir(&o)?))?;
                     }
@@ -467,35 +450,6 @@ fn run() -> Result<()> {
                     config.forget_project(&path)?;
                 }
                 ProjectsCmd::Output { dir } => config.set_output_root(Some(abs_dir(&dir)?))?,
-                ProjectsCmd::Scope { cmd } => {
-                    let Some(active) = config.active.as_mut() else { return Err(anyhow!("no project open; the default state has no scope")) };
-                    match cmd.unwrap_or(ScopeCmd::List) {
-                        ScopeCmd::List => {}
-                        ScopeCmd::Add { folder } => {
-                            let f = abs(&folder)?;
-                            if !active.project.scope.contains(&f) {
-                                active.project.scope.push(f);
-                            }
-                        }
-                        ScopeCmd::Remove { folder } => {
-                            let f = abs(&folder)?;
-                            active.project.scope.retain(|p| p != &f);
-                        }
-                        ScopeCmd::Clear => active.project.scope.clear(),
-                    }
-                    config.save_project()?;
-                    if json {
-                        print_json(&config.scope())?;
-                    } else {
-                        for p in config.scope() {
-                            println!("{}", p.display());
-                        }
-                        if config.scope().is_empty() {
-                            println!("(whole library)");
-                        }
-                    }
-                    return Ok(());
-                }
             }
             let open = config.project.clone();
             let rows: Vec<serde_json::Value> = config
@@ -507,33 +461,34 @@ fn run() -> Result<()> {
                         "file": path,
                         "open": Some(path) == open.as_ref(),
                         "missing": loaded.is_none(),
-                        "name": loaded.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| hark_core::project::name_of_path(path)),
+                        "name": hark_core::project::name_of_path(path),
                         "id": loaded.as_ref().map(|p| p.id.clone()),
                         "output_root": loaded.as_ref().and_then(|p| p.output_root.clone()),
-                        "scope": loaded.as_ref().map(|p| p.scope.clone()).unwrap_or_default(),
+                        "roots": loaded.as_ref().map(|p| p.roots.clone()).unwrap_or_default(),
                         "favorites": loaded.as_ref().and_then(|p| db.favorite_count(&p.id).ok()).unwrap_or(0),
                     })
                 })
                 .collect();
             if json {
-                print_json(&serde_json::json!({ "open": open, "default_output_root": config.output_root, "default_favorites": db.favorite_count(hark_core::config::DEFAULT_PROJECT).unwrap_or(0), "projects": rows }))?;
+                print_json(&serde_json::json!({ "open": open, "default_roots": config.roots, "default_output_root": config.output_root, "default_favorites": db.favorite_count(hark_core::config::DEFAULT_PROJECT).unwrap_or(0), "projects": rows }))?;
             } else {
                 println!(
-                    "{} {:<16} {:<40} {} favorites, whole library",
+                    "{} {:<16} {:<40} {} favorites, {} folders",
                     if open.is_none() { "*" } else { " " },
                     "Default",
                     config.output_root.as_ref().map(|o| o.display().to_string()).unwrap_or_else(|| "(no output folder)".into()),
-                    db.favorite_count(hark_core::config::DEFAULT_PROJECT).unwrap_or(0)
+                    db.favorite_count(hark_core::config::DEFAULT_PROJECT).unwrap_or(0),
+                    config.roots.len()
                 );
                 for r in &rows {
-                    let scope = r["scope"].as_array().map(|s| s.len()).unwrap_or(0);
+                    let roots = r["roots"].as_array().map(|s| s.len()).unwrap_or(0);
                     println!(
-                        "{} {:<16} {:<40} {} favorites, scope: {}  {}{}",
+                        "{} {:<16} {:<40} {} favorites, {} folders  {}{}",
                         if r["open"].as_bool() == Some(true) { "*" } else { " " },
                         r["name"].as_str().unwrap_or(""),
                         r["output_root"].as_str().unwrap_or("(no output folder)"),
                         r["favorites"],
-                        if scope == 0 { "whole library".to_string() } else { format!("{scope} folders") },
+                        roots,
                         r["file"].as_str().unwrap_or(""),
                         if r["missing"].as_bool() == Some(true) { "  (missing)" } else { "" }
                     );
@@ -545,9 +500,9 @@ fn run() -> Result<()> {
             match cmd.unwrap_or(RootsCmd::List) {
                 RootsCmd::List => {
                     if json {
-                        print_json(&config.roots)?;
+                        print_json(&config.roots())?;
                     } else {
-                        for r in &config.roots {
+                        for r in config.roots() {
                             println!("{:<16} {}", r.name, r.path.display());
                         }
                     }
@@ -555,11 +510,11 @@ fn run() -> Result<()> {
                 RootsCmd::Add { path, name } => {
                     let path = abs(&path)?;
                     let name = name.unwrap_or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "root".into()));
-                    if config.roots.iter().any(|r| r.name == name) {
-                        return Err(anyhow!("root {name} exists"));
+                    if config.roots().iter().any(|r| r.name == name || r.path == path) {
+                        return Err(anyhow!("folder {name} is already in the project"));
                     }
-                    config.roots.push(Root { name: name.clone(), path: path.clone() });
-                    config.save()?;
+                    config.roots_mut().push(Root { name: name.clone(), path: path.clone() });
+                    config.save_target()?;
                     let mut db = open_db(&project)?;
                     let report = db.scan(&path, |_, _| {})?;
                     if json {
@@ -569,10 +524,9 @@ fn run() -> Result<()> {
                     }
                 }
                 RootsCmd::Remove { name } => {
-                    let Some(i) = config.roots.iter().position(|r| r.name == name) else { return Err(anyhow!("no root {name}")) };
-                    let root = config.roots.remove(i);
-                    config.save()?;
-                    open_db(&project)?.forget_root(&root.path)?;
+                    let Some(i) = config.roots().iter().position(|r| r.name == name) else { return Err(anyhow!("no folder {name}")) };
+                    config.roots_mut().remove(i);
+                    config.save_target()?;
                     println!("removed {name}");
                 }
             }
@@ -581,8 +535,8 @@ fn run() -> Result<()> {
             let config = load(&project)?;
             let mut db = open_db(&project)?;
             let roots: Vec<&Root> = match &root {
-                Some(r) => vec![config.roots.iter().find(|x| &x.name == r || x.path == Path::new(r)).ok_or_else(|| anyhow!("no root {r}"))?],
-                None => config.roots.iter().collect(),
+                Some(r) => vec![config.roots().iter().find(|x| &x.name == r || x.path == Path::new(r)).ok_or_else(|| anyhow!("no folder {r}"))?],
+                None => config.roots().iter().collect(),
             };
             let mut reports = Vec::new();
             for r in roots {
@@ -609,7 +563,7 @@ fn run() -> Result<()> {
                 text: words.join(" "),
                 dir: None,
                 under: under.map(|u| abs(&u)).transpose()?,
-                scope: config.scope().to_vec(),
+                scope: config.roots().iter().map(|r| r.path.clone()).collect(),
                 favorites_only: fav,
                 tags: tag,
                 extensions: extension,

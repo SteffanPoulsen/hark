@@ -106,9 +106,6 @@ enum ProjectAction {
     Browse,
     /// Save a new project file.
     New,
-    /// Open the project window.
-    Edit,
-    Close,
     Forget(PathBuf),
 }
 
@@ -201,12 +198,10 @@ struct App {
     scanning: bool,
     settings_open: bool,
     settings_page: settings::Page,
-    project_open: bool,
     /// The mark beside the wordmark, white on transparent, tinted at draw time.
     mark: egui::TextureHandle,
     search_id: egui::Id,
     tag_edit: Option<(usize, String)>,
-    project_edit: Option<String>,
     /// Playback was running when the device was reopened; resume once the file reloads.
     play_on_load: bool,
     /// Output file name for the next export; empty takes the preset's template.
@@ -239,13 +234,13 @@ impl App {
             let (w, h) = png.dimensions();
             cc.egui_ctx.load_texture("mark", egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], png.as_raw()), egui::TextureOptions::LINEAR)
         };
-        if !config.roots.is_empty() {
-            worker.send(Job::Scan(config.roots.clone()));
+        if !config.roots().is_empty() {
+            worker.send(Job::Scan(config.roots().to_vec()));
         }
         let preset_name = config.default_preset.clone();
         let preset = config.preset(&preset_name).cloned().unwrap_or_default();
-        let scanning = !config.roots.is_empty();
-        let expanded = config.scope_folders().into_iter().map(|(_, p)| p).collect();
+        let scanning = !config.roots().is_empty();
+        let expanded = config.roots().iter().map(|r| r.path.clone()).collect();
         App {
             config,
             theme,
@@ -281,12 +276,10 @@ impl App {
             scanning,
             file_count: 0,
             settings_open: false,
-            project_open: false,
             mark,
             settings_page: settings::Page::General,
             search_id: egui::Id::new("search"),
             tag_edit: None,
-            project_edit: None,
             play_on_load: false,
             export_name: String::new(),
             preset_edit: preset_name,
@@ -301,7 +294,7 @@ impl App {
         loop {
             self.expanded.insert(p.clone());
             match p.parent() {
-                Some(parent) if self.config.roots.iter().any(|r| p != r.path) && parent != Path::new("/") => p = parent.to_path_buf(),
+                Some(parent) if self.config.roots().iter().all(|r| p != r.path) && parent != Path::new("/") => p = parent.to_path_buf(),
                 _ => break,
             }
         }
@@ -343,14 +336,14 @@ impl App {
         };
         if !self.search.trim().is_empty() {
             q.text = self.search.clone();
-            q.scope = self.config.scope().to_vec();
+            q.scope = self.config.roots().iter().map(|r| r.path.clone()).collect();
             q.limit = SEARCH_LIMIT;
         } else {
             match &self.location {
                 Some(Location::Folder(d)) => q.dir = Some(d.clone()),
                 Some(Location::Favorites) => {
                     q.favorites_only = true;
-                    q.scope = self.config.scope().to_vec();
+                    q.scope = self.config.roots().iter().map(|r| r.path.clone()).collect();
                 }
                 None => {
                     self.files.clear();
@@ -744,7 +737,7 @@ impl App {
 
 
     fn icon_button(ui: &mut egui::Ui, icon: &str, label: &str, on: bool) -> egui::Response {
-        ui.add(egui::Button::new(theme::icon_text(icon, label, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).selected(on))
+        ui.add(egui::Button::new(theme::icon_text(icon, label, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).selected(on).min_size(egui::vec2(30.0, 28.0)))
     }
 
     // ---- panels ----
@@ -754,7 +747,9 @@ impl App {
             ui.spacing_mut().item_spacing.x = theme::GAP;
             ui.scope(|ui| {
                 ui.spacing_mut().item_spacing.x = 7.0;
-                ui.add(egui::Image::new(&self.mark).fit_to_exact_size(egui::vec2(22.0, 22.0)).tint(self.theme.accent2));
+                let [w, h] = self.mark.size();
+                let mark_h = 18.0;
+                ui.add(egui::Image::new(&self.mark).fit_to_exact_size(egui::vec2(mark_h * w as f32 / h as f32, mark_h)).tint(self.theme.accent2));
                 ui.label(theme::semibold("hark").size(18.0).color(self.theme.accent));
             });
             if let Some(action) = self.project_menu(ui, "project", 0.0) {
@@ -794,20 +789,40 @@ impl App {
 
     fn add_root(&mut self) {
         let Some(path) = rfd::FileDialog::new().pick_folder() else { return };
-        if self.config.roots.iter().any(|r| r.path == path) {
+        if self.config.roots().iter().any(|r| r.path == path) {
             return;
         }
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "root".into());
-        self.config.roots.push(hark_core::config::Root { name, path: path.clone() });
-        let _ = self.config.save();
+        self.config.roots_mut().push(hark_core::config::Root { name, path: path.clone() });
+        if let Err(e) = self.config.save_target() {
+            self.set_status(format!("Project: {e:#}"), true);
+        }
         self.expanded.insert(path);
         self.rescan();
     }
 
+    /// Takes a folder out of the open project (or the default state); the library rows stay,
+    /// since another project may browse the same folder.
+    fn remove_root(&mut self, path: &Path) {
+        self.config.roots_mut().retain(|r| r.path != path);
+        if let Err(e) = self.config.save_target() {
+            self.set_status(format!("Project: {e:#}"), true);
+        }
+        if matches!(&self.location, Some(Location::Folder(d)) if d.starts_with(path)) {
+            self.location = None;
+        }
+        self.list_dirty = true;
+    }
+
     fn rescan(&mut self) {
-        self.scanning = true;
         self.dir_children.clear();
-        self.worker.send(Job::Scan(self.config.roots.clone()));
+        if self.config.roots().is_empty() {
+            self.scanning = false;
+            self.list_dirty = true;
+            return;
+        }
+        self.scanning = true;
+        self.worker.send(Job::Scan(self.config.roots().to_vec()));
     }
 
     fn ui_filter(&mut self, ui: &mut egui::Ui) {
@@ -871,7 +886,7 @@ impl App {
                 if ui.add(theme::tool_button_widget(icons::FOLDER_PLUS, "Add folder").min_size(egui::vec2(w, 30.0))).on_hover_text("Add a library folder").clicked() {
                     self.add_root();
                 }
-                let can = !self.scanning && !self.config.roots.is_empty();
+                let can = !self.scanning && !self.config.roots().is_empty();
                 if ui.add_enabled(can, theme::tool_button_widget(icons::ARROWS_CLOCKWISE, "Rescan").min_size(egui::vec2(w, 30.0))).on_hover_text("Walk the library folders again").clicked() {
                     self.rescan();
                 }
@@ -887,16 +902,16 @@ impl App {
                 self.list_dirty = true;
             }
             ui.add_space(6.0);
-            if self.config.roots.is_empty() {
+            if self.config.roots().is_empty() {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
-                    ui.weak("No library folders yet. Add one below.");
+                    ui.weak(if self.config.active.is_some() { "No folders in this project yet. Add one below." } else { "No library folders yet. Add one below." });
                 });
                 return;
             }
-            for (name, path) in self.config.scope_folders() {
-                self.ui_tree_node(ui, &path, &name, 0);
+            for r in self.config.roots().to_vec() {
+                self.ui_tree_node(ui, &r.path, &r.name, 0);
             }
         });
     }
@@ -962,6 +977,27 @@ impl App {
                 self.expanded.remove(dir);
             } else {
                 self.expanded.insert(dir.to_path_buf());
+            }
+        }
+        let mut remove = false;
+        let mut show = false;
+        resp.context_menu(|ui| {
+            if depth == 0 && ui.button(theme::icon_text(icons::X, "Remove folder from the project", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
+                remove = true;
+                ui.close();
+            }
+            if ui.button(theme::icon_text(icons::FOLDER_OPEN, "Show in folder", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
+                show = true;
+                ui.close();
+            }
+        });
+        if remove {
+            self.remove_root(dir);
+            return;
+        }
+        if show {
+            if let Err(e) = reveal(dir) {
+                self.set_status(format!("Show in folder: {e}"), true);
             }
         }
         if self.expanded.contains(dir) {
@@ -1581,7 +1617,7 @@ impl App {
     /// start one. `width` of zero lets the button size itself.
     pub fn project_menu(&mut self, ui: &mut egui::Ui, id: &str, width: f32) -> Option<ProjectAction> {
         let mut action = None;
-        let label = theme::icon_text(icons::CUBE, self.config.project_name(), 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER);
+        let label = theme::icon_text(icons::CUBE, &self.config.project_name(), 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER);
         let mut combo = egui::ComboBox::from_id_salt(id).selected_text(label);
         if width > 0.0 {
             combo = combo.width(width);
@@ -1592,19 +1628,21 @@ impl App {
             }
             for path in self.config.project_files.clone() {
                 let open = self.config.project.as_deref() == Some(&path);
-                let (name, missing) = match hark_core::Project::load(&path) {
-                    Ok(p) => (p.name, false),
-                    Err(_) => (hark_core::project::name_of_path(&path), true),
-                };
+                let name = hark_core::project::name_of_path(&path);
+                let missing = !path.is_file();
                 let text = if missing { RichText::new(format!("{name}  (missing)")).color(self.theme.muted) } else { RichText::new(name) };
-                if ui.add_enabled(!missing, egui::Button::selectable(open, text)).on_hover_text(path.display().to_string()).clicked() {
-                    action = Some(ProjectAction::Open(path));
-                }
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!missing, egui::Button::selectable(open, text)).on_hover_text(path.display().to_string()).clicked() {
+                        action = Some(ProjectAction::Open(path.clone()));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(egui::Button::new(theme::icon(icons::X).size(13.0).color(self.theme.muted)).frame(false)).on_hover_text("Forget this project. The file and its favorites stay.").clicked() {
+                            action = Some(ProjectAction::Forget(path.clone()));
+                        }
+                    });
+                });
             }
             ui.separator();
-            if self.config.active.is_some() && ui.selectable_label(false, theme::icon_text(icons::PENCIL_SIMPLE, "Edit project…", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
-                action = Some(ProjectAction::Edit);
-            }
             if ui.selectable_label(false, theme::icon_text(icons::FOLDER_OPEN, "Open…", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
                 action = Some(ProjectAction::Browse);
             }
@@ -1617,7 +1655,7 @@ impl App {
 
     pub fn apply_project_action(&mut self, action: ProjectAction) {
         let result = match action {
-            ProjectAction::Default | ProjectAction::Close => self.config.close_project(),
+            ProjectAction::Default => self.config.close_project(),
             ProjectAction::Open(path) => self.config.open_project(&path),
             ProjectAction::Forget(path) => self.config.forget_project(&path),
             ProjectAction::Browse => match rfd::FileDialog::new().add_filter("hark project", &[hark_core::project::EXTENSION]).pick_file() {
@@ -1627,26 +1665,16 @@ impl App {
             ProjectAction::New => {
                 let dialog = rfd::FileDialog::new().add_filter("hark project", &[hark_core::project::EXTENSION]).set_file_name(format!("project.{}", hark_core::project::EXTENSION));
                 let Some(path) = dialog.save_file() else { return };
-                let name = hark_core::project::name_of_path(&path);
-                let r = self.config.create_project(&path, &name);
-                if r.is_ok() {
-                    self.project_open = true;
-                }
-                r
-            }
-            ProjectAction::Edit => {
-                self.project_open = true;
-                return;
+                self.config.create_project(&path)
             }
         };
         if let Err(e) = result {
             self.set_status(format!("Project: {e:#}"), true);
         }
         self.db.set_project(self.config.project_id());
-        self.project_edit = None;
         self.location = None;
-        self.list_dirty = true;
-        self.expanded = self.config.scope_folders().into_iter().map(|(_, p)| p).collect();
+        self.expanded = self.config.roots().iter().map(|r| r.path.clone()).collect();
+        self.rescan();
     }
 
     fn apply_tag_action(&mut self, action: TagAction) {
@@ -1843,7 +1871,6 @@ impl eframe::App for App {
         });
 
         self.ui_settings(&ctx);
-        self.ui_project_window(&ctx);
 
         let analysing = self.current.as_ref().map(|c| c.peaks.is_none()).unwrap_or(false);
         if self.is_playing() || !self.pending.is_empty() || analysing {
