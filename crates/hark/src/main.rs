@@ -916,43 +916,48 @@ impl App {
         let n = self.filter.count();
         let label = if n == 0 { "Filter".to_string() } else { format!("Filter · {n}") };
         let button = Self::icon_button(ui, icons::FUNNEL, &label, n > 0);
-        let muted = self.theme.muted;
-        let heading = |ui: &mut egui::Ui, text: &str| {
-            ui.add_space(4.0);
-            ui.label(RichText::new(text).color(muted).size(12.0));
-        };
         let mut changed = false;
-        let popup = egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(220.0);
+        let popup = egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
         if std::env::var_os("HARK_OPEN_POPUP").map(|v| v == "filter").unwrap_or(false) {
             egui::Popup::open_id(ui.ctx(), popup.get_id());
         }
+        let theme = self.theme.clone();
         popup.show(|ui| {
+            theme::menu_items(ui);
             ui.spacing_mut().item_spacing.y = 6.0;
-            changed |= theme::check(ui, &mut self.filter.favorites, theme::icon_text(icons::STAR, "Favorites", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).changed();
-            heading(ui, "Tags");
-            for (k, t) in self.config.tags.clone().iter().enumerate() {
-                let mut on = self.filter.tags.contains(&t.name);
-                if theme::check(ui, &mut on, RichText::new(&t.name).color(self.theme.color_of(k, Some(t)).gamma_multiply(1.3).to_opaque())).changed() {
-                    toggle_in(&mut self.filter.tags, t.name.clone());
-                    changed = true;
-                }
-            }
-            heading(ui, "File type");
-            for (name, _) in FILE_TYPES {
-                let mut on = self.filter.types.contains(&name);
-                if theme::check(ui, &mut on, name).changed() {
-                    toggle_in(&mut self.filter.types, name);
-                    changed = true;
-                }
-            }
-            heading(ui, "Channels");
-            for c in ChannelClass::ALL {
-                let mut on = self.filter.channels.contains(&c);
-                if theme::check(ui, &mut on, c.name()).changed() {
-                    toggle_in(&mut self.filter.channels, c);
-                    changed = true;
-                }
-            }
+            // Two columns: the marks on the left, what the file is on the right.
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    changed |= theme::menu_check(ui, &mut self.filter.favorites, theme::icon_text(icons::STAR, "Favorites", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).changed();
+                    theme::menu_heading(ui, &theme, "Tags");
+                    for (k, t) in self.config.tags.clone().iter().enumerate() {
+                        let mut on = self.filter.tags.contains(&t.name);
+                        if theme::menu_check(ui, &mut on, RichText::new(&t.name).color(theme.color_of(k, Some(t)).gamma_multiply(1.3).to_opaque())).changed() {
+                            toggle_in(&mut self.filter.tags, t.name.clone());
+                            changed = true;
+                        }
+                    }
+                });
+                ui.add_space(16.0);
+                ui.vertical(|ui| {
+                    theme::menu_heading(ui, &theme, "File type");
+                    for (name, _) in FILE_TYPES {
+                        let mut on = self.filter.types.contains(&name);
+                        if theme::menu_check(ui, &mut on, name).changed() {
+                            toggle_in(&mut self.filter.types, name);
+                            changed = true;
+                        }
+                    }
+                    theme::menu_heading(ui, &theme, "Channels");
+                    for c in ChannelClass::ALL {
+                        let mut on = self.filter.channels.contains(&c);
+                        if theme::menu_check(ui, &mut on, c.name()).changed() {
+                            toggle_in(&mut self.filter.channels, c);
+                            changed = true;
+                        }
+                    }
+                });
+            });
             ui.add_space(4.0);
             if ui.add_enabled(n > 0, egui::Button::new("Clear")).clicked() {
                 self.filter.clear();
@@ -1069,6 +1074,7 @@ impl App {
         let mut remove = false;
         let mut show = false;
         resp.context_menu(|ui| {
+            theme::menu_items(ui);
             if depth == 0 && ui.button(theme::icon_text(icons::X, "Remove folder from the project", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
                 remove = true;
                 ui.close();
@@ -1710,6 +1716,7 @@ impl App {
         label.append(icons::CARET_DOWN, 7.0, egui::text::TextFormat { font_id: FontId::new(12.0, egui::FontFamily::Name(theme::ICONS.into())), color: Color32::PLACEHOLDER, valign: egui::Align::Center, ..Default::default() });
         let button = ui.add(egui::Button::new(label).min_size(egui::vec2(30.0, CONTROL_H)));
         egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClick).width(220.0).show(|ui| {
+            theme::menu_items(ui);
             if ui.selectable_label(self.config.active.is_none(), "Default").clicked() {
                 action = Some(ProjectAction::Default);
             }
@@ -1865,17 +1872,17 @@ enum FileAction {
 /// The per-file menu: favorite, every tag with the carried ones checked, and the file's place
 /// on disk. Returns what was clicked; toggles keep the menu open, the rest close it.
 fn file_menu(ui: &mut egui::Ui, file: &FileRecord, defs: &[hark_core::TagDef], theme: &Theme) -> Option<FileAction> {
-    ui.set_min_width(180.0);
+    theme::menu_items(ui);
     let mut action = None;
     let mut fav = file.favorite;
-    if theme::check(ui, &mut fav, theme::icon_text(icons::STAR, "Favorite", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).on_hover_text("F").changed() {
+    if theme::menu_check(ui, &mut fav, theme::icon_text(icons::STAR, "Favorite", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).on_hover_text("F").changed() {
         action = Some(FileAction::Favorite);
     }
     ui.separator();
     for (k, t) in defs.iter().enumerate() {
         let mut on = file.tags.contains(&t.name);
         let color = theme.color_of(k, Some(t)).gamma_multiply(1.3).to_opaque();
-        let label = theme::check(ui, &mut on, RichText::new(&t.name).color(color));
+        let label = theme::menu_check(ui, &mut on, RichText::new(&t.name).color(color));
         let label = if k < 9 { label.on_hover_text(format!("key {}", k + 1)) } else { label };
         if label.changed() {
             action = Some(FileAction::Tag(t.name.clone()));
