@@ -743,12 +743,15 @@ impl App {
     // ---- panels ----
 
     fn ui_top(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        // One fixed row height, so every item centres on the same line whatever is placed
+        // after it (egui centres each item in the row height known when it is placed).
+        const ROW_H: f32 = 30.0;
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP;
             // The brand is one word: the mark stands on the letters' baseline and reaches
             // their ascender line, measured from the glyphs' own ink, and that block, not the
             // font box, is centred on the controls.
-            let control_h = 28.0;
+            let control_h = ROW_H;
             let font = FontId::new(18.0, egui::FontFamily::Name(theme::SEMIBOLD.into()));
             let word = ui.fonts_mut(|f| f.layout_no_wrap("hark".into(), font.clone(), self.theme.accent));
             let (ink_top, ink_bottom) = word
