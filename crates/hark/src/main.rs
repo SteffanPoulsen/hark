@@ -926,8 +926,7 @@ impl App {
         let max_h = ui.ctx().content_rect().height() - button.rect.bottom() - 90.0;
         popup.show(|ui| {
             theme::menu_items(ui);
-            ui.set_width(190.0);
-            egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(max_h).auto_shrink([ui.is_sizing_pass(), true]).show(ui, |ui| {
                 changed |= theme::menu_check(ui, &mut self.filter.favorites, theme::icon_text(icons::STAR, "Favorites", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).changed();
                 theme::menu_heading(ui, &theme, "Tags");
                 for (k, t) in self.config.tags.clone().iter().enumerate() {
