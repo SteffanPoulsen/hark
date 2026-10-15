@@ -1,0 +1,92 @@
+# Builds the release archives for Linux, Windows and macOS. A pushed tag `v*` attaches them
+# to a draft release of that tag, left for a person to publish; a manual run only keeps
+# them as workflow artifacts.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: linux-x86_64
+          - os: windows-latest
+            name: windows-x86_64
+          - os: macos-latest
+            name: macos-universal
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpipewire-0.3-dev libasound2-dev libclang-dev pkg-config libxkbcommon-dev libwayland-dev libgl-dev
+      - name: Version
+        id: version
+        shell: bash
+        run: echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.name }}" = macos-universal ]; then
+            cargo build --release --target aarch64-apple-darwin
+            cargo build --release --target x86_64-apple-darwin
+          else
+            cargo build --release
+          fi
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=${{ steps.version.outputs.version }}
+          dir=hark-$v-${{ matrix.name }}
+          mkdir -p dist/$dir
+          cp README.md LICENSE dist/$dir/
+          case "${{ matrix.name }}" in
+            linux-x86_64)
+              cp target/release/hark target/release/hark-cli packaging/hark.desktop packaging/install.sh dist/$dir/
+              mkdir dist/$dir/icons
+              cp crates/hark/assets/icon/hark-*.png crates/hark/assets/icon/hark.svg dist/$dir/icons/
+              tar -C dist -czf dist/$dir.tar.gz $dir
+              ;;
+            windows-x86_64)
+              cp target/release/hark.exe target/release/hark-cli.exe dist/$dir/
+              (cd dist && 7z a -tzip -bso0 $dir.zip $dir)
+              ;;
+            macos-universal)
+              for b in hark hark-cli; do
+                lipo -create -output dist/$dir/$b target/aarch64-apple-darwin/release/$b target/x86_64-apple-darwin/release/$b
+              done
+              tar -C dist -czf dist/$dir.tar.gz $dir
+              ;;
+          esac
+          ls -l dist/*.tar.gz dist/*.zip 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+      - name: Attach to the draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=${GITHUB_REF#refs/tags/}
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --draft --title "hark ${tag#v}" --notes "Draft."
+          gh release upload "$tag" dist/hark-*-${{ matrix.name }}.* --clobber
