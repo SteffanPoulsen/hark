@@ -331,7 +331,12 @@ impl App {
     }
 
     fn toggle_favorite(&mut self) {
-        let Some(i) = self.selected else { return };
+        if let Some(i) = self.selected {
+            self.toggle_favorite_of(i);
+        }
+    }
+
+    fn toggle_favorite_of(&mut self, i: usize) {
         let path = self.files[i].path.clone();
         let on = !self.files[i].favorite;
         match self.db.ensure_hash(&path).and_then(|h| self.db.set_favorite(&h, on)) {
@@ -735,11 +740,14 @@ impl App {
                     let f = &files[i];
                     row.set_selected(selected == Some(i));
                     let (_, star) = row.col(|ui| {
-                        if f.favorite {
-                            ui.label(theme::icon_fill(icons::STAR).color(theme.accent2));
-                        } else {
-                            ui.label(theme::icon(icons::STAR).color(theme.line));
-                        }
+                        let hot = ui.ui_contains_pointer();
+                        let color = match (f.favorite, hot) {
+                            (true, true) => theme.accent2.gamma_multiply(1.4).to_opaque(),
+                            (true, false) | (false, true) => theme.accent2,
+                            (false, false) => theme.muted.gamma_multiply(0.7),
+                        };
+                        let icon = if f.favorite || hot { theme::icon_fill(icons::STAR) } else { theme::icon(icons::STAR) };
+                        ui.label(icon.color(color).size(15.0));
                     });
                     if star.clicked() {
                         fav_toggle = Some(i);
@@ -776,7 +784,8 @@ impl App {
                         ui.label(weak(f.lufs.map(|l| format!("{l:.1}")).unwrap_or_default()));
                     });
                     let resp = row.response();
-                    if resp.double_clicked() {
+                    if fav_toggle == Some(i) {
+                    } else if resp.double_clicked() {
                         double = Some(i);
                     } else if resp.clicked() {
                         clicked = Some(i);
@@ -784,8 +793,7 @@ impl App {
                 });
             });
         if let Some(i) = fav_toggle {
-            self.selected = Some(i);
-            self.toggle_favorite();
+            self.toggle_favorite_of(i);
         }
         if let Some(i) = double {
             self.select(i, true);
