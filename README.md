@@ -15,7 +15,7 @@ Auditioning a big library in a DAW means importing first, and in a file manager 
 ## Features
 
 - **Instant audition.** Arrowing through the list plays each file as it lands: one always-open audio stream, pre-decoded neighbours, cached waveform peaks. Hour-long recordings stream from disk and start as fast as a one-shot.
-- **Library, not import.** Folders stay where they are and are never modified. The list shows duration, channels, rate, bit depth, codec and loudness; search covers everything, and a filter narrows by favorites, tags, type and channels.
+- **Library, not import.** Folders stay where they are and are never modified. A folder lists everything under it, each file with its subfolder, duration, channels, rate, bit depth, codec and loudness; search covers everything, and a filter narrows by favorites, tags, type and channels.
 - **Favorites and tags** from the keyboard. Tags are yours to define, with a colour each. Marks key on the file's content, so a renamed or moved file keeps them.
 - **Projects.** A `.hark` file beside the game, the edit or the show holds its library folders, its output folder and its own favorites. Switch between projects from the top bar.
 - **Waveform selection with fades.** Drag a region or trim it to the sound, step through the takes a recording holds with Left and Right, set fade in and out, zoom, loop, seek by clicking, and scale the level with the fader beside the waveform.

@@ -438,7 +438,7 @@ impl App {
             q.limit = SEARCH_LIMIT;
         } else {
             match &self.location {
-                Some(Location::Folder(d)) => q.dir = Some(d.clone()),
+                Some(Location::Folder(d)) => q.under = Some(d.clone()),
                 Some(Location::Favorites) => {
                     q.favorites_only = true;
                     q.scope = self.config.roots().iter().map(|r| r.path.clone()).collect();
@@ -1167,12 +1167,18 @@ impl App {
         let mut fav_toggle: Option<usize> = None;
         let mut action: Option<(usize, FileAction)> = None;
         let defs = self.config.tags.clone();
+        let shown_folder = match &self.location {
+            Some(Location::Folder(d)) if self.search.trim().is_empty() => Some(d.clone()),
+            _ => None,
+        };
+        let nested = shown_folder.as_deref().map(|base| self.files.iter().any(|f| f.path.parent() != Some(base))).unwrap_or(true);
         let mut builder = TableBuilder::new(ui)
             .striped(true)
             .sense(Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::exact(26.0))
             .column(Column::remainder().at_least(220.0).clip(true))
+            .columns(Column::initial(180.0).at_least(60.0).clip(true), nested as usize)
             .column(Column::initial(200.0).at_least(60.0).clip(true))
             .column(Column::exact(74.0))
             .column(Column::exact(30.0))
@@ -1191,6 +1197,14 @@ impl App {
         let unknown_color = self.theme.tag_color(self.theme.tag_colors.len() - 1);
         let files = &self.files;
         let selected = self.selected;
+        let config = &self.config;
+        let folder_of = |f: &FileRecord| -> Option<PathBuf> {
+            let dir = f.path.parent()?;
+            match &shown_folder {
+                Some(base) => dir.strip_prefix(base).ok().map(Path::to_path_buf),
+                None => config.root_of(&f.path).and_then(|r| dir.strip_prefix(&r.path).ok().map(|rel| Path::new(&r.name).join(rel))),
+            }
+        };
         let chip = |ui: &mut egui::Ui, text: &str, color: Color32| {
             let font = FontId::new(11.0, egui::FontFamily::Name(theme::MEDIUM.into()));
             let galley = ui.painter().layout_no_wrap(text.to_string(), font, Color32::WHITE);
@@ -1201,7 +1215,7 @@ impl App {
         };
         builder
             .header(24.0, |mut h| {
-                for title in ["", "Name", "Tags", "Length", "Ch", "Rate", "Bits", "Codec", "LUFS"] {
+                for title in ["", "Name", "Folder", "Tags", "Length", "Ch", "Rate", "Bits", "Codec", "LUFS"].into_iter().filter(|t| nested || *t != "Folder") {
                     h.col(|ui| {
                         ui.label(RichText::new(title).color(theme.muted).size(12.0));
                     });
@@ -1229,6 +1243,13 @@ impl App {
                         let text = if f.error.is_some() { RichText::new(&f.name).color(theme.err) } else { RichText::new(&f.name) };
                         ui.label(text);
                     });
+                    if nested {
+                        row.col(|ui| {
+                            if let Some(folder) = folder_of(f) {
+                                folder_label(ui, &folder, theme.muted);
+                            }
+                        });
+                    }
                     row.col(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         for t in &f.tags {
@@ -1938,8 +1959,29 @@ fn file_menu(ui: &mut egui::Ui, file: &FileRecord, defs: &[hark_core::TagDef], t
     action
 }
 
-/// Opens the file's folder in the desktop's file manager, selecting the file where that is
-/// supported.
+/// A folder path in a cell; when it is too wide, leading components give way to an ellipsis
+/// so the nearest folders stay readable.
+fn folder_label(ui: &mut egui::Ui, folder: &Path, color: Color32) {
+    let parts: Vec<String> = folder.iter().map(|c| c.to_string_lossy().into_owned()).collect();
+    if parts.is_empty() {
+        return;
+    }
+    let sep = std::path::MAIN_SEPARATOR_STR;
+    let full = parts.join(sep);
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let width = ui.available_width();
+    let fits = |ui: &egui::Ui, s: &str| ui.painter().layout_no_wrap(s.to_string(), font.clone(), color).size().x <= width;
+    let text = if fits(ui, &full) {
+        full.clone()
+    } else {
+        (1..parts.len()).map(|drop| format!("…{sep}{}", parts[drop..].join(sep))).find(|s| fits(ui, s)).unwrap_or_else(|| "…".to_string())
+    };
+    let label = ui.label(RichText::new(&text).color(color));
+    if text != full {
+        label.on_hover_text(full);
+    }
+}
+
 /// Folders under `root`, a few levels deep, relative and sorted; enough to pick a target from.
 fn subfolders(root: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, root: &Path, depth: usize, out: &mut Vec<PathBuf>) {
@@ -1963,6 +2005,8 @@ fn subfolders(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Opens the file's folder in the desktop's file manager, selecting the file where that is
+/// supported.
 fn reveal(path: &Path) -> std::io::Result<()> {
     use std::process::Command;
     #[cfg(target_os = "windows")]
