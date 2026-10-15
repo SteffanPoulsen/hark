@@ -8,7 +8,8 @@ Linux (Wayland) first, Windows supported from the same codebase. No accounts, no
 
 - **Browse** one or more library folders in a tree. The list shows duration, channels, sample rate, bit depth, codec and loudness for every file, and search covers the whole library.
 - **Audition** at speed: arrowing through the list plays each file instantly. One always-open audio stream, pre-decoded neighbours, cached waveform peaks. Loop, seek by clicking the waveform, gain trim.
-- **Mark** favorites and tags. Tags are yours to define, each can pick an export preset. Marks follow a file through renames because they key on content, not path.
+- **Mark** favorites and tags. Tags are yours to define, with a color and an export preset each, edited in the settings window. Marks follow a file through renames because they key on content, not path.
+- **Projects** hold the target: an output folder, a library scope (the folders that matter for this game), and favorites of their own. Switch projects from the top bar; tags and presets stay global.
 - **Select** a region on the waveform, drag fade handles for fade in and out, zoom with the wheel.
 - **Export** through a preset: WAV or FLAC, bit depth with dither, resampling, mono downmix, trim silence, peak or EBU R128 loudness normalisation with a true-peak ceiling, and a path template such as `{tag}/{name}` under your output folder.
 - **Remember**: every export embeds its origin, in a `hark` RIFF chunk plus a BWF `bext` description for WAV and an APPLICATION block plus Vorbis comment for FLAC. Months later, `hark-cli inspect` on the file tells you the source path, the pack, the selection, the fades, the preset and the measured gain. `hark-cli reexport` runs that recipe again with changes.
@@ -41,7 +42,7 @@ Start `hark`, add a library folder, pick a folder in the tree, and arrow through
 | Delete | Clear the selection and fades |
 | E | Export the selection with the chosen preset |
 
-On the waveform: drag to select, drag a selection edge to adjust it, shift-drag inside to move it, drag the triangles at the top to set fades, click to play from there, wheel to pan, ctrl-wheel to zoom, double-click to zoom out.
+On the waveform: drag to select, drag a selection edge to adjust it, shift-drag inside to move it, drag the triangles in the strip above to set fades, click to play from there, wheel to zoom, shift-wheel or middle-drag to pan, double-click to zoom out. Ctrl+= and Ctrl+- scale the whole window.
 
 ### CLI
 
@@ -52,7 +53,9 @@ hark-cli search footstep gravel --tag sfx
 hark-cli tag "Footsteps/gravel_03.wav" +sfx +foley
 hark-cli fav "Footsteps/gravel_03.wav"
 hark-cli analyze "Footsteps/gravel_03.wav" --store
-hark-cli config --output-root ~/Projects/game/Assets/Audio
+hark-cli projects add mygame --output ~/Projects/game/Assets/Audio --activate
+hark-cli projects scope add ~/Audio/Libraries/Footsteps
+hark-cli tags add footstep --color '#79b86a' --preset sfx
 hark-cli export "Footsteps/gravel_03.wav" --preset sfx --in 0.2 --out 1.4 --fade-out 0.1
 hark-cli inspect ~/Projects/game/Assets/Audio/sfx/gravel_03.wav
 hark-cli reexport ~/Projects/game/Assets/Audio/sfx/*.wav --preset sfx
@@ -62,7 +65,7 @@ hark-cli reexport ~/Projects/game/Assets/Audio/sfx/*.wav --preset sfx
 
 ## Configuration
 
-`~/.config/hark/config.json` (or the platform equivalent) holds the roots, the output folder, the tags, and the export presets. The defaults define `clean`, `sfx`, `ambient`, `music` and `voice` presets and a matching set of tags. Edit the file or use `hark-cli config`.
+`~/.config/hark/config.json` (or the platform equivalent) holds the roots, the projects with their output folders and scopes, the tags, and the export presets. The defaults define `clean`, `sfx`, `ambient`, `music` and `voice` presets and a matching set of tags. Edit the file or use `hark-cli config`.
 
 The library database lives in the data directory and only indexes what the files already carry; deleting it loses nothing but the marks, which `hark-cli` can re-apply. Waveform peaks are cached in the cache directory.
 

@@ -43,7 +43,7 @@ pub struct ExportResult {
 
 impl ExportRequest {
     pub fn from_config(config: &Config, source: &Path, preset_name: Option<&str>, tags: Vec<String>, favorite: bool) -> Result<ExportRequest> {
-        let output_root = config.output_root.clone().ok_or_else(|| anyhow!("no output root configured"))?;
+        let output_root = config.output_root().map(|p| p.to_path_buf()).ok_or_else(|| anyhow!("project {} has no output folder", config.active_project))?;
         let (preset_name, preset) = match preset_name {
             Some(n) => (n.to_string(), config.preset(n).ok_or_else(|| anyhow!("unknown preset {n}"))?.clone()),
             None => {

@@ -105,6 +105,7 @@ struct App {
     scanning: bool,
     settings_open: bool,
     tag_edit: Option<(usize, String)>,
+    project_edit: Option<String>,
     file_count: usize,
 }
 
@@ -117,7 +118,8 @@ impl App {
         let theme = config.theme_file.as_ref().and_then(|p| Theme::from_file(p)).unwrap_or_default();
         theme.apply(&cc.egui_ctx);
         cc.egui_ctx.set_zoom_factor(config.ui_zoom.clamp(0.5, 3.0));
-        let db = Db::open().expect("library database");
+        let mut db = Db::open().expect("library database");
+        db.set_project(&config.active_project);
         let (player, audio_error) = match Player::open(config.audition_sample_rate) {
             Ok(p) => (Some(p), None),
             Err(e) => (None, Some(format!("{e:#}"))),
@@ -128,7 +130,7 @@ impl App {
         }
         let preset = config.default_preset.clone();
         let scanning = !config.roots.is_empty();
-        let expanded = config.roots.iter().map(|r| r.path.clone()).collect();
+        let expanded = config.scope_folders().into_iter().map(|(_, p)| p).collect();
         App {
             config,
             theme,
@@ -163,6 +165,7 @@ impl App {
             file_count: 0,
             settings_open: false,
             tag_edit: None,
+            project_edit: None,
         }
     }
 
@@ -211,7 +214,7 @@ impl App {
                 None => Ok(Vec::new()),
             }
         } else {
-            self.db.search(&Query { text: self.search.clone(), tag: self.filter_tag.clone(), favorites_only: self.fav_only, under: None, limit: 2000 })
+            self.db.search(&Query { text: self.search.clone(), tag: self.filter_tag.clone(), favorites_only: self.fav_only, under: None, scope: self.config.project().scope.clone(), limit: 2000 })
         };
         let mut files = match result {
             Ok(f) => f,
@@ -563,6 +566,28 @@ impl App {
     fn ui_top(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(theme::semibold("hark").size(18.0).color(self.theme.accent));
+            ui.add_space(4.0);
+            let mut switch: Option<String> = None;
+            egui::ComboBox::from_id_salt("project")
+                .selected_text(theme::icon_text(icons::CUBE, &self.config.active_project, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER))
+                .show_ui(ui, |ui| {
+                    for p in self.config.projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>() {
+                        if ui.selectable_label(p == self.config.active_project, &p).clicked() {
+                            switch = Some(p);
+                        }
+                    }
+                    ui.separator();
+                    if ui.selectable_label(false, theme::icon_text(icons::PLUS, "new project", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
+                        switch = Some(String::new());
+                    }
+                });
+            if let Some(p) = switch {
+                if p.is_empty() {
+                    self.new_project();
+                } else {
+                    self.switch_project(&p);
+                }
+            }
             ui.add_space(8.0);
             let search = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text(theme::icon_text(icons::MAGNIFYING_GLASS, "search the library", 14.0, egui::FontFamily::Proportional, self.theme.muted)).desired_width(280.0));
             if search.changed() {
@@ -622,9 +647,8 @@ impl App {
                 ui.weak("Add one with the button above.");
                 return;
             }
-            let roots = self.config.roots.clone();
-            for root in roots {
-                self.ui_tree_node(ui, &root.path, &root.name, 0);
+            for (name, path) in self.config.scope_folders() {
+                self.ui_tree_node(ui, &path, &name, 0);
             }
         });
     }
@@ -986,10 +1010,10 @@ impl App {
             }
             ui.add_space(10.0);
             ui.label(RichText::new("output folder").color(theme.muted).size(12.0));
-            let out = self.config.output_root.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "choose…".into());
+            let out = self.config.output_root().map(|p| p.display().to_string()).unwrap_or_else(|| "choose…".into());
             if ui.add(egui::Button::new(theme::icon_text(icons::FOLDER, &out, 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(ui.available_width(), 0.0)).wrap()).clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    self.config.output_root = Some(path);
+                    self.config.project_mut().output_root = Some(path);
                     let _ = self.config.save();
                 }
             }
@@ -1017,7 +1041,7 @@ impl App {
                 ui.checkbox(&mut self.overwrite, "overwrite");
             });
             ui.add_space(4.0);
-            let can = self.selected.is_some() && self.config.output_root.is_some();
+            let can = self.selected.is_some() && self.config.output_root().is_some();
             let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 14.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), if can { Color32::WHITE } else { theme.muted }))
                 .fill(if can { theme.accent } else { theme.overlay })
                 .min_size(egui::vec2(ui.available_width(), 32.0));
@@ -1040,12 +1064,144 @@ impl App {
         });
     }
 
+    fn switch_project(&mut self, name: &str) {
+        if !self.config.projects.iter().any(|p| p.name == name) {
+            return;
+        }
+        self.config.active_project = name.to_string();
+        self.db.set_project(name);
+        let _ = self.config.save();
+        self.selected_dir = None;
+        self.list_dirty = true;
+        self.expanded = self.config.scope_folders().into_iter().map(|(_, p)| p).collect();
+    }
+
+    fn new_project(&mut self) {
+        let mut name = "project".to_string();
+        let mut n = 2;
+        while self.config.projects.iter().any(|p| p.name == name) {
+            name = format!("project{n}");
+            n += 1;
+        }
+        self.config.projects.push(hark_core::Project { name: name.clone(), output_root: None, scope: Vec::new() });
+        self.switch_project(&name);
+        self.project_edit = Some(name);
+        self.settings_open = true;
+    }
+
+    fn ui_projects_settings(&mut self, ui: &mut egui::Ui) {
+        ui.label(theme::semibold("Projects").size(15.0));
+        ui.label(RichText::new("A project owns an output folder, a library scope and its own favorites.").color(self.theme.muted).size(12.0));
+        ui.add_space(6.0);
+        let names: Vec<String> = self.config.projects.iter().map(|p| p.name.clone()).collect();
+        ui.horizontal(|ui| {
+            for name in &names {
+                if ui.selectable_label(name == &self.config.active_project, name).clicked() {
+                    self.switch_project(name);
+                }
+            }
+            if ui.add(egui::Button::new(theme::icon(icons::PLUS)).small()).on_hover_text("new project").clicked() {
+                self.new_project();
+            }
+        });
+        ui.add_space(6.0);
+        let active = self.config.active_project.clone();
+        let favs = self.db.favorite_count(&active).unwrap_or(0);
+        egui::Grid::new("project-grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+            ui.label(RichText::new("name").color(self.theme.muted));
+            let editing = self.project_edit.is_some();
+            if editing {
+                let buf = self.project_edit.as_mut().unwrap();
+                let resp = ui.add(egui::TextEdit::singleline(buf).desired_width(200.0));
+                if resp.lost_focus() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                    let new = buf.trim().to_string();
+                    self.project_edit = None;
+                    if !new.is_empty() && new != active && !self.config.projects.iter().any(|p| p.name == new) {
+                        if let Err(e) = self.db.rename_project(&active, &new) {
+                            self.set_status(format!("rename project: {e:#}"), true);
+                        } else {
+                            self.config.project_mut().name = new.clone();
+                            self.config.active_project = new.clone();
+                            self.db.set_project(&new);
+                            let _ = self.config.save();
+                        }
+                    }
+                }
+            } else if ui.add(egui::Button::new(&active).min_size(egui::vec2(200.0, 0.0))).on_hover_text("click to rename").clicked() {
+                self.project_edit = Some(active.clone());
+            }
+            ui.end_row();
+            ui.label(RichText::new("output folder").color(self.theme.muted));
+            let out = self.config.output_root().map(|p| p.display().to_string()).unwrap_or_else(|| "choose…".into());
+            if ui.add(egui::Button::new(theme::icon_text(icons::FOLDER, &out, 13.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER))).clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.config.project_mut().output_root = Some(path);
+                    let _ = self.config.save();
+                }
+            }
+            ui.end_row();
+            ui.label(RichText::new("favorites").color(self.theme.muted));
+            ui.label(format!("{favs}"));
+            ui.end_row();
+            ui.label(RichText::new("scope").color(self.theme.muted));
+            ui.vertical(|ui| {
+                let scope = self.config.project().scope.clone();
+                if scope.is_empty() {
+                    ui.label(RichText::new("whole library").color(self.theme.muted));
+                }
+                let mut remove: Option<usize> = None;
+                for (i, p) in scope.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(theme::icon(icons::X)).small()).clicked() {
+                            remove = Some(i);
+                        }
+                        ui.label(p.display().to_string());
+                    });
+                }
+                if let Some(i) = remove {
+                    self.config.project_mut().scope.remove(i);
+                    let _ = self.config.save();
+                    self.expanded = self.config.scope_folders().into_iter().map(|(_, p)| p).collect();
+                    self.list_dirty = true;
+                }
+                if ui.add(egui::Button::new(theme::icon_text(icons::FOLDER_PLUS, "add folder to scope", 13.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER))).clicked() {
+                    let start = self.config.roots.first().map(|r| r.path.clone());
+                    let mut dialog = rfd::FileDialog::new();
+                    if let Some(s) = start {
+                        dialog = dialog.set_directory(s);
+                    }
+                    if let Some(path) = dialog.pick_folder() {
+                        if !self.config.project().scope.contains(&path) {
+                            self.config.project_mut().scope.push(path.clone());
+                            let _ = self.config.save();
+                            self.expanded.insert(path);
+                            self.list_dirty = true;
+                        }
+                    }
+                }
+            });
+            ui.end_row();
+        });
+        if self.config.projects.len() > 1 {
+            ui.add_space(4.0);
+            if ui.add(egui::Button::new(theme::icon_text(icons::TRASH, "remove this project", 13.0, egui::FontFamily::Proportional, self.theme.err))).clicked() {
+                let i = self.config.projects.iter().position(|p| p.name == active).unwrap_or(0);
+                self.config.projects.remove(i);
+                let _ = self.db.forget_project(&active);
+                let next = self.config.projects[0].name.clone();
+                self.switch_project(&next);
+            }
+        }
+    }
+
     fn ui_settings(&mut self, ctx: &egui::Context) {
         if !self.settings_open {
             return;
         }
         let mut open = true;
-        egui::Window::new("Settings").open(&mut open).resizable(true).default_width(520.0).show(ctx, |ui| {
+        egui::Window::new("Settings").open(&mut open).resizable(true).default_width(560.0).show(ctx, |ui| {
+            self.ui_projects_settings(ui);
+            ui.add_space(12.0);
             ui.label(theme::semibold("Tags").size(15.0));
             ui.label(RichText::new("Order is the 1 to 9 hotkey order. Renaming rewrites the marks; removing drops them.").color(self.theme.muted).size(12.0));
             ui.add_space(6.0);
@@ -1130,6 +1286,7 @@ impl App {
         if !open {
             self.settings_open = false;
             self.tag_edit = None;
+            self.project_edit = None;
         }
     }
 

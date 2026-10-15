@@ -13,12 +13,20 @@ struct Cli {
     /// Machine-readable output.
     #[arg(long, global = true)]
     json: bool,
+    /// Act as this project instead of the active one.
+    #[arg(long, global = true)]
+    project: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Projects: an output folder, a library scope and favorites of their own.
+    Projects {
+        #[command(subcommand)]
+        cmd: Option<ProjectsCmd>,
+    },
     /// Library roots.
     Roots {
         #[command(subcommand)]
@@ -112,6 +120,39 @@ enum RootsCmd {
         name: Option<String>,
     },
     Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum ProjectsCmd {
+    List,
+    Add {
+        name: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Make it the active project.
+        #[arg(long)]
+        activate: bool,
+    },
+    /// Make a project the active one.
+    Use { name: String },
+    /// Remove a project and its favorites.
+    Remove { name: String },
+    /// Set the active project's output folder.
+    Output { dir: PathBuf },
+    /// The active project's library scope.
+    Scope {
+        #[command(subcommand)]
+        cmd: Option<ScopeCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScopeCmd {
+    List,
+    Add { folder: PathBuf },
+    Remove { folder: PathBuf },
+    /// Back to the whole library.
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -222,12 +263,118 @@ fn print_records(records: &[hark_core::FileRecord], json: bool) -> Result<()> {
     Ok(())
 }
 
+fn load(project: &Option<String>) -> Result<Config> {
+    let mut config = Config::load()?;
+    if let Some(p) = project {
+        if !config.projects.iter().any(|x| &x.name == p) {
+            return Err(anyhow!("no project {p}"));
+        }
+        config.active_project = p.clone();
+    }
+    Ok(config)
+}
+
+fn open_db(project: &Option<String>) -> Result<Db> {
+    let config = load(project)?;
+    let mut db = Db::open()?;
+    db.set_project(&config.active_project);
+    Ok(db)
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let json = cli.json;
+    let project = cli.project.clone();
     match cli.cmd {
+        Cmd::Projects { cmd } => {
+            let mut config = load(&project)?;
+            let db = open_db(&project)?;
+            match cmd.unwrap_or(ProjectsCmd::List) {
+                ProjectsCmd::List => {}
+                ProjectsCmd::Add { name, output, activate } => {
+                    if config.projects.iter().any(|p| p.name == name) {
+                        return Err(anyhow!("project {name} exists"));
+                    }
+                    let output_root = output.map(|o| abs_dir(&o)).transpose()?;
+                    config.projects.push(hark_core::Project { name: name.clone(), output_root, scope: Vec::new() });
+                    if activate {
+                        config.active_project = name;
+                    }
+                    config.save()?;
+                }
+                ProjectsCmd::Use { name } => {
+                    if !config.projects.iter().any(|p| p.name == name) {
+                        return Err(anyhow!("no project {name}"));
+                    }
+                    config.active_project = name;
+                    config.save()?;
+                }
+                ProjectsCmd::Remove { name } => {
+                    let Some(i) = config.projects.iter().position(|p| p.name == name) else { return Err(anyhow!("no project {name}")) };
+                    if config.projects.len() == 1 {
+                        return Err(anyhow!("cannot remove the only project"));
+                    }
+                    config.projects.remove(i);
+                    if config.active_project == name {
+                        config.active_project = config.projects[0].name.clone();
+                    }
+                    config.save()?;
+                    let n = db.forget_project(&name)?;
+                    if !json {
+                        println!("removed {name} and {n} favorites");
+                    }
+                }
+                ProjectsCmd::Output { dir } => {
+                    config.project_mut().output_root = Some(abs_dir(&dir)?);
+                    config.save()?;
+                }
+                ProjectsCmd::Scope { cmd } => {
+                    match cmd.unwrap_or(ScopeCmd::List) {
+                        ScopeCmd::List => {}
+                        ScopeCmd::Add { folder } => {
+                            let f = abs(&folder)?;
+                            if !config.project().scope.contains(&f) {
+                                config.project_mut().scope.push(f);
+                            }
+                        }
+                        ScopeCmd::Remove { folder } => {
+                            let f = abs(&folder)?;
+                            config.project_mut().scope.retain(|p| p != &f);
+                        }
+                        ScopeCmd::Clear => config.project_mut().scope.clear(),
+                    }
+                    config.save()?;
+                    if json {
+                        print_json(&config.project().scope)?;
+                    } else {
+                        for p in &config.project().scope {
+                            println!("{}", p.display());
+                        }
+                        if config.project().scope.is_empty() {
+                            println!("(whole library)");
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+            if json {
+                print_json(&serde_json::json!({ "active": config.active_project, "projects": config.projects }))?;
+            } else {
+                for p in &config.projects {
+                    let favs = db.favorite_count(&p.name).unwrap_or(0);
+                    println!(
+                        "{} {:<16} {:<40} {} favorites, scope: {}",
+                        if p.name == config.active_project { "*" } else { " " },
+                        p.name,
+                        p.output_root.as_ref().map(|o| o.display().to_string()).unwrap_or_else(|| "(no output folder)".into()),
+                        favs,
+                        if p.scope.is_empty() { "whole library".to_string() } else { format!("{} folders", p.scope.len()) }
+                    );
+                }
+            }
+        }
         Cmd::Roots { cmd } => {
-            let mut config = Config::load()?;
+            let mut config = load(&project)?;
             match cmd.unwrap_or(RootsCmd::List) {
                 RootsCmd::List => {
                     if json {
@@ -246,7 +393,7 @@ fn run() -> Result<()> {
                     }
                     config.roots.push(Root { name: name.clone(), path: path.clone() });
                     config.save()?;
-                    let mut db = Db::open()?;
+                    let mut db = open_db(&project)?;
                     let report = db.scan(&path, |_, _| {})?;
                     if json {
                         print_json(&report)?;
@@ -258,14 +405,14 @@ fn run() -> Result<()> {
                     let Some(i) = config.roots.iter().position(|r| r.name == name) else { return Err(anyhow!("no root {name}")) };
                     let root = config.roots.remove(i);
                     config.save()?;
-                    Db::open()?.forget_root(&root.path)?;
+                    open_db(&project)?.forget_root(&root.path)?;
                     println!("removed {name}");
                 }
             }
         }
         Cmd::Scan { root } => {
-            let config = Config::load()?;
-            let mut db = Db::open()?;
+            let config = load(&project)?;
+            let mut db = open_db(&project)?;
             let roots: Vec<&Root> = match &root {
                 Some(r) => vec![config.roots.iter().find(|x| &x.name == r || x.path == Path::new(r)).ok_or_else(|| anyhow!("no root {r}"))?],
                 None => config.roots.iter().collect(),
@@ -286,18 +433,19 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Ls { dir } => {
-            let records = Db::open()?.list_dir(&abs(&dir)?)?;
+            let records = open_db(&project)?.list_dir(&abs(&dir)?)?;
             print_records(&records, json)?;
         }
         Cmd::Search { words, tag, fav, under, limit } => {
-            let q = Query { text: words.join(" "), tag, favorites_only: fav, under: under.map(|u| abs(&u)).transpose()?, limit };
-            let records = Db::open()?.search(&q)?;
+            let config = load(&project)?;
+            let q = Query { text: words.join(" "), tag, favorites_only: fav, under: under.map(|u| abs(&u)).transpose()?, scope: config.project().scope.clone(), limit };
+            let records = open_db(&project)?.search(&q)?;
             print_records(&records, json)?;
         }
         Cmd::Inspect { file } => {
             let file = abs(&file)?;
             let info = hark_core::probe(&file).ok();
-            let record = Db::open()?.get(&file)?;
+            let record = open_db(&project)?.get(&file)?;
             let origin = hark_core::origin::read(&file)?;
             let bext = hark_core::wav::read_bext_description(&file).ok().flatten();
             if json {
@@ -331,7 +479,7 @@ fn run() -> Result<()> {
             let pcm = hark_core::decode(&file)?;
             let l = hark_core::loudness::measure(&pcm)?;
             if store {
-                Db::open()?.set_loudness(&file, l.integrated_lufs, l.true_peak_dbfs)?;
+                open_db(&project)?.set_loudness(&file, l.integrated_lufs, l.true_peak_dbfs)?;
             }
             if json {
                 print_json(&l)?;
@@ -341,9 +489,9 @@ fn run() -> Result<()> {
         }
         Cmd::Tag { file, changes } => {
             let file = abs(&file)?;
-            let db = Db::open()?;
+            let db = open_db(&project)?;
             let hash = db.ensure_hash(&file)?;
-            let config = Config::load()?;
+            let config = load(&project)?;
             for c in &changes {
                 let (on, name) = match c.chars().next() {
                     Some('+') => (true, &c[1..]),
@@ -364,14 +512,14 @@ fn run() -> Result<()> {
         }
         Cmd::Fav { file, off } => {
             let file = abs(&file)?;
-            let db = Db::open()?;
+            let db = open_db(&project)?;
             let hash = db.ensure_hash(&file)?;
             db.set_favorite(&hash, !off)?;
             println!("{}: {}", file.display(), if off { "unmarked" } else { "★" });
         }
         Cmd::Tags { cmd } => {
-            let mut config = Config::load()?;
-            let db = Db::open()?;
+            let mut config = load(&project)?;
+            let db = open_db(&project)?;
             let find = |config: &Config, name: &str| config.tags.iter().position(|t| t.name == name).ok_or_else(|| anyhow!("no tag {name}"));
             match cmd.unwrap_or(TagsCmd::List) {
                 TagsCmd::List => {}
@@ -435,7 +583,7 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Presets { cmd } => {
-            let config = Config::load()?;
+            let config = load(&project)?;
             match cmd.unwrap_or(PresetsCmd::List) {
                 PresetsCmd::List => {
                     if json {
@@ -460,12 +608,12 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Export(a) => {
-            let mut config = Config::load()?;
+            let mut config = load(&project)?;
             if let Some(o) = &a.output_root {
-                config.output_root = Some(abs_dir(o)?);
+                config.project_mut().output_root = Some(abs_dir(o)?);
             }
             let file = abs(&a.file)?;
-            let db = Db::open()?;
+            let db = open_db(&project)?;
             let record = db.get(&file)?;
             let (tags, favorite) = record.map(|r| (r.tags, r.favorite)).unwrap_or_default();
             let mut req = ExportRequest::from_config(&config, &file, a.preset.as_deref(), tags, favorite)?;
@@ -486,14 +634,14 @@ fn run() -> Result<()> {
             report_export(&result, json)?;
         }
         Cmd::Reexport { files, preset, output_root, in_place } => {
-            let config = Config::load()?;
+            let config = load(&project)?;
             let mut results = Vec::new();
             for f in &files {
                 let f = abs(f)?;
                 let origin = hark_core::origin::read(&f)?.ok_or_else(|| anyhow!("{}: carries no hark origin", f.display()))?;
                 let root = match &output_root {
                     Some(o) => abs_dir(o)?,
-                    None => config.output_root.clone().ok_or_else(|| anyhow!("no output root configured"))?,
+                    None => config.output_root().map(|p| p.to_path_buf()).ok_or_else(|| anyhow!("project {} has no output folder", config.active_project))?,
                 };
                 let mut req = hark_core::export::request_from_origin(&origin, &root, if in_place { Some(f.clone()) } else { None });
                 if let Some(p) = &preset {
@@ -511,10 +659,10 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Config { output_root, default_preset, path } => {
-            let mut config = Config::load()?;
+            let mut config = load(&project)?;
             let mut changed = false;
             if let Some(o) = output_root {
-                config.output_root = Some(abs_dir(&o)?);
+                config.project_mut().output_root = Some(abs_dir(&o)?);
                 changed = true;
             }
             if let Some(p) = default_preset {

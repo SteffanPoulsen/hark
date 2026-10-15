@@ -46,11 +46,15 @@ pub struct Query {
     pub tag: Option<String>,
     pub favorites_only: bool,
     pub under: Option<PathBuf>,
+    /// Folders to search within; empty means everywhere.
+    pub scope: Vec<PathBuf>,
     pub limit: usize,
 }
 
 pub struct Db {
     conn: Connection,
+    /// Favorites are read and written for this project.
+    project: String,
 }
 
 const SCHEMA: &str = "
@@ -75,12 +79,19 @@ CREATE INDEX IF NOT EXISTS files_dir ON files(dir);
 CREATE INDEX IF NOT EXISTS files_hash ON files(hash);
 CREATE INDEX IF NOT EXISTS files_name ON files(name COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS file_tags (hash TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY (hash, tag));
-CREATE TABLE IF NOT EXISTS favorites (hash TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS favorites (project TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (project, hash));
+";
+
+const FAVORITES_BY_PROJECT: &str = "
+ALTER TABLE favorites RENAME TO favorites_old;
+CREATE TABLE favorites (project TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (project, hash));
+INSERT INTO favorites (project, hash) SELECT 'default', hash FROM favorites_old;
+DROP TABLE favorites_old;
 ";
 
 const SELECT: &str = "SELECT f.path, f.name, f.size, f.mtime_ns, f.hash, f.duration, f.sample_rate, f.channels, f.bits, f.codec, f.container, f.lufs, f.true_peak, f.error,
     (SELECT group_concat(tag, char(31)) FROM file_tags t WHERE t.hash = f.hash),
-    EXISTS(SELECT 1 FROM favorites v WHERE v.hash = f.hash)
+    EXISTS(SELECT 1 FROM favorites v WHERE v.hash = f.hash AND v.project = :project)
     FROM files f";
 
 impl Db {
@@ -92,14 +103,35 @@ impl Db {
         crate::paths::ensure_parent(path)?;
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-        conn.execute_batch(SCHEMA)?;
-        Ok(Db { conn })
+        Self::init(&conn)?;
+        Ok(Db { conn, project: crate::config::DEFAULT_PROJECT.to_string() })
     }
 
     pub fn open_memory() -> Result<Db> {
         let conn = Connection::open_in_memory()?;
+        Self::init(&conn)?;
+        Ok(Db { conn, project: crate::config::DEFAULT_PROJECT.to_string() })
+    }
+
+    fn init(conn: &Connection) -> Result<()> {
         conn.execute_batch(SCHEMA)?;
-        Ok(Db { conn })
+        let has_project: bool = conn
+            .prepare("PRAGMA table_info(favorites)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|c| c == "project");
+        if !has_project {
+            conn.execute_batch(FAVORITES_BY_PROJECT)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_project(&mut self, name: &str) {
+        self.project = name.to_string();
+    }
+
+    pub fn project(&self) -> &str {
+        &self.project
     }
 
     fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRecord> {
@@ -135,42 +167,63 @@ impl Db {
     }
 
     pub fn get(&self, path: &Path) -> Result<Option<FileRecord>> {
-        let sql = format!("{SELECT} WHERE f.path = ?1");
-        Ok(self.conn.query_row(&sql, params![path.to_string_lossy()], Self::row).optional()?)
+        let sql = format!("{SELECT} WHERE f.path = :path");
+        let path = path.to_string_lossy().into_owned();
+        Ok(self.conn.query_row(&sql, &[(":project", &self.project as &dyn rusqlite::ToSql), (":path", &path)], Self::row).optional()?)
     }
 
     /// Files directly inside `dir`, by name.
     pub fn list_dir(&self, dir: &Path) -> Result<Vec<FileRecord>> {
-        let sql = format!("{SELECT} WHERE f.dir = ?1 ORDER BY f.name COLLATE NOCASE");
+        let sql = format!("{SELECT} WHERE f.dir = :dir ORDER BY f.name COLLATE NOCASE");
+        let dir = dir.to_string_lossy().into_owned();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![dir.to_string_lossy()], Self::row)?;
+        let rows = stmt.query_map(&[(":project", &self.project as &dyn rusqlite::ToSql), (":dir", &dir)], Self::row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn search(&self, q: &Query) -> Result<Vec<FileRecord>> {
         let mut sql = format!("{SELECT} WHERE 1=1");
-        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        let mut values: Vec<String> = Vec::new();
+        let bind = |names: &mut Vec<String>, values: &mut Vec<String>, v: String| -> String {
+            let name = format!(":p{}", values.len());
+            names.push(name.clone());
+            values.push(v);
+            name
+        };
         for word in q.text.split_whitespace() {
-            args.push(Box::new(format!("%{}%", word.replace('%', "\\%"))));
-            sql.push_str(&format!(" AND f.path LIKE ?{} ESCAPE '\\'", args.len()));
+            let n = bind(&mut names, &mut values, format!("%{}%", word.replace('%', "\\%")));
+            sql.push_str(&format!(" AND f.path LIKE {n} ESCAPE '\\'"));
         }
         if let Some(tag) = &q.tag {
-            args.push(Box::new(tag.clone()));
-            sql.push_str(&format!(" AND EXISTS(SELECT 1 FROM file_tags t WHERE t.hash = f.hash AND t.tag = ?{})", args.len()));
+            let n = bind(&mut names, &mut values, tag.clone());
+            sql.push_str(&format!(" AND EXISTS(SELECT 1 FROM file_tags t WHERE t.hash = f.hash AND t.tag = {n})"));
         }
         if q.favorites_only {
-            sql.push_str(" AND EXISTS(SELECT 1 FROM favorites v WHERE v.hash = f.hash)");
+            sql.push_str(" AND EXISTS(SELECT 1 FROM favorites v WHERE v.hash = f.hash AND v.project = :project)");
         }
         if let Some(under) = &q.under {
-            args.push(Box::new(format!("{}{}%", under.to_string_lossy(), std::path::MAIN_SEPARATOR)));
-            sql.push_str(&format!(" AND f.path LIKE ?{}", args.len()));
+            let n = bind(&mut names, &mut values, format!("{}{}%", under.to_string_lossy(), std::path::MAIN_SEPARATOR));
+            sql.push_str(&format!(" AND f.path LIKE {n}"));
+        }
+        if !q.scope.is_empty() {
+            let mut ors = Vec::new();
+            for s in &q.scope {
+                let n = bind(&mut names, &mut values, format!("{}{}%", s.to_string_lossy(), std::path::MAIN_SEPARATOR));
+                ors.push(format!("f.path LIKE {n}"));
+            }
+            sql.push_str(&format!(" AND ({})", ors.join(" OR ")));
         }
         sql.push_str(" ORDER BY f.name COLLATE NOCASE");
         if q.limit > 0 {
             sql.push_str(&format!(" LIMIT {}", q.limit));
         }
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":project", &self.project)];
+        for (n, v) in names.iter().zip(values.iter()) {
+            params.push((n.as_str(), v));
+        }
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(args.iter().map(|a| a.as_ref())), Self::row)?;
+        let rows = stmt.query_map(params.as_slice(), Self::row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -284,11 +337,23 @@ impl Db {
 
     pub fn set_favorite(&self, hash: &str, on: bool) -> Result<()> {
         if on {
-            self.conn.execute("INSERT OR IGNORE INTO favorites (hash) VALUES (?1)", params![hash])?;
+            self.conn.execute("INSERT OR IGNORE INTO favorites (project, hash) VALUES (?1, ?2)", params![self.project, hash])?;
         } else {
-            self.conn.execute("DELETE FROM favorites WHERE hash = ?1", params![hash])?;
+            self.conn.execute("DELETE FROM favorites WHERE project = ?1 AND hash = ?2", params![self.project, hash])?;
         }
         Ok(())
+    }
+
+    pub fn favorite_count(&self, project: &str) -> Result<usize> {
+        Ok(self.conn.query_row("SELECT count(*) FROM favorites WHERE project = ?1", params![project], |r| r.get::<_, i64>(0))? as usize)
+    }
+
+    pub fn rename_project(&self, old: &str, new: &str) -> Result<usize> {
+        Ok(self.conn.execute("UPDATE OR IGNORE favorites SET project = ?2 WHERE project = ?1", params![old, new])?)
+    }
+
+    pub fn forget_project(&self, project: &str) -> Result<usize> {
+        Ok(self.conn.execute("DELETE FROM favorites WHERE project = ?1", params![project])?)
     }
 
     pub fn rename_tag(&self, old: &str, new: &str) -> Result<usize> {

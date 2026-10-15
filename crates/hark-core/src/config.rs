@@ -108,12 +108,31 @@ impl Default for ExportPreset {
     }
 }
 
+/// The target of the work: where exports go, which part of the library matters, and its own
+/// favorites. Tags and presets stay global.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Project {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_root: Option<PathBuf>,
+    /// Library folders this project cares about; empty means the whole library.
+    #[serde(default)]
+    pub scope: Vec<PathBuf>,
+}
+
+pub const DEFAULT_PROJECT: &str = "default";
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default)]
     pub roots: Vec<Root>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_root: Option<PathBuf>,
+    /// Output folder from before projects existed; moved into the default project on load.
+    #[serde(default, skip_serializing)]
+    output_root: Option<PathBuf>,
+    #[serde(default)]
+    pub projects: Vec<Project>,
+    #[serde(default = "default_project_name")]
+    pub active_project: String,
     #[serde(default)]
     pub tags: Vec<TagDef>,
     #[serde(default)]
@@ -137,6 +156,10 @@ fn default_ui_zoom() -> f32 {
 
 fn default_preset_name() -> String {
     "clean".to_string()
+}
+
+fn default_project_name() -> String {
+    DEFAULT_PROJECT.to_string()
 }
 
 impl Default for Config {
@@ -182,6 +205,8 @@ impl Default for Config {
         Config {
             roots: Vec::new(),
             output_root: None,
+            projects: vec![Project { name: DEFAULT_PROJECT.into(), output_root: None, scope: Vec::new() }],
+            active_project: DEFAULT_PROJECT.into(),
             tags: vec![tag("sfx", "sfx"), tag("ambient", "ambient"), tag("music", "music"), tag("voice", "voice"), tag("ui", "sfx"), tag("foley", "sfx")],
             presets,
             default_preset: default_preset_name(),
@@ -199,7 +224,11 @@ impl Config {
 
     pub fn load_from(path: &Path) -> Result<Config> {
         match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display())),
+            Ok(bytes) => {
+                let mut cfg: Config = serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+                cfg.migrate();
+                Ok(cfg)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
             Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
         }
@@ -212,6 +241,49 @@ impl Config {
     pub fn save_to(&self, path: &Path) -> Result<()> {
         crate::paths::ensure_parent(path)?;
         std::fs::write(path, serde_json::to_vec_pretty(self)?).with_context(|| format!("write {}", path.display()))
+    }
+
+    fn migrate(&mut self) {
+        if self.projects.is_empty() {
+            self.projects.push(Project { name: DEFAULT_PROJECT.into(), output_root: self.output_root.take(), scope: Vec::new() });
+        }
+        if !self.projects.iter().any(|p| p.name == self.active_project) {
+            self.active_project = self.projects[0].name.clone();
+        }
+    }
+
+    pub fn project(&self) -> &Project {
+        self.projects.iter().find(|p| p.name == self.active_project).unwrap_or(&self.projects[0])
+    }
+
+    pub fn project_mut(&mut self) -> &mut Project {
+        let i = self.projects.iter().position(|p| p.name == self.active_project).unwrap_or(0);
+        &mut self.projects[i]
+    }
+
+    pub fn output_root(&self) -> Option<&Path> {
+        self.project().output_root.as_deref()
+    }
+
+    /// The folders the tree starts from under the active project: its scope, or every root.
+    pub fn scope_folders(&self) -> Vec<(String, PathBuf)> {
+        let project = self.project();
+        if project.scope.is_empty() {
+            self.roots.iter().map(|r| (r.name.clone(), r.path.clone())).collect()
+        } else {
+            project
+                .scope
+                .iter()
+                .map(|p| {
+                    let name = match self.root_of(p) {
+                        Some(r) if r.path == *p => r.name.clone(),
+                        Some(r) => format!("{}/{}", r.name, p.strip_prefix(&r.path).map(|x| x.display().to_string()).unwrap_or_default()),
+                        None => p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string()),
+                    };
+                    (name, p.clone())
+                })
+                .collect()
+        }
     }
 
     pub fn root_of(&self, path: &Path) -> Option<&Root> {

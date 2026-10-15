@@ -12,7 +12,7 @@ pub mod peaks;
 pub mod resample;
 pub mod wav;
 
-pub use config::{Config, ExportPreset, Root, TagDef};
+pub use config::{Config, ExportPreset, Project, Root, TagDef};
 pub use decode::{decode, probe, AudioInfo};
 pub use export::{ExportRequest, ExportResult, Selection};
 pub use library::{Db, FileRecord};

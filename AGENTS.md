@@ -14,13 +14,15 @@ A Cargo workspace with one core and two thin frontends. The frontends never reim
 
 - `crates/hark-core`: everything that is not UI. `decode` (symphonia, all formats), `peaks` (min/max envelope with a disk cache format), `loudness` (EBU R128 via ebur128, with a momentary fallback for clips shorter than the gating block), `resample` (rubato Fft), `wav` and `flac` (writers that embed the origin; readers for the chunks), `origin` (what an export carries), `export` (the pipeline and the path template), `library` (SQLite: file rows keyed by path, marks keyed by content hash), `config` (roots, tags, presets, output root), `audition` (one cpal stream, a lock-free command channel, PipeWire native on Linux).
 - `crates/hark-cli`: clap commands over the core. Every command supports `--json`.
-- `crates/hark`: eframe/egui window. `worker.rs` runs decode, export and scan jobs on background threads; `waveform.rs` is the selection and fade widget; `main.rs` holds the app state and keyboard map.
+- `crates/hark`: eframe/egui window. `worker.rs` runs decode, export and scan jobs on background threads; `waveform.rs` is the selection and fade widget; `theme.rs` is the palette, fonts and egui styling; `main.rs` holds the app state, panels, settings window and keyboard map.
+- Icons come from Phosphor through `theme::icon` and `theme::icon_text`, never through a plain string in a label: Inter maps its stylistic alternates into the private-use area and would render them as stray letters.
 
 ## Invariants
 
 - **Originals are never modified.** The library reads and hashes source files; only exports are written.
 - **Exports carry their origin inside the file.** WAV: a `hark` RIFF chunk with the JSON and a BWF `bext` description. FLAC: an APPLICATION block with id `hark` and a `HARK_ORIGIN` Vorbis comment. A sidecar is never the only copy.
-- **Marks key on the content hash**, so a renamed or moved file keeps its tags and favorite once re-scanned and re-hashed.
+- **Marks key on the content hash**, so a renamed or moved file keeps its tags and favorite once re-scanned and re-hashed. Tags are global; favorites belong to a project, and `Db` reads and writes them for the project set with `set_project`.
+- **A project is the target**: output folder, library scope, favorites. Presets and tags are not per project; move them only when a real case demands it.
 - **The audio callback allocates nothing and locks nothing.** Clips arrive pre-decoded at the device rate through a channel; the GUI reads the playhead from atomics.
 - **The CLI and the window are peers over the core.** A feature that exists only in the window is a bug; add the command.
 
