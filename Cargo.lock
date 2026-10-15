@@ -1888,6 +1888,7 @@ dependencies = [
  "egui-phosphor",
  "egui_extras",
  "hark-core",
+ "image",
  "rfd",
  "serde_json",
 ]

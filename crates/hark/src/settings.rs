@@ -12,18 +12,16 @@ use crate::{App, ProjectAction, TagAction};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     General,
-    Projects,
     Tags,
     Presets,
 }
 
 impl Page {
-    const ALL: [Page; 4] = [Page::General, Page::Projects, Page::Tags, Page::Presets];
+    const ALL: [Page; 3] = [Page::General, Page::Tags, Page::Presets];
 
     fn title(self) -> &'static str {
         match self {
             Page::General => "General",
-            Page::Projects => "Projects",
             Page::Tags => "Tags",
             Page::Presets => "Presets",
         }
@@ -32,7 +30,6 @@ impl Page {
     fn icon(self) -> &'static str {
         match self {
             Page::General => icons::SLIDERS_HORIZONTAL,
-            Page::Projects => icons::CUBE,
             Page::Tags => icons::TAG,
             Page::Presets => icons::SLIDERS,
         }
@@ -89,7 +86,6 @@ impl App {
             if ctx.input(|i| i.viewport().close_requested()) {
                 self.settings_open = false;
                 self.tag_edit = None;
-                self.project_edit = None;
                 self.preset_rename = None;
             }
             let theme = self.theme.clone();
@@ -113,7 +109,6 @@ impl App {
                         ui.set_max_width(CONTENT_W);
                         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| match self.settings_page {
                             Page::General => self.page_general(ui),
-                            Page::Projects => self.page_projects(ui),
                             Page::Tags => self.page_tags(ui),
                             Page::Presets => self.page_presets(ui),
                         });
@@ -224,25 +219,35 @@ impl App {
         }
     }
 
-    fn page_projects(&mut self, ui: &mut egui::Ui) {
-        let theme = self.theme.clone();
-        heading(ui, &theme, "Projects", "A project file holds an output folder, a library scope and its own favorites, and lives beside the game it serves. With none open, hark works on the whole library with the default output folder.");
-        let mut action: Option<ProjectAction> = None;
-        card(ui, &theme, |ui| {
-            row(ui, &theme, true, "Project", "The one the window and the CLI work in.", |ui| {
-                if theme::tool_button(ui, icons::PLUS, "New").on_hover_text("Save a new project file").clicked() {
-                    action = Some(ProjectAction::New);
-                }
-                if theme::tool_button(ui, icons::FOLDER_OPEN, "Open").on_hover_text("Open a project file").clicked() {
-                    action = Some(ProjectAction::Browse);
-                }
-                if let Some(a) = self.project_menu(ui, "settings-project", 180.0) {
-                    action = Some(a);
-                }
+    /// The open project's own window: name, file, output folder, scope. A project is a
+    /// document, so it lives beside the settings, not inside them.
+    pub fn ui_project_window(&mut self, ctx: &egui::Context) {
+        if !self.project_open {
+            return;
+        }
+        let title = format!("hark project · {}", self.config.project_name());
+        let builder = egui::ViewportBuilder::default().with_title(title).with_app_id("hark").with_inner_size([640.0, 520.0]).with_min_inner_size([480.0, 360.0]);
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("project"), builder, |ctx, _| {
+            if ctx.input(|i| i.viewport().close_requested()) {
+                self.project_open = false;
+                self.project_edit = None;
+            }
+            let theme = self.theme.clone();
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(theme.bg).inner_margin(Margin::symmetric(24, 20))).show(ctx, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.set_max_width(CONTENT_W);
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| self.project_page(ui));
+                    });
+                });
             });
         });
-        ui.add_space(theme::GAP);
+    }
 
+    fn project_page(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme.clone();
+        let mut action: Option<ProjectAction> = None;
+        heading(ui, &theme, self.config.project_name(), "A project file holds an output folder, a library scope and its own favorites, and lives beside the game it serves. With none open, hark works on the whole library with the default output folder.");
         let favs = self.db.favorite_count(self.config.project_id()).unwrap_or(0);
         let favs_text = format!("{favs} file{} starred.", if favs == 1 { "" } else { "s" });
         let out = self.config.output_root().map(|p| p.display().to_string());
@@ -270,6 +275,7 @@ impl App {
             self.finish_projects(action, set_output, None);
             return;
         };
+        let _ = &mut action;
 
         let mut rename: Option<String> = None;
         let mut remove_scope: Option<usize> = None;

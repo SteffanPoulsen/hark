@@ -25,7 +25,7 @@ Binaries land in `target/release/hark` (the window) and `target/release/hark-cli
 
 ## Use
 
-Start `hark`, add a library folder with the button under the tree, pick a folder, and arrow through the files. `hark --open <file>` starts on a file; `hark --settings [general|projects|tags|presets]` opens the settings window, a window of its own with those four pages.
+Start `hark`, add a library folder with the button under the tree, pick a folder, and arrow through the files. `hark --open <file>` starts on a file; `hark --project <file.hark>` opens a project; `hark --settings [general|tags|presets]` opens the settings window, a window of its own with those three pages. The open project's own window (name, file, output folder, scope) is "Edit project…" in the project switcher.
 
 | Key | Action |
 |---|---|

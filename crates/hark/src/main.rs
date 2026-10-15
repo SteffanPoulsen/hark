@@ -43,14 +43,15 @@ const FILE_TYPES: [(&str, &[&str]); 7] = [
 
 fn main() -> eframe::Result {
     let mut open: Option<PathBuf> = None;
+    let mut project: Option<PathBuf> = None;
     let mut settings: Option<settings::Page> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--open" => open = args.next().map(PathBuf::from),
+            "--project" => project = args.next().map(PathBuf::from),
             "--settings" => {
                 settings = Some(match args.next().as_deref() {
-                    Some("projects") => settings::Page::Projects,
                     Some("tags") => settings::Page::Tags,
                     Some("presets") | Some("export") => settings::Page::Presets,
                     Some("general") | None => settings::Page::General,
@@ -61,7 +62,7 @@ fn main() -> eframe::Result {
                 })
             }
             "-h" | "--help" => {
-                println!("hark [--open <audio file or folder>] [--settings [general|projects|tags|presets]]");
+                println!("hark [--open <audio file or folder>] [--project <file.hark>] [--settings [general|tags|presets]]");
                 return Ok(());
             }
             other => open = Some(PathBuf::from(other)),
@@ -82,6 +83,9 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let mut app = App::new(cc);
+            if let Some(p) = project {
+                app.apply_project_action(ProjectAction::Open(p));
+            }
             if let Some(p) = open {
                 app.open_path(&p);
             }
@@ -102,6 +106,8 @@ enum ProjectAction {
     Browse,
     /// Save a new project file.
     New,
+    /// Open the project window.
+    Edit,
     Close,
     Forget(PathBuf),
 }
@@ -195,6 +201,9 @@ struct App {
     scanning: bool,
     settings_open: bool,
     settings_page: settings::Page,
+    project_open: bool,
+    /// The mark beside the wordmark, white on transparent, tinted at draw time.
+    mark: egui::TextureHandle,
     search_id: egui::Id,
     tag_edit: Option<(usize, String)>,
     project_edit: Option<String>,
@@ -225,6 +234,11 @@ impl App {
             Err(e) => (None, Some(format!("{e:#}"))),
         };
         let worker = Worker::start(cc.egui_ctx.clone(), 3);
+        let mark = {
+            let png = image::load_from_memory(include_bytes!("../assets/icon/hark-mark-96.png")).expect("the mark is a PNG").into_rgba8();
+            let (w, h) = png.dimensions();
+            cc.egui_ctx.load_texture("mark", egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], png.as_raw()), egui::TextureOptions::LINEAR)
+        };
         if !config.roots.is_empty() {
             worker.send(Job::Scan(config.roots.clone()));
         }
@@ -267,6 +281,8 @@ impl App {
             scanning,
             file_count: 0,
             settings_open: false,
+            project_open: false,
+            mark,
             settings_page: settings::Page::General,
             search_id: egui::Id::new("search"),
             tag_edit: None,
@@ -736,7 +752,11 @@ impl App {
     fn ui_top(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP;
-            ui.label(theme::semibold("hark").size(18.0).color(self.theme.accent));
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 7.0;
+                ui.add(egui::Image::new(&self.mark).fit_to_exact_size(egui::vec2(22.0, 22.0)).tint(self.theme.accent2));
+                ui.label(theme::semibold("hark").size(18.0).color(self.theme.accent));
+            });
             if let Some(action) = self.project_menu(ui, "project", 0.0) {
                 self.apply_project_action(action);
             }
@@ -1582,6 +1602,9 @@ impl App {
                 }
             }
             ui.separator();
+            if self.config.active.is_some() && ui.selectable_label(false, theme::icon_text(icons::PENCIL_SIMPLE, "Edit project…", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
+                action = Some(ProjectAction::Edit);
+            }
             if ui.selectable_label(false, theme::icon_text(icons::FOLDER_OPEN, "Open…", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
                 action = Some(ProjectAction::Browse);
             }
@@ -1607,10 +1630,13 @@ impl App {
                 let name = hark_core::project::name_of_path(&path);
                 let r = self.config.create_project(&path, &name);
                 if r.is_ok() {
-                    self.settings_page = settings::Page::Projects;
-                    self.settings_open = true;
+                    self.project_open = true;
                 }
                 r
+            }
+            ProjectAction::Edit => {
+                self.project_open = true;
+                return;
             }
         };
         if let Err(e) = result {
@@ -1817,6 +1843,7 @@ impl eframe::App for App {
         });
 
         self.ui_settings(&ctx);
+        self.ui_project_window(&ctx);
 
         let analysing = self.current.as_ref().map(|c| c.peaks.is_none()).unwrap_or(false);
         if self.is_playing() || !self.pending.is_empty() || analysing {

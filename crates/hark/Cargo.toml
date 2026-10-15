@@ -15,6 +15,7 @@ blake3.workspace = true
 eframe.workspace = true
 egui.workspace = true
 egui_extras.workspace = true
+image.workspace = true
 egui-phosphor.workspace = true
 rfd.workspace = true
 serde_json.workspace = true
