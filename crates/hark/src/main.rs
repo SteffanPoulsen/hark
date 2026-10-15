@@ -860,7 +860,7 @@ impl App {
         let caret_rect = egui::Rect::from_min_size(rect.min + egui::vec2(6.0 + depth as f32 * 16.0, 0.0), egui::vec2(18.0, row_h));
         let caret_resp = ui.interact(caret_rect, resp.id.with("caret"), Sense::click());
         let fill = if selected {
-            self.theme.accent_soft
+            self.theme.accent2_soft
         } else if resp.hovered() {
             self.theme.overlay
         } else {

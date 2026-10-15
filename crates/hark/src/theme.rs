@@ -19,8 +19,9 @@ pub struct Theme {
     /// The brand color: logo, focus, the export button, the waveform, stars.
     pub accent: Color32,
     pub accent_soft: Color32,
-    /// The cool counterpart for the selection and fades over the waveform.
+    /// The second accent: every selected thing (rows, toggled buttons, the waveform region).
     pub accent2: Color32,
+    pub accent2_soft: Color32,
     pub ok: Color32,
     pub warn: Color32,
     pub err: Color32,
@@ -63,7 +64,8 @@ impl Default for Theme {
             text: hex("#dcddde").unwrap(),
             accent: hex("#d08a62").unwrap(),
             accent_soft: hex("#3b2b22").unwrap(),
-            accent2: hex("#6aa6c9").unwrap(),
+            accent2: hex("#6fb3a2").unwrap(),
+            accent2_soft: hex("#1f3630").unwrap(),
             ok: hex("#6fbf73").unwrap(),
             warn: hex("#e8c75c").unwrap(),
             err: hex("#f05a5a").unwrap(),
@@ -94,6 +96,7 @@ impl Theme {
             accent: get("accent").unwrap_or(d.accent),
             accent_soft: get("accent_soft").unwrap_or(d.accent_soft),
             accent2: get("accent2").unwrap_or(d.accent2),
+            accent2_soft: get("accent2_soft").unwrap_or(d.accent2_soft),
             ok: get("ok").unwrap_or(d.ok),
             warn: get("warn").unwrap_or(d.warn),
             err: get("err").unwrap_or(d.err),
@@ -147,8 +150,8 @@ impl Theme {
         v.hyperlink_color = self.accent;
         v.warn_fg_color = self.warn;
         v.error_fg_color = self.err;
-        v.selection.bg_fill = self.accent_soft;
-        v.selection.stroke = Stroke::new(1.0, self.accent);
+        v.selection.bg_fill = self.accent2_soft;
+        v.selection.stroke = Stroke::new(1.0, self.accent2);
         v.striped = true;
         v.slider_trailing_fill = true;
         v.handle_shape = egui::style::HandleShape::Circle;
@@ -173,9 +176,9 @@ impl Theme {
         w.hovered.fg_stroke = Stroke::new(1.0, self.text);
         w.hovered.corner_radius = radius;
         w.hovered.expansion = 0.0;
-        w.active.bg_fill = self.accent_soft;
-        w.active.weak_bg_fill = self.accent_soft;
-        w.active.bg_stroke = Stroke::new(1.0, self.accent);
+        w.active.bg_fill = self.accent2_soft;
+        w.active.weak_bg_fill = self.accent2_soft;
+        w.active.bg_stroke = Stroke::new(1.0, self.accent2);
         w.active.fg_stroke = Stroke::new(1.0, self.text);
         w.active.corner_radius = radius;
         w.active.expansion = 0.0;
@@ -263,7 +266,7 @@ impl egui::Widget for Check<'_> {
         }
         if ui.is_rect_visible(rect) {
             let visuals = ui.style().interact(&response);
-            let accent = ui.visuals().selection.stroke.color;
+            let accent = ui.visuals().hyperlink_color;
             let square = egui::Rect::from_center_size(egui::pos2(rect.left() + BOX / 2.0, rect.center().y), egui::Vec2::splat(BOX));
             let (fill, stroke) = if *self.on {
                 (accent, Stroke::new(1.0, accent))
