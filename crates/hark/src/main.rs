@@ -842,7 +842,7 @@ impl App {
             let focused = ui.memory(|m| m.has_focus(self.search_id));
             let box_frame = egui::Frame::new()
                 .fill(self.theme.surface)
-                .stroke(Stroke::new(1.0, if focused { self.theme.accent } else { self.theme.line }))
+                .stroke(Stroke::new(1.0, if focused { self.theme.accent2 } else { self.theme.line }))
                 .corner_radius(CornerRadius::same(6))
                 .inner_margin(Margin::symmetric(8, 0));
             ui.allocate_ui_with_layout(egui::vec2(300.0, CONTROL_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {

@@ -152,6 +152,7 @@ impl Theme {
         v.error_fg_color = self.err;
         v.selection.bg_fill = self.accent2_soft;
         v.selection.stroke = Stroke::new(1.0, self.accent2);
+        v.text_cursor.stroke = Stroke::new(2.0, self.accent2);
         v.striped = true;
         v.slider_trailing_fill = true;
         v.handle_shape = egui::style::HandleShape::Circle;
