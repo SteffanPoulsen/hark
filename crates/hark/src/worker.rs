@@ -1,41 +1,67 @@
 //! Background threads: decoding, peaks, loudness, exports and scans, with results polled by
 //! the UI once per frame.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
+use hark_core::audition::Source;
 use hark_core::config::Root;
 use hark_core::export::{ExportRequest, ExportResult};
 use hark_core::library::ScanReport;
-use hark_core::{Loudness, Pcm, Peaks};
+use hark_core::{Loudness, Peaks};
 
 pub struct Loaded {
     pub path: PathBuf,
     pub source_rate: u32,
     pub channels: u16,
     pub duration_secs: f64,
-    /// At the device rate, ready to play.
-    pub device: Arc<Pcm>,
-    pub peaks: Arc<Peaks>,
+    pub source: Source,
+    /// `None` until a streamed file's analysis pass has run.
+    pub peaks: Option<Arc<Peaks>>,
+    /// Measured by this load or analysis; `None` for a streamed file whose loudness only the
+    /// library holds.
     pub loudness: Option<Loudness>,
 }
 
+impl Loaded {
+    /// Memory held for this file: decoded audio and peaks.
+    pub fn resident_bytes(&self) -> usize {
+        let audio = match &self.source {
+            Source::Whole(p) => p.samples.len() * 4,
+            Source::File { .. } => 0,
+        };
+        let peaks = self.peaks.as_ref().map(|p| p.bins.iter().map(|b| b.len() * 12).sum()).unwrap_or(0);
+        audio + peaks
+    }
+}
+
 pub enum Job {
-    Load { path: PathBuf, device_rate: u32 },
+    Load { path: PathBuf, device_rate: u32, stream_above_secs: f64 },
     Export(ExportRequest),
     Scan(Vec<Root>),
 }
 
 pub enum Done {
     Loaded(PathBuf, Result<Arc<Loaded>, String>),
+    /// The analysis pass of a streamed file.
+    Analyzed(PathBuf, Result<(Arc<Peaks>, Option<Loudness>), String>),
     Exported(Result<ExportResult, String>),
     Scanned(Vec<(String, ScanReport)>),
+}
+
+/// The one analysis pass in flight: a newer request replaces a waiting one and makes a
+/// running one abort, so arrowing through long files never queues passes.
+#[derive(Default)]
+struct Analysis {
+    next: Mutex<Option<(PathBuf, Option<Arc<Peaks>>)>>,
+    wake: Condvar,
 }
 
 pub struct Worker {
     tx: Sender<Job>,
     rx: Receiver<Done>,
+    analysis: Arc<Analysis>,
 }
 
 impl Worker {
@@ -53,7 +79,7 @@ impl Worker {
                     Err(_) => return,
                 };
                 let done = match job {
-                    Job::Load { path, device_rate } => Done::Loaded(path.clone(), load(&path, device_rate).map(Arc::new).map_err(|e| format!("{e:#}"))),
+                    Job::Load { path, device_rate, stream_above_secs } => Done::Loaded(path.clone(), load(&path, device_rate, stream_above_secs).map(Arc::new).map_err(|e| format!("{e:#}"))),
                     Job::Export(req) => Done::Exported(hark_core::export::run(&req).map_err(|e| format!("{e:#}"))),
                     Job::Scan(roots) => Done::Scanned(scan(&roots)),
                 };
@@ -63,11 +89,40 @@ impl Worker {
                 ctx.request_repaint();
             });
         }
-        Worker { tx, rx }
+        let analysis = Arc::new(Analysis::default());
+        {
+            let analysis = analysis.clone();
+            std::thread::spawn(move || loop {
+                let (path, cached) = {
+                    let mut next = analysis.next.lock().unwrap();
+                    while next.is_none() {
+                        next = analysis.wake.wait(next).unwrap();
+                    }
+                    next.take().unwrap()
+                };
+                let superseded = || analysis.next.lock().unwrap().is_some();
+                let result = analyze(&path, cached, &superseded);
+                if superseded() {
+                    continue;
+                }
+                if done_tx.send(Done::Analyzed(path, result.map_err(|e| format!("{e:#}")))).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            });
+        }
+        Worker { tx, rx, analysis }
     }
 
     pub fn send(&self, job: Job) {
         let _ = self.tx.send(job);
+    }
+
+    /// Asks for a streamed file's peaks (unless `cached`) and loudness, replacing any request
+    /// still waiting.
+    pub fn analyze(&self, path: PathBuf, cached: Option<Arc<Peaks>>) {
+        *self.analysis.next.lock().unwrap() = Some((path, cached));
+        self.analysis.wake.notify_one();
     }
 
     pub fn poll(&self) -> Vec<Done> {
@@ -75,25 +130,46 @@ impl Worker {
     }
 }
 
-fn peaks_cache_path(path: &std::path::Path) -> Option<PathBuf> {
+fn peaks_cache_path(path: &Path) -> Option<PathBuf> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
     let key = blake3::hash(format!("{}|{}|{}", path.display(), meta.len(), mtime).as_bytes()).to_hex();
     Some(hark_core::paths::peaks_cache_dir().join(format!("{key}.peaks")))
 }
 
-fn load(path: &std::path::Path, device_rate: u32) -> anyhow::Result<Loaded> {
+fn save_peaks(path: &Path, peaks: &Peaks) {
+    if let Some(c) = peaks_cache_path(path) {
+        if hark_core::paths::ensure_parent(&c).is_ok() {
+            let _ = peaks.save(&c);
+        }
+    }
+}
+
+fn load(path: &Path, device_rate: u32, stream_above_secs: f64) -> anyhow::Result<Loaded> {
+    let info = hark_core::probe(path)?;
+    if info.duration_secs > stream_above_secs {
+        let peaks = peaks_cache_path(path).and_then(|c| Peaks::load(&c).ok()).map(Arc::new);
+        return Ok(Loaded {
+            path: path.to_path_buf(),
+            source_rate: info.sample_rate,
+            channels: info.channels,
+            duration_secs: info.duration_secs,
+            source: Source::File {
+                path: path.to_path_buf(),
+                source_rate: info.sample_rate,
+                channels: info.channels,
+                source_frames: (info.duration_secs * info.sample_rate as f64).round() as u64,
+            },
+            peaks,
+            loudness: None,
+        });
+    }
     let source = hark_core::decode(path)?;
-    let cache = peaks_cache_path(path);
-    let peaks = match cache.as_ref().and_then(|c| Peaks::load(c).ok()) {
+    let peaks = match peaks_cache_path(path).and_then(|c| Peaks::load(&c).ok()) {
         Some(p) => p,
         None => {
             let p = Peaks::from_pcm(&source, Peaks::DEFAULT_BIN);
-            if let Some(c) = &cache {
-                if hark_core::paths::ensure_parent(c).is_ok() {
-                    let _ = p.save(c);
-                }
-            }
+            save_peaks(path, &p);
             p
         }
     };
@@ -104,10 +180,44 @@ fn load(path: &std::path::Path, device_rate: u32) -> anyhow::Result<Loaded> {
         source_rate: source.sample_rate,
         channels: source.channels,
         duration_secs: source.duration_secs(),
-        device: Arc::new(device),
-        peaks: Arc::new(peaks),
+        source: Source::Whole(Arc::new(device)),
+        peaks: Some(Arc::new(peaks)),
         loudness,
     })
+}
+
+/// One pass over a streamed file for its peaks (unless cached) and loudness, holding only a
+/// packet at a time; gives up as soon as `abort` says so.
+fn analyze(path: &Path, cached: Option<Arc<Peaks>>, abort: &dyn Fn() -> bool) -> anyhow::Result<(Arc<Peaks>, Option<Loudness>)> {
+    let mut reader = hark_core::decode::Reader::open(path)?;
+    let mut chunk = Vec::new();
+    let mut builder = None;
+    let mut meter = None;
+    while reader.next_chunk(&mut chunk)? {
+        if cached.is_none() {
+            builder.get_or_insert_with(|| hark_core::peaks::PeaksBuilder::new(reader.sample_rate, reader.channels, Peaks::DEFAULT_BIN)).push(&chunk);
+        }
+        if meter.is_none() {
+            meter = hark_core::loudness::Meter::new(reader.channels, reader.sample_rate).ok();
+        }
+        if let Some(m) = &mut meter {
+            m.push(&chunk)?;
+        }
+        chunk.clear();
+        if abort() {
+            anyhow::bail!("superseded");
+        }
+    }
+    let peaks = match (cached, builder) {
+        (Some(p), _) => p,
+        (None, Some(b)) => {
+            let p = b.finish();
+            save_peaks(path, &p);
+            Arc::new(p)
+        }
+        (None, None) => anyhow::bail!("no audio frames decoded"),
+    };
+    Ok((peaks, meter.and_then(|m| m.finish())))
 }
 
 fn scan(roots: &[Root]) -> Vec<(String, ScanReport)> {

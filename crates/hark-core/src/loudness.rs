@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::Result;
 use ebur128::{EbuR128, Mode};
 use serde::{Deserialize, Serialize};
@@ -15,22 +17,67 @@ pub struct Loudness {
     pub range_lu: Option<f64>,
 }
 
+/// An EBU R128 meter fed interleaved audio in any chunking.
+pub struct Meter {
+    meter: EbuR128,
+    channels: u32,
+}
+
+impl Meter {
+    pub fn new(channels: u16, sample_rate: u32) -> Result<Meter> {
+        let channels = channels as u32;
+        let meter = EbuR128::new(channels, sample_rate, Mode::I | Mode::M | Mode::LRA | Mode::TRUE_PEAK | Mode::SAMPLE_PEAK)?;
+        Ok(Meter { meter, channels })
+    }
+
+    pub fn push(&mut self, samples: &[f32]) -> Result<()> {
+        self.meter.add_frames_f32(samples)?;
+        Ok(())
+    }
+
+    /// `None` when the material is too short to gate; `peaks` still holds its levels then.
+    pub fn finish(&self) -> Option<Loudness> {
+        let integrated_lufs = self.meter.loudness_global().ok().filter(|v| v.is_finite())?;
+        let (true_peak_dbfs, sample_peak_dbfs) = self.peaks();
+        let range_lu = self.meter.loudness_range().ok().filter(|v| v.is_finite());
+        Some(Loudness { integrated_lufs, momentary: false, true_peak_dbfs, sample_peak_dbfs, range_lu })
+    }
+
+    /// True peak and sample peak in dBFS over all channels.
+    pub fn peaks(&self) -> (f64, f64) {
+        let max = |f: &dyn Fn(u32) -> Result<f64, ebur128::Error>| -> f64 { (0..self.channels).filter_map(|c| f(c).ok()).fold(0.0, f64::max) };
+        (gain_to_db(max(&|c| self.meter.true_peak(c))), gain_to_db(max(&|c| self.meter.sample_peak(c))))
+    }
+}
+
 pub fn measure(pcm: &Pcm) -> Result<Loudness> {
-    let channels = pcm.channels as u32;
-    let mut meter = EbuR128::new(channels, pcm.sample_rate, Mode::I | Mode::M | Mode::LRA | Mode::TRUE_PEAK | Mode::SAMPLE_PEAK)?;
-    meter.add_frames_f32(&pcm.samples)?;
-    let peaks = |f: &dyn Fn(u32) -> Result<f64, ebur128::Error>| -> f64 {
-        (0..channels).filter_map(|c| f(c).ok()).fold(0.0, f64::max)
-    };
-    let true_peak_dbfs = gain_to_db(peaks(&|c| meter.true_peak(c)));
-    let sample_peak_dbfs = gain_to_db(peaks(&|c| meter.sample_peak(c)));
-    let integrated = meter.loudness_global().ok().filter(|v| v.is_finite());
-    let (integrated_lufs, momentary) = match integrated {
-        Some(v) => (v, false),
-        None => (momentary_max(pcm)?, true),
-    };
-    let range_lu = meter.loudness_range().ok().filter(|v| v.is_finite() && !momentary);
-    Ok(Loudness { integrated_lufs, momentary, true_peak_dbfs, sample_peak_dbfs, range_lu })
+    let mut meter = Meter::new(pcm.channels, pcm.sample_rate)?;
+    meter.push(&pcm.samples)?;
+    match meter.finish() {
+        Some(l) => Ok(l),
+        None => {
+            let (true_peak_dbfs, sample_peak_dbfs) = meter.peaks();
+            Ok(Loudness { integrated_lufs: momentary_max(pcm)?, momentary: true, true_peak_dbfs, sample_peak_dbfs, range_lu: None })
+        }
+    }
+}
+
+/// Measures a file one packet at a time; only a clip too short to gate is decoded whole.
+pub fn measure_file(path: &Path) -> Result<Loudness> {
+    let mut reader = crate::decode::Reader::open(path)?;
+    let mut chunk = Vec::new();
+    let mut meter = None;
+    while reader.next_chunk(&mut chunk)? {
+        if meter.is_none() {
+            meter = Some(Meter::new(reader.channels, reader.sample_rate)?);
+        }
+        meter.as_mut().unwrap().push(&chunk)?;
+        chunk.clear();
+    }
+    match meter.and_then(|m| m.finish()) {
+        Some(l) => Ok(l),
+        None => measure(&crate::decode::decode(path)?),
+    }
 }
 
 fn momentary_max(pcm: &Pcm) -> Result<f64> {

@@ -29,26 +29,9 @@ impl Peaks {
     pub const DEFAULT_BIN: u32 = 256;
 
     pub fn from_pcm(pcm: &Pcm, bin_frames: u32) -> Peaks {
-        let c = pcm.channels as usize;
-        let frames = pcm.frames();
-        let nbins = frames.div_ceil(bin_frames as usize);
-        let mut bins = vec![Vec::with_capacity(nbins); c];
-        for chunk in pcm.samples.chunks(bin_frames as usize * c) {
-            let n = (chunk.len() / c).max(1) as f32;
-            for ch in 0..c {
-                let mut lo = f32::MAX;
-                let mut hi = f32::MIN;
-                let mut sq = 0.0f32;
-                for frame in chunk.chunks(c) {
-                    let s = frame[ch];
-                    lo = lo.min(s);
-                    hi = hi.max(s);
-                    sq += s * s;
-                }
-                bins[ch].push(Bin { min: lo, max: hi, rms: (sq / n).sqrt() });
-            }
-        }
-        Peaks { sample_rate: pcm.sample_rate, channels: pcm.channels, bin_frames, total_frames: frames as u64, bins }
+        let mut b = PeaksBuilder::new(pcm.sample_rate, pcm.channels, bin_frames);
+        b.push(&pcm.samples);
+        b.finish()
     }
 
     pub fn duration_secs(&self) -> f64 {
@@ -137,5 +120,116 @@ impl Peaks {
             bins.push(ch);
         }
         Ok(Peaks { sample_rate, channels, bin_frames, total_frames, bins })
+    }
+}
+
+/// Accumulates interleaved audio in any chunking into the same bins `Peaks::from_pcm` makes.
+pub struct PeaksBuilder {
+    sample_rate: u32,
+    channels: u16,
+    bin_frames: u32,
+    bins: Vec<Vec<Bin>>,
+    /// Per channel: running min, max and sum of squares of the open bin.
+    open: Vec<(f32, f32, f32)>,
+    open_frames: u32,
+    total_frames: u64,
+}
+
+impl PeaksBuilder {
+    pub fn new(sample_rate: u32, channels: u16, bin_frames: u32) -> PeaksBuilder {
+        let c = channels as usize;
+        PeaksBuilder {
+            sample_rate,
+            channels,
+            bin_frames: bin_frames.max(1),
+            bins: vec![Vec::new(); c],
+            open: vec![(f32::MAX, f32::MIN, 0.0); c],
+            open_frames: 0,
+            total_frames: 0,
+        }
+    }
+
+    pub fn push(&mut self, samples: &[f32]) {
+        let c = self.channels as usize;
+        if c == 0 {
+            return;
+        }
+        for frame in samples.chunks_exact(c) {
+            for (acc, s) in self.open.iter_mut().zip(frame) {
+                acc.0 = acc.0.min(*s);
+                acc.1 = acc.1.max(*s);
+                acc.2 += s * s;
+            }
+            self.open_frames += 1;
+            if self.open_frames == self.bin_frames {
+                self.close_bin();
+            }
+        }
+        self.total_frames += (samples.len() / c) as u64;
+    }
+
+    fn close_bin(&mut self) {
+        let n = self.open_frames.max(1) as f32;
+        for (bins, acc) in self.bins.iter_mut().zip(&mut self.open) {
+            bins.push(Bin { min: acc.0, max: acc.1, rms: (acc.2 / n).sqrt() });
+            *acc = (f32::MAX, f32::MIN, 0.0);
+        }
+        self.open_frames = 0;
+    }
+
+    pub fn finish(mut self) -> Peaks {
+        if self.open_frames > 0 {
+            self.close_bin();
+        }
+        Peaks { sample_rate: self.sample_rate, channels: self.channels, bin_frames: self.bin_frames, total_frames: self.total_frames, bins: self.bins }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reference(pcm: &Pcm, bin_frames: u32) -> Peaks {
+        let c = pcm.channels as usize;
+        let mut bins = vec![Vec::new(); c];
+        for chunk in pcm.samples.chunks(bin_frames as usize * c) {
+            let n = (chunk.len() / c).max(1) as f32;
+            for ch in 0..c {
+                let (mut lo, mut hi, mut sq) = (f32::MAX, f32::MIN, 0.0f32);
+                for frame in chunk.chunks(c) {
+                    let s = frame[ch];
+                    lo = lo.min(s);
+                    hi = hi.max(s);
+                    sq += s * s;
+                }
+                bins[ch].push(Bin { min: lo, max: hi, rms: (sq / n).sqrt() });
+            }
+        }
+        Peaks { sample_rate: pcm.sample_rate, channels: pcm.channels, bin_frames, total_frames: pcm.frames() as u64, bins }
+    }
+
+    #[test]
+    fn chunked_bins_match_whole() {
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f32 / (1u64 << 53) as f32 * 2.0 - 1.0
+        };
+        let pcm = Pcm { sample_rate: 48_000, channels: 2, samples: (0..2 * 10_007).map(|_| next()).collect() };
+        let want = reference(&pcm, 256);
+        let mut b = PeaksBuilder::new(48_000, 2, 256);
+        let mut off = 0;
+        let mut step = 2;
+        while off < pcm.samples.len() {
+            let end = (off + step * 2).min(pcm.samples.len());
+            b.push(&pcm.samples[off..end]);
+            off = end;
+            step = step * 3 % 1_000 + 1;
+        }
+        let got = b.finish();
+        assert_eq!(got.total_frames, want.total_frames);
+        assert_eq!(got.bins, want.bins);
     }
 }

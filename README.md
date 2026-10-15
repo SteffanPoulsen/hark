@@ -7,7 +7,7 @@ Linux (Wayland) first, Windows supported from the same codebase. No accounts, no
 ## What it does
 
 - **Browse** one or more library folders in a tree. The list shows duration, channels, sample rate, bit depth, codec and loudness for every file, and search covers the whole library. A filter narrows any view by favorites, tags, file type and channels, and a Favorites row above the tree lists the project's stars.
-- **Audition** at speed: arrowing through the list plays each file instantly. One always-open audio stream, pre-decoded neighbours, cached waveform peaks. Loop, seek by clicking the waveform, gain trim.
+- **Audition** at speed: arrowing through the list plays each file instantly. One always-open audio stream, pre-decoded neighbours, cached waveform peaks. Loop, seek by clicking the waveform, gain trim. Long files stream from disk while they play instead of being decoded whole, so an hour-long recording starts as fast as a one-shot; the threshold is `stream_above_secs` in the config (30 seconds by default, also in the settings window).
 - **Mark** favorites and tags from the keyboard or a right-click menu on any file, which also shows the file in its folder or copies its path. Tags are yours to define, each with a color, edited in the settings window. Marks follow a file through renames because they key on content, not path. The library itself is read-only: hark never renames, moves or deletes a source file.
 - **Projects** are `.hark` files you keep beside the game: an output folder (stored relative to the file), a library scope (the folders that matter for this game), and favorites of their own. With no project open, hark works on the whole library with a default output folder. Switch, open or create projects from the top bar; tags and presets stay global.
 - **Select** a region on the waveform, drag fade handles for fade in and out, zoom with the wheel.
@@ -67,7 +67,7 @@ hark-cli reexport ~/Projects/game/Assets/Audio/sfx/*.wav --preset sfx
 
 ## Configuration
 
-`~/.config/hark/config.json` (or the platform equivalent) holds the roots, the default output folder, the known project files and the open one, the tags, and the export presets. The defaults define `clean`, `sfx`, `ambient`, `music` and `voice` presets and a matching set of tags. Edit the file or use `hark-cli config`. A project file is JSON too: an id (favorites key on it), a name, the output folder and the scope; `hark-cli --project <file or name>` acts in one without opening it.
+`~/.config/hark/config.json` (or the platform equivalent) holds the roots, the default output folder, the known project files and the open one, the tags, the export presets, the audition sample rate and the streaming threshold (`stream_above_secs`). The defaults define `clean`, `sfx`, `ambient`, `music` and `voice` presets and a matching set of tags. Edit the file or use `hark-cli config`. A project file is JSON too: an id (favorites key on it), a name, the output folder and the scope; `hark-cli --project <file or name>` acts in one without opening it.
 
 The library database lives in the data directory and only indexes what the files already carry; deleting it loses nothing but the marks, which `hark-cli` can re-apply. Waveform peaks are cached in the cache directory.
 

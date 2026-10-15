@@ -156,6 +156,10 @@ impl App {
                     }
                 });
             });
+            row(ui, &theme, false, "Stream above", "Files longer than this stream from disk while they play instead of being decoded whole.", |ui| {
+                let r = ui.add(egui::DragValue::new(&mut self.config.stream_above_secs).speed(1.0).range(1.0..=3600.0).suffix(" s").fixed_decimals(0));
+                save |= r.drag_stopped() || r.lost_focus();
+            });
             let device = match (&self.player, &self.audio_error) {
                 (Some(p), _) => format!("{}  ·  {} Hz  ·  {} ch", p.device_name, p.sample_rate, p.channels),
                 (None, Some(e)) => format!("No audio: {e}"),
@@ -197,6 +201,8 @@ impl App {
     }
 
     fn reopen_audio(&mut self) {
+        // Dropping the old player ends any stream it was playing at the old rate.
+        let was_playing = self.is_playing();
         match Player::open(self.config.audition_sample_rate) {
             Ok(p) => {
                 self.player = Some(p);
@@ -212,6 +218,7 @@ impl App {
         self.cache_order.clear();
         self.pending.clear();
         self.current = None;
+        self.play_on_load = was_playing;
         if let Some(i) = self.selected {
             self.select(i, false);
         }
