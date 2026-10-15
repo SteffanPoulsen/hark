@@ -99,6 +99,7 @@ impl App {
             Err(e) => (None, Some(format!("{e:#}"))),
         };
         cc.egui_ctx.set_zoom_factor(config.ui_zoom.clamp(0.5, 3.0));
+        cc.egui_ctx.style_mut(|s| s.interaction.selectable_labels = false);
         let worker = Worker::start(cc.egui_ctx.clone(), 3);
         if !config.roots.is_empty() {
             worker.send(Job::Scan(config.roots.clone()));
