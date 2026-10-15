@@ -245,7 +245,7 @@ impl Pcm {
 /// A trim cuts what stays this far below the span's peak.
 pub const TRIM_BELOW_PEAK_DB: f64 = 40.0;
 /// A silence at least this long parts two takes.
-pub const TAKE_GAP_SECS: f64 = 0.1;
+pub const TAKE_GAP_SECS: f64 = 0.25;
 
 pub fn db_to_gain(db: f64) -> f32 {
     10f64.powf(db / 20.0) as f32
