@@ -28,6 +28,7 @@ clap = { version = "4", features = ["derive"] }
 eframe = "0.36"
 egui = "0.36"
 egui_extras = "0.36"
+egui-phosphor = { version = "0.14", features = ["regular", "fill"] }
 rfd = "0.17"
 
 [profile.release]

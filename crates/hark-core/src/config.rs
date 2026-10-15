@@ -123,6 +123,9 @@ pub struct Config {
     /// Window zoom on top of the display scale; Ctrl+= and Ctrl+- change it in the app.
     #[serde(default = "default_ui_zoom")]
     pub ui_zoom: f32,
+    /// A palette file (`{"bg": "#14121B", "accent": "#1AD1D1", ...}`) that overrides the built-in theme.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_file: Option<PathBuf>,
 }
 
 fn default_ui_zoom() -> f32 {
@@ -143,7 +146,6 @@ impl Default for Config {
                 mono: Some(DownmixMode::Average),
                 sample_rate: Some(48_000),
                 normalize: Normalize::Lufs { target_lufs: -16.0, true_peak_ceiling_dbfs: -1.0 },
-                trim_silence: Some(TrimSilence { threshold_dbfs: -60.0, pad_ms: 5.0 }),
                 ..ExportPreset::default()
             },
         );
@@ -162,7 +164,6 @@ impl Default for Config {
                 mono: Some(DownmixMode::Average),
                 sample_rate: Some(48_000),
                 normalize: Normalize::Lufs { target_lufs: -18.0, true_peak_ceiling_dbfs: -1.0 },
-                trim_silence: Some(TrimSilence { threshold_dbfs: -50.0, pad_ms: 20.0 }),
                 ..ExportPreset::default()
             },
         );
@@ -183,6 +184,7 @@ impl Default for Config {
             default_preset: default_preset_name(),
             audition_sample_rate: None,
             ui_zoom: default_ui_zoom(),
+            theme_file: None,
         }
     }
 }
