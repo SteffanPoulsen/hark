@@ -8,7 +8,7 @@ Linux (Wayland) first, Windows supported from the same codebase. No accounts, no
 
 - **Browse** one or more library folders in a tree. The list shows duration, channels, sample rate, bit depth, codec and loudness for every file, and search covers the whole library. A filter narrows any view by favorites, tags, file type and channels, and a Favorites row above the tree lists the project's stars.
 - **Audition** at speed: arrowing through the list plays each file instantly. One always-open audio stream, pre-decoded neighbours, cached waveform peaks. Loop, seek by clicking the waveform, gain trim.
-- **Mark** favorites and tags. Tags are yours to define, with a color and an export preset each, edited in the settings window. Marks follow a file through renames because they key on content, not path.
+- **Mark** favorites and tags from the keyboard or a right-click menu on any file, which also shows the file in its folder or copies its path. Tags are yours to define, with a color and an export preset each, edited in the settings window. Marks follow a file through renames because they key on content, not path. The library itself is read-only: hark never renames, moves or deletes a source file.
 - **Projects** hold the target: an output folder, a library scope (the folders that matter for this game), and favorites of their own. Switch projects from the top bar; tags and presets stay global.
 - **Select** a region on the waveform, drag fade handles for fade in and out, zoom with the wheel.
 - **Export** through a preset: WAV or FLAC, bit depth with dither, resampling, mono downmix, trim silence, peak or EBU R128 loudness normalisation with a true-peak ceiling, and a path template such as `{tag}/{name}` under your output folder.
@@ -25,7 +25,7 @@ Binaries land in `target/release/hark` (the window) and `target/release/hark-cli
 
 ## Use
 
-Start `hark`, add a library folder, pick a folder in the tree, and arrow through the files. `hark --open <file>` starts on a file.
+Start `hark`, add a library folder with the folder button above the tree, pick a folder, and arrow through the files. `hark --open <file>` starts on a file; `hark --settings` opens the settings window, which is a window of its own.
 
 | Key | Action |
 |---|---|
