@@ -347,6 +347,9 @@ struct ExportArgs {
     fade_in: f64,
     #[arg(long, default_value_t = 0.0)]
     fade_out: f64,
+    /// Level in dB, applied unless the preset normalises (--gain=-6 for a cut).
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    gain: f64,
     /// Folder under the output root to write into; remembered for the next export.
     #[arg(long)]
     into: Option<PathBuf>,
@@ -829,6 +832,7 @@ fn run() -> Result<()> {
             }
             req.fade_in_secs = a.fade_in;
             req.fade_out_secs = a.fade_out;
+            req.gain_db = a.gain;
             if let Some(into) = &a.into {
                 let into = into.strip_prefix(&req.output_root).map(|p| p.to_path_buf()).unwrap_or_else(|_| into.clone());
                 if into.is_absolute() {

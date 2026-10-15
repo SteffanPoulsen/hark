@@ -62,6 +62,9 @@ pub struct Origin {
     pub selection: Option<SelectionRef>,
     pub fade_in_secs: f64,
     pub fade_out_secs: f64,
+    /// Hand-set level in dB; zero when the preset normalised instead.
+    #[serde(default)]
+    pub gain_db: f64,
     pub fade_shape: FadeShape,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_name: Option<String>,

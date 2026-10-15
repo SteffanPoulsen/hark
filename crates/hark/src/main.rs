@@ -517,6 +517,7 @@ impl App {
         req.selection = self.wave.selection.map(|(a, b)| Selection { start_secs: a, end_secs: b });
         req.fade_in_secs = self.wave.fade_in;
         req.fade_out_secs = self.wave.fade_out;
+        req.gain_db = self.gain_db as f64;
         req.preset.fade_shape = self.wave.fade_shape;
         req.overwrite = self.overwrite;
         let name: String = self.export_name.trim().chars().filter(|c| !matches!(c, '/' | '\\')).collect();
@@ -533,6 +534,9 @@ impl App {
         let preset = req.effective_preset();
         let secs = req.selection.map(|s| s.end_secs - s.start_secs).unwrap_or(info.duration_secs);
         let mut out = format!("{} s", waveform::fmt_time(secs));
+        if req.gain_db != 0.0 && preset.normalize == hark_core::config::Normalize::None {
+            out.push_str(&format!("  ·  {:+.0} dB", req.gain_db));
+        }
         if preset.format == hark_core::config::OutputFormat::Wav {
             let channels = if preset.mono.is_some() { 1 } else { info.channels };
             let rate = preset.sample_rate.unwrap_or(info.sample_rate);

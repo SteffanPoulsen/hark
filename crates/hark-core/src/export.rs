@@ -24,6 +24,8 @@ pub struct ExportRequest {
     pub selection: Option<Selection>,
     pub fade_in_secs: f64,
     pub fade_out_secs: f64,
+    /// The level chosen by hand, in dB; applied unless the preset normalises.
+    pub gain_db: f64,
     pub preset_name: Option<String>,
     pub preset: ExportPreset,
     pub output_root: PathBuf,
@@ -59,6 +61,7 @@ impl ExportRequest {
             selection: None,
             fade_in_secs: 0.0,
             fade_out_secs: 0.0,
+            gain_db: 0.0,
             preset_name: Some(preset_name),
             preset,
             output_root,
@@ -151,6 +154,7 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
         selection: req.selection.map(|s| SelectionRef { start_secs: s.start_secs, end_secs: s.end_secs }),
         fade_in_secs: req.fade_in_secs,
         fade_out_secs: req.fade_out_secs,
+        gain_db: req.gain_db,
         fade_shape: preset.fade_shape,
         preset_name: req.preset_name.clone(),
         output_subfolder: req.subfolder.clone(),
@@ -236,7 +240,16 @@ fn process(source: &Pcm, req: &ExportRequest, preset: &ExportPreset) -> Result<(
     }
 
     match preset.normalize {
-        Normalize::None => {}
+        Normalize::None => {
+            if req.gain_db != 0.0 {
+                measured.applied_gain_db = req.gain_db;
+                pcm.apply_gain(db_to_gain(req.gain_db));
+                let peak = pcm.peak();
+                if peak > 1.0 {
+                    warnings.push(format!("{:+.2} dB pushes the peak to {:+.2} dBFS; it clips", req.gain_db, 20.0 * (peak as f64).log10()));
+                }
+            }
+        }
         Normalize::Peak { target_dbfs } => {
             let peak = pcm.peak();
             if peak > 0.0 {
@@ -284,6 +297,7 @@ pub fn request_from_origin(origin: &Origin, output_root: &Path, output_path: Opt
         selection: origin.selection.map(|s| Selection { start_secs: s.start_secs, end_secs: s.end_secs }),
         fade_in_secs: origin.fade_in_secs,
         fade_out_secs: origin.fade_out_secs,
+        gain_db: origin.gain_db,
         preset_name: origin.preset_name.clone(),
         preset: origin.preset.clone(),
         output_root: output_root.to_path_buf(),
