@@ -6,7 +6,7 @@
 
 hark sits between your sound libraries and the project they feed. Point it at the folders the libraries live in, arrow through them at keyboard speed, star and tag what works, select the part you want on the waveform, and export it through a preset into the project's audio folder with a consistent name, format and loudness. Every exported file carries where it came from and how it was made, embedded in the file itself, so months later `hark-cli inspect` still knows.
 
-Linux (Wayland) first, Windows from the same code. No accounts, no subscriptions, no cloud. MIT.
+Linux (Wayland) first, Windows and macOS from the same code. No accounts, no subscriptions, no cloud. Free software under the GPL.
 
 ## Why
 
@@ -109,4 +109,4 @@ The library database lives in the data directory and only indexes what the files
 
 ## Licence
 
-MIT.
+GPL-3.0-or-later. hark is free software: use it, share it and change it, and pass on the source with any copy you distribute. Copyright © 2026 Steffan Poulsen.
