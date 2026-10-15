@@ -69,7 +69,12 @@ fn main() -> eframe::Result {
     }
     let open = open.and_then(|p| std::fs::canonicalize(p).ok());
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("hark").with_app_id("hark").with_inner_size([1500.0, 900.0]).with_min_inner_size([900.0, 600.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_title("hark")
+            .with_app_id("hark")
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/hark-256.png")).expect("the icon is a PNG"))
+            .with_inner_size([1500.0, 900.0])
+            .with_min_inner_size([900.0, 600.0]),
         ..Default::default()
     };
     eframe::run_native(

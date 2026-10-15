@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=hark
+Comment=Audio asset browser for game development
+Exec=hark %f
+Icon=hark
+Terminal=false
+Categories=AudioVideo;Audio;
+StartupWMClass=hark
+MimeType=audio/x-wav;audio/flac;audio/ogg;audio/mpeg;
