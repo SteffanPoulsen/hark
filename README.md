@@ -11,7 +11,7 @@ Linux (Wayland) first, Windows supported from the same codebase. No accounts, no
 - **Mark** favorites and tags from the keyboard or a right-click menu on any file, which also shows the file in its folder or copies its path. Tags are yours to define, with a color and an export preset each, edited in the settings window. Marks follow a file through renames because they key on content, not path. The library itself is read-only: hark never renames, moves or deletes a source file.
 - **Projects** hold the target: an output folder, a library scope (the folders that matter for this game), and favorites of their own. Switch projects from the top bar; tags and presets stay global.
 - **Select** a region on the waveform, drag fade handles for fade in and out, zoom with the wheel.
-- **Export** through a preset: WAV or FLAC, bit depth with dither, resampling, mono downmix, trim silence, peak or EBU R128 loudness normalisation with a true-peak ceiling, and a path template such as `{tag}/{name}` under your output folder.
+- **Export** through a preset: WAV or FLAC, bit depth with dither, resampling, mono downmix, trim silence, peak or EBU R128 loudness normalisation with a true-peak ceiling, and a path template such as `{tag}/{name}` under your output folder. The card shows what will be written before you press the button, takes a one-off file name, and lists the session's exports with a click to their folder.
 - **Remember**: every export embeds its origin, in a `hark` RIFF chunk plus a BWF `bext` description for WAV and an APPLICATION block plus Vorbis comment for FLAC. Months later, `hark-cli inspect` on the file tells you the source path, the pack, the selection, the fades, the preset and the measured gain. `hark-cli reexport` runs that recipe again with changes.
 - **Script it**: `hark-cli` exposes the same core with no window, with `--json` on everything, so an agent or a build step can search, mark, analyse and export.
 
@@ -25,7 +25,7 @@ Binaries land in `target/release/hark` (the window) and `target/release/hark-cli
 
 ## Use
 
-Start `hark`, add a library folder with the folder button above the tree, pick a folder, and arrow through the files. `hark --open <file>` starts on a file; `hark --settings` opens the settings window, which is a window of its own.
+Start `hark`, add a library folder with the button under the tree, pick a folder, and arrow through the files. `hark --open <file>` starts on a file; `hark --settings [general|projects|tags|export]` opens the settings window, a window of its own with those four pages.
 
 | Key | Action |
 |---|---|

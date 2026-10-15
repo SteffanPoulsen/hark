@@ -213,6 +213,20 @@ pub fn icon(icon: &str) -> egui::RichText {
     egui::RichText::new(icon).family(FontFamily::Name(ICONS.into()))
 }
 
+/// A button of the standard control height with an icon and, when `label` is not empty, text.
+pub fn tool_button_widget(icon: &str, label: &str) -> egui::Button<'static> {
+    let text: egui::WidgetText = if label.is_empty() {
+        egui::RichText::new(icon).family(FontFamily::Name(ICONS.into())).size(15.0).into()
+    } else {
+        icon_text(icon, label, 14.0, FontFamily::Proportional, Color32::PLACEHOLDER).into()
+    };
+    egui::Button::new(text).min_size(egui::vec2(30.0, 28.0))
+}
+
+pub fn tool_button(ui: &mut egui::Ui, icon: &str, label: &str) -> egui::Response {
+    ui.add(tool_button_widget(icon, label))
+}
+
 /// An icon followed by text in one label. `Color32::PLACEHOLDER` takes the widget's text color.
 pub fn icon_text(icon: &str, text: &str, size: f32, family: FontFamily, color: Color32) -> egui::text::LayoutJob {
     use egui::text::{LayoutJob, TextFormat};

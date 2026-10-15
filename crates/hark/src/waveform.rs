@@ -374,7 +374,10 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
         }
     }
     if resp.drag_stopped_by(PointerButton::Primary) {
-        if let Some((a, b)) = state.selection {
+        // A fresh drag that never opened up was a sloppy click. An existing selection whose
+        // edges were dragged together stays, zero-length, with the start handle first in line
+        // for the next grab.
+        if let (Some(Drag::New { .. }), Some((a, b))) = (state.drag, state.selection) {
             if b - a < 1e-4 {
                 state.selection = None;
             }
