@@ -106,6 +106,15 @@ enum Cmd {
         output_root: Option<PathBuf>,
         #[arg(long)]
         default_preset: Option<String>,
+        /// Window zoom on top of the display scale.
+        #[arg(long)]
+        ui_zoom: Option<f32>,
+        /// Sample rate the audition engine asks the device for; 0 takes the device default.
+        #[arg(long)]
+        audition_rate: Option<u32>,
+        /// Files whose decoded audio is larger than this many megabytes stream from disk.
+        #[arg(long)]
+        stream_above_mb: Option<f64>,
         /// Print the config file path.
         #[arg(long)]
         path: bool,
@@ -826,7 +835,7 @@ fn run() -> Result<()> {
                 print_json(&results)?;
             }
         }
-        Cmd::Config { output_root, default_preset, path } => {
+        Cmd::Config { output_root, default_preset, ui_zoom, audition_rate, stream_above_mb, path } => {
             let mut config = load(&project)?;
             let mut changed = false;
             if let Some(o) = output_root {
@@ -837,6 +846,18 @@ fn run() -> Result<()> {
                     return Err(anyhow!("no preset {p}"));
                 }
                 config.default_preset = p;
+                changed = true;
+            }
+            if let Some(z) = ui_zoom {
+                config.ui_zoom = z.clamp(0.5, 3.0);
+                changed = true;
+            }
+            if let Some(r) = audition_rate {
+                config.audition_sample_rate = (r > 0).then_some(r);
+                changed = true;
+            }
+            if let Some(mb) = stream_above_mb {
+                config.stream_above_mb = mb.max(0.0);
                 changed = true;
             }
             if changed {

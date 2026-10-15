@@ -9,7 +9,7 @@ mod worker;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use egui::{Color32, CornerRadius, FontId, Key, Margin, RichText, Sense, Stroke, StrokeKind};
 use egui_extras::{Column, TableBuilder};
@@ -29,6 +29,8 @@ const PRELOAD: usize = 3;
 const EXPORT_CARD_W: f32 = 380.0;
 /// Height of the top bar's row of controls; the bar is this plus its margins.
 const TOP_BAR_H: f32 = 32.0;
+/// Height of every control in the top bar and the transport row, so each reads as one line.
+const CONTROL_H: f32 = 28.0;
 /// Search results are cut here so typing stays quick; folder and favorites views are whole.
 const SEARCH_LIMIT: usize = 2000;
 
@@ -43,15 +45,30 @@ const FILE_TYPES: [(&str, &[&str]); 7] = [
     ("opus", &["opus"]),
 ];
 
+/// A path for display, with the home directory as `~`.
+fn tilde(path: &Path) -> String {
+    match std::env::home_dir().and_then(|h| path.strip_prefix(h).ok().map(|r| r.to_path_buf())) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
 fn main() -> eframe::Result {
     let mut open: Option<PathBuf> = None;
     let mut project: Option<PathBuf> = None;
     let mut settings: Option<settings::Page> = None;
+    let mut region = OpenRegion::default();
     let mut args = std::env::args().skip(1);
+    let secs = |args: &mut std::iter::Skip<std::env::Args>| args.next().and_then(|v| v.parse::<f64>().ok());
     while let Some(a) = args.next() {
         match a.as_str() {
             "--open" => open = args.next().map(PathBuf::from),
             "--project" => project = args.next().map(PathBuf::from),
+            "--in" => region.start = secs(&mut args),
+            "--out" => region.end = secs(&mut args),
+            "--fade-in" => region.fade_in = secs(&mut args).unwrap_or(0.0),
+            "--fade-out" => region.fade_out = secs(&mut args).unwrap_or(0.0),
             "--settings" => {
                 settings = Some(match args.next().as_deref() {
                     Some("tags") => settings::Page::Tags,
@@ -64,7 +81,7 @@ fn main() -> eframe::Result {
                 })
             }
             "-h" | "--help" => {
-                println!("hark [--open <audio file or folder>] [--project <file.hark>] [--settings [general|tags|presets]]");
+                println!("hark [--open <audio file or folder>] [--in <secs>] [--out <secs>] [--fade-in <secs>] [--fade-out <secs>] [--project <file.hark>] [--settings [general|tags|presets]]");
                 return Ok(());
             }
             other => open = Some(PathBuf::from(other)),
@@ -89,6 +106,7 @@ fn main() -> eframe::Result {
                 app.apply_project_action(ProjectAction::Open(p));
             }
             if let Some(p) = open {
+                app.open_region = Some((p.clone(), region));
                 app.open_path(&p);
             }
             if let Some(page) = settings {
@@ -98,6 +116,15 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+/// A selection and fades asked for on the command line, applied once the opened file loads.
+#[derive(Default, Clone, Copy)]
+struct OpenRegion {
+    start: Option<f64>,
+    end: Option<f64>,
+    fade_in: f64,
+    fade_out: f64,
 }
 
 enum ProjectAction {
@@ -183,6 +210,7 @@ struct App {
     pending: HashSet<PathBuf>,
     current: Option<Arc<Loaded>>,
     wave: WaveState,
+    open_region: Option<(PathBuf, OpenRegion)>,
 
     autoplay: bool,
     loop_on: bool,
@@ -196,6 +224,7 @@ struct App {
     preset: ExportPreset,
     overwrite: bool,
     status: String,
+    status_since: Instant,
     status_is_error: bool,
     scanning: bool,
     settings_open: bool,
@@ -204,7 +233,6 @@ struct App {
     mark: egui::TextureHandle,
     /// Centre line of the project switcher on the last frame; the brand sits on it, since
     /// egui does not centre buttons on the row they are in.
-    brand_line: Option<f32>,
     search_id: egui::Id,
     tag_edit: Option<(usize, String)>,
     /// Playback was running when the device was reopened; resume once the file reloads.
@@ -268,6 +296,7 @@ impl App {
             pending: HashSet::new(),
             current: None,
             wave: WaveState::default(),
+            open_region: None,
             autoplay: true,
             loop_on: false,
             transport_h: 34.0,
@@ -277,12 +306,12 @@ impl App {
             preset,
             overwrite: false,
             status: String::new(),
+            status_since: Instant::now(),
             status_is_error: false,
             scanning,
             file_count: 0,
             settings_open: false,
             mark,
-            brand_line: None,
             settings_page: settings::Page::General,
             search_id: egui::Id::new("search"),
             tag_edit: None,
@@ -313,9 +342,22 @@ impl App {
         }
     }
 
+    /// A message holds the footer for a while, then the key hints come back.
     fn set_status(&mut self, msg: impl Into<String>, error: bool) {
         self.status = msg.into();
         self.status_is_error = error;
+        self.status_since = Instant::now();
+    }
+
+    fn expire_status(&mut self, ctx: &egui::Context) {
+        if self.status.is_empty() {
+            return;
+        }
+        let hold = Duration::from_secs(if self.status_is_error { 20 } else { 8 });
+        match hold.checked_sub(self.status_since.elapsed()) {
+            Some(left) => ctx.request_repaint_after(left),
+            None => self.status.clear(),
+        }
     }
 
     fn children_of(&mut self, dir: &Path) -> Vec<PathBuf> {
@@ -448,6 +490,14 @@ impl App {
     fn show_loaded(&mut self, l: Arc<Loaded>) {
         let duration = l.duration_secs;
         self.wave.reset(duration);
+        if let Some((_, r)) = self.open_region.take_if(|(p, _)| *p == l.path) {
+            let (a, b) = (r.start.unwrap_or(0.0).clamp(0.0, duration), r.end.unwrap_or(duration).clamp(0.0, duration));
+            if b > a && (r.start.is_some() || r.end.is_some()) {
+                self.wave.selection = Some((a, b));
+            }
+            self.wave.fade_in = r.fade_in.max(0.0);
+            self.wave.fade_out = r.fade_out.max(0.0);
+        }
         let measured = l.loudness.is_some() || self.files.iter().find(|f| f.path == l.path).map(|f| f.lufs.is_some()).unwrap_or(false);
         if l.peaks.is_none() || !measured {
             self.worker.analyze(l.path.clone(), l.peaks.clone());
@@ -739,7 +789,7 @@ impl App {
 
 
     fn icon_button(ui: &mut egui::Ui, icon: &str, label: &str, on: bool) -> egui::Response {
-        ui.add(egui::Button::new(theme::icon_text(icon, label, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).selected(on).min_size(egui::vec2(30.0, 28.0)))
+        ui.add(egui::Button::new(theme::icon_text(icon, label, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).selected(on).min_size(egui::vec2(30.0, CONTROL_H)))
     }
 
     // ---- panels ----
@@ -753,7 +803,6 @@ impl App {
             // The brand is one word: the mark stands on the letters' baseline and reaches
             // their ascender line, measured from the glyphs' own ink, and that block, not the
             // font box, is centred on the controls.
-            let control_h = ROW_H;
             let font = FontId::new(18.0, egui::FontFamily::Name(theme::SEMIBOLD.into()));
             let word = ui.fonts_mut(|f| f.layout_no_wrap("hark".into(), font.clone(), self.theme.accent));
             let (ink_top, ink_bottom) = word
@@ -765,12 +814,12 @@ impl App {
             let [w, h] = self.mark.size();
             let mark_w = ink_h * w as f32 / h as f32;
             let gap = 5.0;
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(mark_w + gap + word.size().x, control_h), Sense::hover());
-            let galley_top = self.brand_line.unwrap_or(rect.center().y) - (ink_top + ink_bottom) / 2.0;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(mark_w + gap + word.size().x, ROW_H), Sense::hover());
+            let galley_top = rect.center().y - (ink_top + ink_bottom) / 2.0;
             let mark_rect = egui::Rect::from_min_size(egui::pos2(rect.left(), galley_top + ink_top), egui::vec2(mark_w, ink_h));
             egui::Image::new(&self.mark).tint(self.theme.accent2).paint_at(ui, mark_rect);
             ui.painter().galley(egui::pos2(mark_rect.right() + gap, galley_top), word, self.theme.accent);
-            if let Some(action) = self.project_menu(ui, "project", 0.0) {
+            if let Some(action) = self.project_menu(ui) {
                 self.apply_project_action(action);
             }
             let focused = ui.memory(|m| m.has_focus(self.search_id));
@@ -778,23 +827,26 @@ impl App {
                 .fill(self.theme.surface)
                 .stroke(Stroke::new(1.0, if focused { self.theme.accent } else { self.theme.line }))
                 .corner_radius(CornerRadius::same(6))
-                .inner_margin(Margin::symmetric(8, 4));
-            box_frame.show(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(theme::icon(icons::MAGNIFYING_GLASS).color(self.theme.muted));
-                let search = ui.add(egui::TextEdit::singleline(&mut self.search).id(self.search_id).frame(egui::Frame::NONE).hint_text("Search the library").desired_width(240.0));
-                if search.changed() {
-                    self.list_dirty = true;
-                }
-                if ui.input(|i| i.key_pressed(Key::Escape)) && search.has_focus() {
-                    self.search.clear();
-                    self.list_dirty = true;
-                    search.surrender_focus();
-                }
-                if !self.search.is_empty() && ui.add(egui::Button::new(theme::icon(icons::X).color(self.theme.muted)).frame(false)).clicked() {
-                    self.search.clear();
-                    self.list_dirty = true;
-                }
+                .inner_margin(Margin::symmetric(8, 0));
+            ui.allocate_ui_with_layout(egui::vec2(300.0, CONTROL_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                box_frame.show(ui, |ui| {
+                    ui.set_min_height(CONTROL_H - 2.0);
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.label(theme::icon(icons::MAGNIFYING_GLASS).color(self.theme.muted));
+                    let search = ui.add(egui::TextEdit::singleline(&mut self.search).id(self.search_id).frame(egui::Frame::NONE).hint_text("Search the library").desired_width(ui.available_width() - 20.0));
+                    if search.changed() {
+                        self.list_dirty = true;
+                    }
+                    if ui.input(|i| i.key_pressed(Key::Escape)) && search.has_focus() {
+                        self.search.clear();
+                        self.list_dirty = true;
+                        search.surrender_focus();
+                    }
+                    if !self.search.is_empty() && ui.add(egui::Button::new(theme::icon(icons::X).color(self.theme.muted)).frame(false)).clicked() {
+                        self.search.clear();
+                        self.list_dirty = true;
+                    }
+                });
             });
             self.ui_filter(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1354,9 +1406,6 @@ impl App {
     }
 
     fn ui_transport(&mut self, ui: &mut egui::Ui, playing: bool, playhead: Option<f64>, duration: f64) {
-        // Every control in the row is CONTROL_H tall and keeps the same padding, so the row
-        // reads as one line whatever mix of buttons, fields and the slider it holds.
-        const CONTROL_H: f32 = 28.0;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().interact_size = egui::vec2(CONTROL_H, CONTROL_H);
             ui.spacing_mut().button_padding = egui::vec2(8.0, 5.0);
@@ -1480,7 +1529,7 @@ impl App {
             _ => (String::new(), String::new(), "…".into()),
         };
         let stem = file.as_ref().and_then(|f| f.path.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "File name".into());
-        let out = self.config.output_root().map(|p| p.display().to_string());
+        let out = self.config.output_root().map(tilde);
         let have = file.is_some();
         egui::Grid::new("export-target").num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
             key(ui, "Folder");
@@ -1635,14 +1684,12 @@ impl App {
 
     /// The project switcher: the default state, the known project files, and ways to open or
     /// start one. `width` of zero lets the button size itself.
-    pub fn project_menu(&mut self, ui: &mut egui::Ui, id: &str, width: f32) -> Option<ProjectAction> {
+    fn project_menu(&mut self, ui: &mut egui::Ui) -> Option<ProjectAction> {
         let mut action = None;
-        let label = theme::icon_text(icons::CUBE, &self.config.project_name(), 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER);
-        let mut combo = egui::ComboBox::from_id_salt(id).selected_text(label);
-        if width > 0.0 {
-            combo = combo.width(width);
-        }
-        let shown = combo.show_ui(ui, |ui| {
+        let mut label = theme::icon_text(icons::CUBE, &self.config.project_name(), 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER);
+        label.append(icons::CARET_DOWN, 7.0, egui::text::TextFormat { font_id: FontId::new(12.0, egui::FontFamily::Name(theme::ICONS.into())), color: Color32::PLACEHOLDER, valign: egui::Align::Center, ..Default::default() });
+        let button = ui.add(egui::Button::new(label).min_size(egui::vec2(30.0, CONTROL_H)));
+        egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClick).width(220.0).show(|ui| {
             if ui.selectable_label(self.config.active.is_none(), "Default").clicked() {
                 action = Some(ProjectAction::Default);
             }
@@ -1670,9 +1717,6 @@ impl App {
                 action = Some(ProjectAction::New);
             }
         });
-        if id == "project" {
-            self.brand_line = Some(shown.response.rect.center().y);
-        }
         action
     }
 
@@ -1746,10 +1790,25 @@ impl App {
         self.list_dirty = true;
     }
 
+    /// A key and what it does, as one dim line reads in a terminal: the key a shade brighter than its word.
+    fn key_hint(&self, ui: &mut egui::Ui, key: &str, action: &str) {
+        let dim = self.theme.muted.gamma_multiply(0.6);
+        ui.label(RichText::new(key).family(egui::FontFamily::Name(theme::MEDIUM.into())).color(self.theme.muted.gamma_multiply(0.85)).size(12.0));
+        ui.add_space(-4.0);
+        ui.label(RichText::new(action).color(dim).size(12.0));
+        ui.add_space(8.0);
+    }
+
     fn ui_status(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let color = if self.status_is_error { self.theme.err } else { self.theme.muted };
-            ui.label(RichText::new(&self.status).color(color).size(12.0));
+            if self.status.is_empty() {
+                for (key, action) in [("Space", "Play"), ("↑ ↓", "Audition"), ("F", "Favorite"), ("1–9", "Tags"), ("[ ]", "Selection"), ("E", "Export")] {
+                    self.key_hint(ui, key, action);
+                }
+            } else {
+                let color = if self.status_is_error { self.theme.err } else { self.theme.muted };
+                ui.label(RichText::new(&self.status).color(color).size(12.0));
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let device = match (&self.player, &self.audio_error) {
                     (Some(p), _) => theme::icon_text(icons::SPEAKER_HIGH, &format!("{}  ·  {} Hz", p.device_name, p.sample_rate), 12.0, egui::FontFamily::Proportional, self.theme.muted),
@@ -1868,6 +1927,7 @@ impl eframe::App for App {
             let _ = self.config.save();
         }
         self.handle_done();
+        self.expire_status(&ctx);
         if self.list_dirty {
             self.refresh_list();
         }
