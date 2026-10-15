@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = ["crates/hark-core", "crates/hark-cli", "crates/hark"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/SteffanPoulsen/hark"
+
+[workspace.dependencies]
+hark-core = { path = "crates/hark-core" }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+symphonia = { version = "0.6", features = ["all"] }
+rubato = "5"
+ebur128 = "0.1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+blake3 = "1"
+walkdir = "2"
+directories = "6"
+cpal = "0.18"
+flacenc = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+eframe = "0.36"
+egui = "0.36"
+egui_extras = "0.36"
+rfd = "0.17"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+
+[profile.dev.package."*"]
+opt-level = 2

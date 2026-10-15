@@ -1,0 +1,18 @@
+[package]
+name = "hark"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hark"
+path = "src/main.rs"
+
+[dependencies]
+hark-core.workspace = true
+anyhow.workspace = true
+blake3.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+rfd.workspace = true
