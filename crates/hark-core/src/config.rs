@@ -160,9 +160,10 @@ pub struct Config {
     /// Device sample rate the audition engine asks for; `None` takes the device default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audition_sample_rate: Option<u32>,
-    /// Files longer than this stream from disk while they play instead of being decoded whole.
-    #[serde(default = "default_stream_above_secs")]
-    pub stream_above_secs: f64,
+    /// Files whose decoded audio is larger than this many megabytes stream from disk while
+    /// they play instead of being decoded whole.
+    #[serde(default = "default_stream_above_mb")]
+    pub stream_above_mb: f64,
     /// Window zoom on top of the display scale; Ctrl+= and Ctrl+- change it in the app.
     #[serde(default = "default_ui_zoom")]
     pub ui_zoom: f32,
@@ -171,8 +172,8 @@ pub struct Config {
     pub theme_file: Option<PathBuf>,
 }
 
-fn default_stream_above_secs() -> f64 {
-    600.0
+fn default_stream_above_mb() -> f64 {
+    256.0
 }
 
 fn default_ui_zoom() -> f32 {
@@ -236,7 +237,7 @@ impl Default for Config {
             presets,
             default_preset: default_preset_name(),
             audition_sample_rate: None,
-            stream_above_secs: default_stream_above_secs(),
+            stream_above_mb: default_stream_above_mb(),
             ui_zoom: default_ui_zoom(),
             theme_file: None,
         }

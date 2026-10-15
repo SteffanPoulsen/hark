@@ -110,8 +110,8 @@ enum Cmd {
         #[arg(long)]
         path: bool,
     },
-    /// Play a file through the audition engine and wait for it to finish. Files longer than the
-    /// config's `stream_above_secs` stream from disk while they play.
+    /// Play a file through the audition engine and wait for it to finish. Files whose decoded
+    /// audio is larger than the config's `stream_above_mb` stream from disk while they play.
     Play {
         file: PathBuf,
         #[arg(long = "in")]
@@ -130,8 +130,9 @@ enum Cmd {
         /// After AT seconds of playback restart from TO seconds, as a waveform click would.
         #[arg(long, value_name = "AT:TO", value_parser = parse_jump)]
         jump: Option<(f64, f64)>,
-        /// Stream when longer than this many seconds, overriding the config for this run.
-        #[arg(long)]
+        /// Stream when the decoded audio is larger than this many megabytes, overriding the
+        /// config for this run.
+        #[arg(long, value_name = "MB")]
         stream_above: Option<f64>,
     },
 }
@@ -852,7 +853,7 @@ fn run() -> Result<()> {
             let config = load(&project)?;
             let player = hark_core::audition::Player::open(config.audition_sample_rate)?;
             let info = hark_core::probe(&file)?;
-            let streamed = info.duration_secs > stream_above.unwrap_or(config.stream_above_secs);
+            let streamed = info.decoded_mb() > stream_above.unwrap_or(config.stream_above_mb);
             let source = if streamed {
                 Source::File { path: file.clone(), source_rate: info.sample_rate, channels: info.channels, source_frames: (info.duration_secs * info.sample_rate as f64).round() as u64 }
             } else {

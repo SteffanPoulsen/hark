@@ -23,6 +23,13 @@ pub struct AudioInfo {
     pub container: String,
 }
 
+impl AudioInfo {
+    /// Megabytes the file takes decoded whole, as 32-bit float samples.
+    pub fn decoded_mb(&self) -> f64 {
+        self.duration_secs * self.sample_rate as f64 * self.channels as f64 * 4.0 / 1e6
+    }
+}
+
 struct Opened {
     reader: Box<dyn FormatReader>,
     track_id: u32,

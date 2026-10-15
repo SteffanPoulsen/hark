@@ -151,8 +151,8 @@ impl App {
                     }
                 });
             });
-            row(ui, &theme, false, "Stream above", "Files longer than this stream from disk while they play instead of being decoded whole.", |ui| {
-                let r = ui.add(egui::DragValue::new(&mut self.config.stream_above_secs).speed(1.0).range(1.0..=3600.0).suffix(" s").fixed_decimals(0));
+            row(ui, &theme, false, "Stream above", "Files whose decoded audio is larger than this stream from disk while they play instead of being decoded whole. 256 MB is about ten minutes of 48 kHz stereo.", |ui| {
+                let r = ui.add(egui::DragValue::new(&mut self.config.stream_above_mb).speed(4.0).range(16.0..=16384.0).suffix(" MB").fixed_decimals(0));
                 save |= r.drag_stopped() || r.lost_focus();
             });
             let device = match (&self.player, &self.audio_error) {

@@ -386,7 +386,7 @@ impl App {
             return;
         }
         self.pending.insert(path.to_path_buf());
-        self.worker.send(Job::Load { path: path.to_path_buf(), device_rate: self.device_rate(), stream_above_secs: self.config.stream_above_secs });
+        self.worker.send(Job::Load { path: path.to_path_buf(), device_rate: self.device_rate(), stream_above_mb: self.config.stream_above_mb });
     }
 
     fn remember(&mut self, loaded: Arc<Loaded>) {
@@ -449,7 +449,7 @@ impl App {
         let duration = l.duration_secs;
         self.wave.reset(duration);
         let measured = l.loudness.is_some() || self.files.iter().find(|f| f.path == l.path).map(|f| f.lufs.is_some()).unwrap_or(false);
-        if l.source.is_streamed() && (l.peaks.is_none() || !measured) {
+        if l.peaks.is_none() || !measured {
             self.worker.analyze(l.path.clone(), l.peaks.clone());
         }
         self.current = Some(l);
@@ -589,7 +589,6 @@ impl App {
                             self.request_load(&path);
                         }
                         Ok(l) => {
-                            self.record_loudness(&path, l.loudness);
                             self.remember(l.clone());
                             let wanted = self.selected.and_then(|i| self.files.get(i)).map(|f| f.path == path).unwrap_or(false);
                             if wanted && self.current.as_ref().map(|c| c.path != path).unwrap_or(true) {

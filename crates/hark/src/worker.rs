@@ -19,8 +19,8 @@ pub struct Loaded {
     pub source: Source,
     /// `None` until a streamed file's analysis pass has run.
     pub peaks: Option<Arc<Peaks>>,
-    /// Measured by this load or analysis; `None` for a streamed file whose loudness only the
-    /// library holds.
+    /// Measured by the analysis pass; `None` before it runs, and for a file whose loudness
+    /// only the library holds.
     pub loudness: Option<Loudness>,
 }
 
@@ -37,7 +37,7 @@ impl Loaded {
 }
 
 pub enum Job {
-    Load { path: PathBuf, device_rate: u32, stream_above_secs: f64 },
+    Load { path: PathBuf, device_rate: u32, stream_above_mb: f64 },
     Export(ExportRequest),
     Scan(Vec<Root>),
 }
@@ -79,7 +79,7 @@ impl Worker {
                     Err(_) => return,
                 };
                 let done = match job {
-                    Job::Load { path, device_rate, stream_above_secs } => Done::Loaded(path.clone(), load(&path, device_rate, stream_above_secs).map(Arc::new).map_err(|e| format!("{e:#}"))),
+                    Job::Load { path, device_rate, stream_above_mb } => Done::Loaded(path.clone(), load(&path, device_rate, stream_above_mb).map(Arc::new).map_err(|e| format!("{e:#}"))),
                     Job::Export(req) => Done::Exported(hark_core::export::run(&req).map_err(|e| format!("{e:#}"))),
                     Job::Scan(roots) => Done::Scanned(scan(&roots)),
                 };
@@ -145,9 +145,11 @@ fn save_peaks(path: &Path, peaks: &Peaks) {
     }
 }
 
-fn load(path: &Path, device_rate: u32, stream_above_secs: f64) -> anyhow::Result<Loaded> {
+/// Decodes a file whole, or opens it for streaming when its decoded size is over the
+/// threshold. Loudness is left to the analysis pass so playback never waits on it.
+fn load(path: &Path, device_rate: u32, stream_above_mb: f64) -> anyhow::Result<Loaded> {
     let info = hark_core::probe(path)?;
-    if info.duration_secs > stream_above_secs {
+    if info.decoded_mb() > stream_above_mb {
         let peaks = peaks_cache_path(path).and_then(|c| Peaks::load(&c).ok()).map(Arc::new);
         return Ok(Loaded {
             path: path.to_path_buf(),
@@ -173,7 +175,6 @@ fn load(path: &Path, device_rate: u32, stream_above_secs: f64) -> anyhow::Result
             p
         }
     };
-    let loudness = hark_core::loudness::measure(&source).ok();
     let device = if source.sample_rate == device_rate { source.clone() } else { hark_core::resample::resample(&source, device_rate)? };
     Ok(Loaded {
         path: path.to_path_buf(),
@@ -182,7 +183,7 @@ fn load(path: &Path, device_rate: u32, stream_above_secs: f64) -> anyhow::Result
         duration_secs: source.duration_secs(),
         source: Source::Whole(Arc::new(device)),
         peaks: Some(Arc::new(peaks)),
-        loudness,
+        loudness: None,
     })
 }
 
