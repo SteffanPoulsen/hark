@@ -25,6 +25,13 @@ pub struct Theme {
     pub tag_colors: Vec<Color32>,
 }
 
+/// Inner margin of every panel, in points.
+pub const PAD: i8 = 12;
+/// Space between groups of controls.
+pub const GAP: f32 = 14.0;
+/// Height of a row in the tree and the list.
+pub const ROW_H: f32 = 26.0;
+
 pub const SEMIBOLD: &str = "inter-semibold";
 pub const MEDIUM: &str = "inter-medium";
 pub const ICONS: &str = "icons";

@@ -40,14 +40,56 @@ pub struct ScanReport {
     pub errors: Vec<(PathBuf, String)>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelClass {
+    Mono,
+    Stereo,
+    Multi,
+}
+
+impl ChannelClass {
+    pub const ALL: [ChannelClass; 3] = [ChannelClass::Mono, ChannelClass::Stereo, ChannelClass::Multi];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ChannelClass::Mono => "mono",
+            ChannelClass::Stereo => "stereo",
+            ChannelClass::Multi => "multi",
+        }
+    }
+}
+
+impl std::str::FromStr for ChannelClass {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "mono" | "1" => Ok(ChannelClass::Mono),
+            "stereo" | "2" => Ok(ChannelClass::Stereo),
+            "multi" => Ok(ChannelClass::Multi),
+            _ => Err(format!("{s}: expected mono, stereo or multi")),
+        }
+    }
+}
+
+/// Every field narrows the result; an empty list or `None` leaves its axis open.
 #[derive(Clone, Debug, Default)]
 pub struct Query {
+    /// Words that must all appear in the path.
     pub text: String,
-    pub tag: Option<String>,
-    pub favorites_only: bool,
+    /// Only files directly inside this folder.
+    pub dir: Option<PathBuf>,
+    /// Only files anywhere below this folder.
     pub under: Option<PathBuf>,
     /// Folders to search within; empty means everywhere.
     pub scope: Vec<PathBuf>,
+    pub favorites_only: bool,
+    /// Files carrying any of these tags.
+    pub tags: Vec<String>,
+    /// Lowercase extensions without the dot.
+    pub extensions: Vec<String>,
+    pub channels: Vec<ChannelClass>,
     pub limit: usize,
 }
 
@@ -174,11 +216,7 @@ impl Db {
 
     /// Files directly inside `dir`, by name.
     pub fn list_dir(&self, dir: &Path) -> Result<Vec<FileRecord>> {
-        let sql = format!("{SELECT} WHERE f.dir = :dir ORDER BY f.name COLLATE NOCASE");
-        let dir = dir.to_string_lossy().into_owned();
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(&[(":project", &self.project as &dyn rusqlite::ToSql), (":dir", &dir)], Self::row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        self.search(&Query { dir: Some(dir.to_path_buf()), ..Query::default() })
     }
 
     pub fn search(&self, q: &Query) -> Result<Vec<FileRecord>> {
@@ -191,28 +229,47 @@ impl Db {
             values.push(v);
             name
         };
+        let any_of = |names: &mut Vec<String>, values: &mut Vec<String>, items: &[String], clause: &dyn Fn(&str) -> String| -> String {
+            let ors: Vec<String> = items.iter().map(|v| clause(&bind(names, values, v.clone()))).collect();
+            format!(" AND ({})", ors.join(" OR "))
+        };
         for word in q.text.split_whitespace() {
             let n = bind(&mut names, &mut values, format!("%{}%", word.replace('%', "\\%")));
             sql.push_str(&format!(" AND f.path LIKE {n} ESCAPE '\\'"));
         }
-        if let Some(tag) = &q.tag {
-            let n = bind(&mut names, &mut values, tag.clone());
-            sql.push_str(&format!(" AND EXISTS(SELECT 1 FROM file_tags t WHERE t.hash = f.hash AND t.tag = {n})"));
+        if let Some(dir) = &q.dir {
+            let n = bind(&mut names, &mut values, dir.to_string_lossy().into_owned());
+            sql.push_str(&format!(" AND f.dir = {n}"));
+        }
+        if !q.tags.is_empty() {
+            sql.push_str(&any_of(&mut names, &mut values, &q.tags, &|n| format!("EXISTS(SELECT 1 FROM file_tags t WHERE t.hash = f.hash AND t.tag = {n})")));
         }
         if q.favorites_only {
             sql.push_str(" AND EXISTS(SELECT 1 FROM favorites v WHERE v.hash = f.hash AND v.project = :project)");
+        }
+        if !q.extensions.is_empty() {
+            let patterns: Vec<String> = q.extensions.iter().map(|e| format!("%.{}", e.to_lowercase())).collect();
+            sql.push_str(&any_of(&mut names, &mut values, &patterns, &|n| format!("lower(f.name) LIKE {n}")));
+        }
+        if !q.channels.is_empty() {
+            let ors: Vec<&str> = q
+                .channels
+                .iter()
+                .map(|c| match c {
+                    ChannelClass::Mono => "f.channels = 1",
+                    ChannelClass::Stereo => "f.channels = 2",
+                    ChannelClass::Multi => "f.channels > 2",
+                })
+                .collect();
+            sql.push_str(&format!(" AND ({})", ors.join(" OR ")));
         }
         if let Some(under) = &q.under {
             let n = bind(&mut names, &mut values, format!("{}{}%", under.to_string_lossy(), std::path::MAIN_SEPARATOR));
             sql.push_str(&format!(" AND f.path LIKE {n}"));
         }
         if !q.scope.is_empty() {
-            let mut ors = Vec::new();
-            for s in &q.scope {
-                let n = bind(&mut names, &mut values, format!("{}{}%", s.to_string_lossy(), std::path::MAIN_SEPARATOR));
-                ors.push(format!("f.path LIKE {n}"));
-            }
-            sql.push_str(&format!(" AND ({})", ors.join(" OR ")));
+            let prefixes: Vec<String> = q.scope.iter().map(|s| format!("{}{}%", s.to_string_lossy(), std::path::MAIN_SEPARATOR)).collect();
+            sql.push_str(&any_of(&mut names, &mut values, &prefixes, &|n| format!("f.path LIKE {n}")));
         }
         sql.push_str(" ORDER BY f.name COLLATE NOCASE");
         if q.limit > 0 {

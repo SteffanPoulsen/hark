@@ -14,7 +14,7 @@ use egui_extras::{Column, TableBuilder};
 use egui_phosphor::regular as icons;
 use hark_core::audition::{Clip, Player};
 use hark_core::export::{ExportRequest, Selection};
-use hark_core::library::Query;
+use hark_core::library::{ChannelClass, Query};
 use hark_core::{Config, Db, FileRecord};
 
 use theme::Theme;
@@ -24,6 +24,17 @@ use worker::{Done, Job, Loaded, Worker};
 const CACHE_FRAMES: usize = 48_000 * 60 * 20;
 const PRELOAD: usize = 3;
 const EXPORT_CARD_W: f32 = 330.0;
+
+/// File types offered by the filter, each with the extensions it stands for.
+const FILE_TYPES: [(&str, &[&str]); 7] = [
+    ("wav", &["wav", "wave"]),
+    ("flac", &["flac"]),
+    ("ogg", &["ogg", "oga"]),
+    ("mp3", &["mp3"]),
+    ("aiff", &["aif", "aiff", "aifc"]),
+    ("m4a", &["m4a", "mp4"]),
+    ("opus", &["opus"]),
+];
 
 fn main() -> eframe::Result {
     let mut open: Option<PathBuf> = None;
@@ -68,6 +79,45 @@ enum TagAction {
     Add,
 }
 
+/// What the list shows when nothing is being searched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Location {
+    Favorites,
+    Folder(PathBuf),
+}
+
+/// Narrows the list, whatever it shows; each axis is a set, and an empty set leaves it open.
+#[derive(Default)]
+struct Filter {
+    favorites: bool,
+    tags: Vec<String>,
+    types: Vec<&'static str>,
+    channels: Vec<ChannelClass>,
+}
+
+impl Filter {
+    fn count(&self) -> usize {
+        self.favorites as usize + self.tags.len() + self.types.len() + self.channels.len()
+    }
+
+    fn clear(&mut self) {
+        *self = Filter::default();
+    }
+
+    fn extensions(&self) -> Vec<String> {
+        FILE_TYPES.iter().filter(|(name, _)| self.types.contains(name)).flat_map(|(_, exts)| exts.iter().map(|e| e.to_string())).collect()
+    }
+}
+
+fn toggle_in<T: PartialEq>(set: &mut Vec<T>, item: T) {
+    match set.iter().position(|x| *x == item) {
+        Some(i) => {
+            set.remove(i);
+        }
+        None => set.push(item),
+    }
+}
+
 struct App {
     config: Config,
     theme: Theme,
@@ -78,11 +128,11 @@ struct App {
 
     expanded: HashSet<PathBuf>,
     dir_children: HashMap<PathBuf, Vec<PathBuf>>,
-    selected_dir: Option<PathBuf>,
+    location: Option<Location>,
+    fav_count: usize,
 
     search: String,
-    filter_tag: Option<String>,
-    fav_only: bool,
+    filter: Filter,
     files: Vec<FileRecord>,
     selected: Option<usize>,
     list_dirty: bool,
@@ -96,6 +146,7 @@ struct App {
 
     autoplay: bool,
     loop_on: bool,
+    transport_h: f32,
     gain_db: f32,
     preset: String,
     overwrite: bool,
@@ -140,10 +191,10 @@ impl App {
             worker,
             expanded,
             dir_children: HashMap::new(),
-            selected_dir: None,
+            location: None,
+            fav_count: 0,
             search: String::new(),
-            filter_tag: None,
-            fav_only: false,
+            filter: Filter::default(),
             files: Vec::new(),
             selected: None,
             list_dirty: true,
@@ -155,6 +206,7 @@ impl App {
             wave: WaveState::default(),
             autoplay: true,
             loop_on: false,
+            transport_h: 34.0,
             gain_db: 0.0,
             preset,
             overwrite: false,
@@ -180,7 +232,7 @@ impl App {
                 _ => break,
             }
         }
-        self.selected_dir = Some(dir);
+        self.location = Some(Location::Folder(dir));
         self.refresh_list();
         if path.is_file() {
             if let Some(i) = self.files.iter().position(|f| f.path == path) {
@@ -208,24 +260,39 @@ impl App {
 
     fn refresh_list(&mut self) {
         self.list_dirty = false;
-        let result = if self.search.trim().is_empty() {
-            match &self.selected_dir {
-                Some(d) => self.db.list_dir(d),
-                None => Ok(Vec::new()),
-            }
-        } else {
-            self.db.search(&Query { text: self.search.clone(), tag: self.filter_tag.clone(), favorites_only: self.fav_only, under: None, scope: self.config.project().scope.clone(), limit: 2000 })
+        self.fav_count = self.db.favorite_count(self.db.project()).unwrap_or(0);
+        let mut q = Query {
+            favorites_only: self.filter.favorites,
+            tags: self.filter.tags.clone(),
+            extensions: self.filter.extensions(),
+            channels: self.filter.channels.clone(),
+            limit: 2000,
+            ..Query::default()
         };
-        let mut files = match result {
+        if !self.search.trim().is_empty() {
+            q.text = self.search.clone();
+            q.scope = self.config.project().scope.clone();
+        } else {
+            match &self.location {
+                Some(Location::Folder(d)) => q.dir = Some(d.clone()),
+                Some(Location::Favorites) => {
+                    q.favorites_only = true;
+                    q.scope = self.config.project().scope.clone();
+                }
+                None => {
+                    self.files.clear();
+                    self.selected = None;
+                    return;
+                }
+            }
+        }
+        let files = match self.db.search(&q) {
             Ok(f) => f,
             Err(e) => {
                 self.set_status(format!("library: {e:#}"), true);
                 Vec::new()
             }
         };
-        if self.search.trim().is_empty() {
-            files.retain(|f| (!self.fav_only || f.favorite) && self.filter_tag.as_ref().map(|t| f.tags.contains(t)).unwrap_or(true));
-        }
         let keep = self.selected.and_then(|i| self.files.get(i)).map(|f| f.path.clone());
         self.files = files;
         self.selected = keep.and_then(|p| self.files.iter().position(|f| f.path == p));
@@ -359,7 +426,10 @@ impl App {
         let path = self.files[i].path.clone();
         let on = !self.files[i].favorite;
         match self.db.ensure_hash(&path).and_then(|h| self.db.set_favorite(&h, on)) {
-            Ok(()) => self.refresh_record(i),
+            Ok(()) => {
+                self.refresh_record(i);
+                self.fav_count = self.db.favorite_count(self.db.project()).unwrap_or(0);
+            }
             Err(e) => self.set_status(format!("favorite: {e:#}"), true),
         }
     }
@@ -565,8 +635,8 @@ impl App {
 
     fn ui_top(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = theme::GAP;
             ui.label(theme::semibold("hark").size(18.0).color(self.theme.accent));
-            ui.add_space(4.0);
             let mut switch: Option<String> = None;
             egui::ComboBox::from_id_salt("project")
                 .selected_text(theme::icon_text(icons::CUBE, &self.config.active_project, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER))
@@ -588,8 +658,7 @@ impl App {
                     self.switch_project(&p);
                 }
             }
-            ui.add_space(8.0);
-            let search = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text(theme::icon_text(icons::MAGNIFYING_GLASS, "search the library", 14.0, egui::FontFamily::Proportional, self.theme.muted)).desired_width(280.0));
+            let search = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text(theme::icon_text(icons::MAGNIFYING_GLASS, "search the library", 14.0, egui::FontFamily::Proportional, self.theme.muted)).desired_width(260.0));
             if search.changed() {
                 self.list_dirty = true;
             }
@@ -598,23 +667,9 @@ impl App {
                 self.list_dirty = true;
                 search.surrender_focus();
             }
-            egui::ComboBox::from_id_salt("tag-filter")
-                .selected_text(theme::icon_text(icons::TAG, self.filter_tag.as_deref().unwrap_or("any tag"), 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER))
-                .show_ui(ui, |ui| {
-                    if ui.selectable_value(&mut self.filter_tag, None, "any tag").clicked() {
-                        self.list_dirty = true;
-                    }
-                    for t in self.config.tags.clone() {
-                        if ui.selectable_value(&mut self.filter_tag, Some(t.name.clone()), &t.name).clicked() {
-                            self.list_dirty = true;
-                        }
-                    }
-                });
-            if Self::icon_button(ui, icons::STAR, "favorites", self.fav_only).clicked() {
-                self.fav_only = !self.fav_only;
-                self.list_dirty = true;
-            }
+            self.ui_filter(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
                 if Self::icon_button(ui, icons::GEAR, "", self.settings_open).on_hover_text("settings").clicked() {
                     self.settings_open = !self.settings_open;
                 }
@@ -639,9 +694,68 @@ impl App {
         });
     }
 
+    fn ui_filter(&mut self, ui: &mut egui::Ui) {
+        let n = self.filter.count();
+        let label = if n == 0 { "filter".to_string() } else { format!("filter · {n}") };
+        let button = Self::icon_button(ui, icons::FUNNEL, &label, n > 0);
+        let muted = self.theme.muted;
+        let heading = |ui: &mut egui::Ui, text: &str| {
+            ui.add_space(4.0);
+            ui.label(RichText::new(text).color(muted).size(12.0));
+        };
+        let mut changed = false;
+        egui::Popup::menu(&button).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(200.0).show(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            changed |= ui.checkbox(&mut self.filter.favorites, theme::icon_text(icons::STAR, "favorites", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).changed();
+            heading(ui, "tags");
+            for (k, t) in self.config.tags.clone().iter().enumerate() {
+                let mut on = self.filter.tags.contains(&t.name);
+                if ui.checkbox(&mut on, RichText::new(&t.name).color(self.theme.color_of(k, Some(t)).gamma_multiply(1.3).to_opaque())).changed() {
+                    toggle_in(&mut self.filter.tags, t.name.clone());
+                    changed = true;
+                }
+            }
+            heading(ui, "file type");
+            for (name, _) in FILE_TYPES {
+                let mut on = self.filter.types.contains(&name);
+                if ui.checkbox(&mut on, name).changed() {
+                    toggle_in(&mut self.filter.types, name);
+                    changed = true;
+                }
+            }
+            heading(ui, "channels");
+            for c in ChannelClass::ALL {
+                let mut on = self.filter.channels.contains(&c);
+                if ui.checkbox(&mut on, c.name()).changed() {
+                    toggle_in(&mut self.filter.channels, c);
+                    changed = true;
+                }
+            }
+            if n > 0 {
+                ui.add_space(4.0);
+                if ui.button("clear").clicked() {
+                    self.filter.clear();
+                    changed = true;
+                }
+            }
+        });
+        if changed {
+            self.list_dirty = true;
+        }
+    }
+
     fn ui_tree(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.add_space(4.0);
+            let selected = self.location == Some(Location::Favorites);
+            let count = if self.fav_count > 0 { Some(self.fav_count.to_string()) } else { None };
+            let (row, _) = self.tree_row(ui, 0, None, (icons::STAR, theme::ICONS_FILL), self.theme.accent2, "Favorites", selected, count);
+            if row.clicked() {
+                self.location = Some(Location::Favorites);
+                self.search.clear();
+                self.list_dirty = true;
+            }
+            ui.add_space(6.0);
             if self.config.roots.is_empty() {
                 ui.weak("No library folders yet.");
                 ui.weak("Add one with the button above.");
@@ -653,11 +767,11 @@ impl App {
         });
     }
 
-    fn ui_tree_node(&mut self, ui: &mut egui::Ui, dir: &Path, label: &str, depth: usize) {
-        let children = self.children_of(dir);
-        let expanded = self.expanded.contains(dir);
-        let selected = self.selected_dir.as_deref() == Some(dir);
-        let row_h = 24.0;
+    /// One row of the left bar: an optional caret (`Some(expanded)`), an icon, a label and an
+    /// optional trailing note. Returns the row's response and the caret's.
+    #[allow(clippy::too_many_arguments)]
+    fn tree_row(&self, ui: &mut egui::Ui, depth: usize, caret: Option<bool>, icon: (&str, &str), icon_color: Color32, label: &str, selected: bool, trailing: Option<String>) -> (egui::Response, egui::Response) {
+        let row_h = theme::ROW_H;
         let width = ui.available_width();
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, row_h), Sense::click());
         let caret_rect = egui::Rect::from_min_size(rect.min + egui::vec2(6.0 + depth as f32 * 16.0, 0.0), egui::vec2(18.0, row_h));
@@ -675,13 +789,25 @@ impl App {
         let font = FontId::new(14.0, egui::FontFamily::Proportional);
         let icon_font = FontId::new(14.0, egui::FontFamily::Name(theme::ICONS.into()));
         let x = caret_rect.left();
-        if !children.is_empty() {
-            let caret = if expanded { icons::CARET_DOWN } else { icons::CARET_RIGHT };
-            p.text(egui::pos2(x + 2.0, rect.center().y), egui::Align2::LEFT_CENTER, caret, icon_font.clone(), self.theme.muted);
+        if let Some(expanded) = caret {
+            let glyph = if expanded { icons::CARET_DOWN } else { icons::CARET_RIGHT };
+            p.text(egui::pos2(x + 2.0, rect.center().y), egui::Align2::LEFT_CENTER, glyph, icon_font, self.theme.muted);
         }
-        let folder = if expanded && !children.is_empty() { icons::FOLDER_OPEN } else { icons::FOLDER };
-        p.text(egui::pos2(x + 20.0, rect.center().y), egui::Align2::LEFT_CENTER, folder, icon_font, if selected { self.theme.accent } else { self.theme.muted });
+        let (glyph, family) = icon;
+        p.text(egui::pos2(x + 20.0, rect.center().y), egui::Align2::LEFT_CENTER, glyph, FontId::new(14.0, egui::FontFamily::Name(family.into())), if selected { icon_color } else { self.theme.muted });
         p.text(egui::pos2(x + 40.0, rect.center().y), egui::Align2::LEFT_CENTER, label, font, text_color);
+        if let Some(t) = trailing {
+            p.text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, t, FontId::new(12.0, egui::FontFamily::Proportional), self.theme.muted);
+        }
+        (resp, caret_resp)
+    }
+
+    fn ui_tree_node(&mut self, ui: &mut egui::Ui, dir: &Path, label: &str, depth: usize) {
+        let children = self.children_of(dir);
+        let expanded = self.expanded.contains(dir);
+        let selected = self.location.as_ref() == Some(&Location::Folder(dir.to_path_buf()));
+        let folder = if expanded && !children.is_empty() { icons::FOLDER_OPEN } else { icons::FOLDER };
+        let (resp, caret_resp) = self.tree_row(ui, depth, (!children.is_empty()).then_some(expanded), (folder, theme::ICONS), self.theme.accent, label, selected, None);
 
         if caret_resp.clicked() && !children.is_empty() {
             if expanded {
@@ -690,7 +816,7 @@ impl App {
                 self.expanded.insert(dir.to_path_buf());
             }
         } else if resp.clicked() {
-            self.selected_dir = Some(dir.to_path_buf());
+            self.location = Some(Location::Folder(dir.to_path_buf()));
             self.search.clear();
             self.list_dirty = true;
             if !expanded && !children.is_empty() {
@@ -717,24 +843,24 @@ impl App {
         let heading = if !self.search.trim().is_empty() {
             format!("{n} results")
         } else {
-            match &self.selected_dir {
-                Some(d) => {
+            match &self.location {
+                Some(Location::Folder(d)) => {
                     let shown = self.config.root_of(d).and_then(|r| d.strip_prefix(&r.path).ok()).map(|rel| if rel.as_os_str().is_empty() { String::new() } else { format!("  /  {}", rel.display()) });
                     match (self.config.root_of(d), shown) {
                         (Some(r), Some(rel)) => format!("{}{rel}   ·   {n} files", r.name),
                         _ => format!("{}   ·   {n} files", d.display()),
                     }
                 }
+                Some(Location::Favorites) => format!("Favorites of {}   ·   {n} files", self.config.active_project),
                 None => "pick a folder".to_string(),
             }
         };
-        ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.add_space(6.0);
+            ui.add_space(8.0);
             ui.label(RichText::new(heading).color(self.theme.muted));
         });
-        ui.add_space(4.0);
-        let row_h = 26.0;
+        ui.add_space(6.0);
+        let row_h = theme::ROW_H;
         let mut clicked: Option<usize> = None;
         let mut double: Option<usize> = None;
         let mut fav_toggle: Option<usize> = None;
@@ -846,11 +972,10 @@ impl App {
     }
 
     fn ui_bottom(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::right("export").resizable(false).default_size(EXPORT_CARD_W).show(ui, |ui| {
-            ui.add_space(6.0);
+        egui::Panel::right("export").resizable(false).default_size(EXPORT_CARD_W).frame(egui::Frame::new().inner_margin(Margin { left: theme::PAD, right: 0, top: 0, bottom: 0 })).show(ui, |ui| {
             self.ui_export_card(ui);
         });
-        egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(Margin { left: 0, right: 8, top: 6, bottom: 4 })).show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(Margin::ZERO)).show(ui, |ui| {
             self.ui_wave_column(ui);
         });
     }
@@ -863,7 +988,10 @@ impl App {
         };
         let duration = self.current.as_ref().map(|c| c.duration_secs).unwrap_or(0.0);
 
-        // File header.
+        // The tag chips sit at the right of the header when they fit beside the name, else on a
+        // row of their own.
+        let chips_w = self.config.tags.iter().map(|t| self.chip_width(ui, &t.name) + 4.0).sum::<f32>() + theme::GAP;
+        let mut chips_below = false;
         ui.horizontal(|ui| {
             if let Some(c) = self.current.clone() {
                 let name = c.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -872,23 +1000,13 @@ impl App {
                 if let Some(l) = c.loudness {
                     meta.push_str(&format!("  ·  {:.1} LUFS{}  ·  {:.1} dBTP", l.integrated_lufs, if l.momentary { " (M)" } else { "" }, l.true_peak_dbfs));
                 }
-                ui.label(RichText::new(meta).color(self.theme.muted));
-                if let Some(i) = self.selected {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        let defs = self.config.tags.clone();
-                        let tags = self.files[i].tags.clone();
-                        let mut toggled = None;
-                        for (k, t) in defs.iter().enumerate().rev() {
-                            let on = tags.contains(&t.name);
-                            if self.chip(ui, &t.name, self.theme.color_of(k, Some(t)), on, true).on_hover_text(format!("key {}", k + 1)).clicked() {
-                                toggled = Some(t.name.clone());
-                            }
-                        }
-                        if let Some(t) = toggled {
-                            self.toggle_tag(&t);
-                        }
-                    });
+                ui.add(egui::Label::new(RichText::new(meta).color(self.theme.muted)).truncate());
+                if self.selected.is_some() {
+                    if ui.available_width() >= chips_w {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.tag_chips(ui, true));
+                    } else {
+                        chips_below = true;
+                    }
                 }
             } else if let Some(i) = self.selected {
                 if self.pending.contains(&self.files[i].path) {
@@ -899,10 +1017,14 @@ impl App {
                 ui.label(RichText::new("no file").color(self.theme.muted));
             }
         });
+        if chips_below {
+            ui.horizontal_wrapped(|ui| self.tag_chips(ui, false));
+        }
 
-        // Waveform.
-        let transport_h = 34.0;
-        let wave_h = (ui.available_height() - transport_h - 8.0).max(80.0);
+        ui.add_space(2.0);
+        // The transport row wraps at narrow widths; the waveform leaves it the height it took on
+        // the last frame.
+        let wave_h = (ui.available_height() - self.transport_h - 10.0).max(80.0);
         let peaks = self.current.as_ref().map(|c| c.peaks.clone());
         let samples = self.current.as_ref().map(|c| c.device.clone());
         let colors = waveform::WaveColors {
@@ -917,9 +1039,47 @@ impl App {
         if let WaveEvent::Seek(t) = event {
             self.play(Some(t));
         }
+        ui.add_space(4.0);
+        let row = ui.scope(|ui| self.ui_transport(ui, playing, playhead, duration)).response.rect.height();
+        if (row - self.transport_h).abs() > 0.5 {
+            self.transport_h = row;
+            ui.ctx().request_repaint();
+        }
+    }
 
-        // Transport.
-        ui.horizontal(|ui| {
+    fn chip_width(&self, ui: &egui::Ui, text: &str) -> f32 {
+        let font = FontId::new(12.0, egui::FontFamily::Name(theme::MEDIUM.into()));
+        ui.painter().layout_no_wrap(text.to_string(), font, Color32::WHITE).size().x + 16.0
+    }
+
+    /// The selected file's tag chips, every defined tag with the carried ones lit; `reversed`
+    /// keeps the definition order inside a right-to-left layout.
+    fn tag_chips(&mut self, ui: &mut egui::Ui, reversed: bool) {
+        let Some(i) = self.selected else { return };
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let defs = self.config.tags.clone();
+        let tags = self.files[i].tags.clone();
+        let mut toggled = None;
+        let order: Vec<usize> = if reversed { (0..defs.len()).rev().collect() } else { (0..defs.len()).collect() };
+        for k in order {
+            let t = &defs[k];
+            let on = tags.contains(&t.name);
+            if self.chip(ui, &t.name, self.theme.color_of(k, Some(t)), on, true).on_hover_text(format!("key {}", k + 1)).clicked() {
+                toggled = Some(t.name.clone());
+            }
+        }
+        if let Some(t) = toggled {
+            self.toggle_tag(&t);
+        }
+    }
+
+    fn ui_transport(&mut self, ui: &mut egui::Ui, playing: bool, playhead: Option<f64>, duration: f64) {
+        ui.horizontal_wrapped(|ui| {
+            let group = |ui: &mut egui::Ui| {
+                ui.add_space(theme::GAP - ui.spacing().item_spacing.x);
+                ui.separator();
+                ui.add_space(theme::GAP - ui.spacing().item_spacing.x);
+            };
             let play = if playing { icons::STOP } else { icons::PLAY };
             if ui.add(egui::Button::new(theme::icon(play).size(16.0)).min_size(egui::vec2(34.0, 26.0))).clicked() {
                 if playing {
@@ -942,7 +1102,7 @@ impl App {
                     p.set_gain(hark_core::pcm::db_to_gain(self.gain_db as f64));
                 }
             }
-            ui.separator();
+            group(ui);
             ui.label(RichText::new("sel").color(self.theme.muted));
             let mut sel = self.wave.selection.unwrap_or((0.0, 0.0));
             let had = self.wave.selection.is_some();
@@ -957,7 +1117,7 @@ impl App {
             if ui.add(egui::Button::new(theme::icon(icons::MAGNIFYING_GLASS_PLUS)).small()).on_hover_text("zoom to selection (Z)").clicked() {
                 self.wave.zoom_to_selection();
             }
-            ui.separator();
+            group(ui);
             ui.label(RichText::new("fade").color(self.theme.muted));
             ui.add(egui::DragValue::new(&mut self.wave.fade_in).speed(0.01).range(0.0..=duration).fixed_decimals(3));
             ui.add(egui::DragValue::new(&mut self.wave.fade_out).speed(0.01).range(0.0..=duration).fixed_decimals(3));
@@ -981,87 +1141,80 @@ impl App {
         let theme = self.theme.clone();
         egui::Frame::new().fill(theme.surface).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(12)).show(ui, |ui| {
             ui.set_min_height(ui.available_height());
-            ui.label(theme::icon_text(icons::EXPORT, "Export", 15.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), Color32::PLACEHOLDER));
-            ui.add_space(6.0);
-            egui::ComboBox::from_id_salt("preset").width(ui.available_width()).selected_text(&self.preset).show_ui(ui, |ui| {
-                for name in self.config.presets.keys().cloned().collect::<Vec<_>>() {
-                    ui.selectable_value(&mut self.preset, name.clone(), name);
-                }
+            egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+                self.ui_export_card_body(ui);
             });
-            if let Some(p) = self.config.preset(&self.preset).cloned() {
-                let lines = [
-                    format!("{}  {} bit{}", p.format.extension().to_uppercase(), p.bits, if p.dither && p.bits < 32 { ", dithered" } else { "" }),
-                    p.sample_rate.map(|r| format!("{} Hz", r)).unwrap_or_else(|| "source rate".into()),
-                    match p.mono {
-                        Some(_) => "mono".into(),
-                        None => "source channels".into(),
-                    },
-                    match p.normalize {
-                        hark_core::config::Normalize::None => "no normalisation".into(),
-                        hark_core::config::Normalize::Peak { target_dbfs } => format!("peak to {target_dbfs} dBFS"),
-                        hark_core::config::Normalize::Lufs { target_lufs, true_peak_ceiling_dbfs } => format!("{target_lufs} LUFS, ceiling {true_peak_ceiling_dbfs} dBTP"),
-                    },
-                    p.trim_silence.map(|t| format!("trim below {} dBFS, pad {} ms", t.threshold_dbfs, t.pad_ms)).unwrap_or_else(|| "no trim".into()),
-                ];
-                ui.add_space(2.0);
-                for l in lines {
-                    ui.label(RichText::new(l).color(theme.muted).size(12.5));
-                }
-            }
-            ui.add_space(10.0);
-            ui.label(RichText::new("output folder").color(theme.muted).size(12.0));
-            let out = self.config.output_root().map(|p| p.display().to_string()).unwrap_or_else(|| "choose…".into());
-            if ui.add(egui::Button::new(theme::icon_text(icons::FOLDER, &out, 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(ui.available_width(), 0.0)).wrap()).clicked() {
-                if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    self.config.project_mut().output_root = Some(path);
-                    let _ = self.config.save();
-                }
-            }
-            ui.add_space(6.0);
-            match self.export_request() {
-                Some(Ok(req)) => {
-                    let rel = req.output_path();
-                    let rel = rel.strip_prefix(&req.output_root).map(|p| p.to_path_buf()).unwrap_or(rel);
-                    let detail = match req.selection {
-                        Some(s) => format!("{} – {}", waveform::fmt_time(s.start_secs), waveform::fmt_time(s.end_secs)),
-                        None => "whole file".into(),
-                    };
-                    ui.label(RichText::new(format!("→ {}", rel.display())).size(12.5));
-                    ui.label(RichText::new(detail).color(theme.muted).size(12.0));
-                }
-                Some(Err(e)) => {
-                    ui.label(RichText::new(e).color(theme.warn).size(12.0));
-                }
-                None => {
-                    ui.label(RichText::new("select a file").color(theme.muted).size(12.0));
-                }
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.overwrite, "overwrite");
-            });
-            ui.add_space(4.0);
-            let can = self.selected.is_some() && self.config.output_root().is_some();
-            let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 14.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), if can { Color32::WHITE } else { theme.muted }))
-                .fill(if can { theme.accent } else { theme.overlay })
-                .min_size(egui::vec2(ui.available_width(), 32.0));
-            if ui.add_enabled(can, button).on_hover_text("E").clicked() {
-                self.export();
-            }
-            if let Some(result) = &self.last_export {
-                ui.add_space(8.0);
-                match result {
-                    Ok(msg) => {
-                        for (k, line) in msg.lines().enumerate() {
-                            ui.label(RichText::new(line).color(if k == 0 { theme.ok } else { theme.warn }).size(12.0));
-                        }
-                    }
-                    Err(e) => {
-                        ui.label(RichText::new(e).color(theme.err).size(12.0));
-                    }
-                }
+        });
+    }
+
+    fn ui_export_card_body(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme.clone();
+        ui.label(theme::icon_text(icons::EXPORT, "Export", 15.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), Color32::PLACEHOLDER));
+        ui.add_space(6.0);
+        egui::ComboBox::from_id_salt("preset").width(ui.available_width()).selected_text(&self.preset).show_ui(ui, |ui| {
+            for name in self.config.presets.keys().cloned().collect::<Vec<_>>() {
+                ui.selectable_value(&mut self.preset, name.clone(), name);
             }
         });
+        if let Some(p) = self.config.preset(&self.preset).cloned() {
+            ui.add_space(2.0);
+            for l in preset_summary(&p) {
+                ui.label(RichText::new(l).color(theme.muted).size(12.5));
+            }
+        }
+        ui.add_space(10.0);
+        ui.label(RichText::new("output folder").color(theme.muted).size(12.0));
+        let out = self.config.output_root().map(|p| p.display().to_string()).unwrap_or_else(|| "choose…".into());
+        if ui.add(egui::Button::new(theme::icon_text(icons::FOLDER, &out, 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(ui.available_width(), 0.0)).wrap()).clicked() {
+            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                self.config.project_mut().output_root = Some(path);
+                let _ = self.config.save();
+            }
+        }
+        ui.add_space(6.0);
+        match self.export_request() {
+            Some(Ok(req)) => {
+                let rel = req.output_path();
+                let rel = rel.strip_prefix(&req.output_root).map(|p| p.to_path_buf()).unwrap_or(rel);
+                let detail = match req.selection {
+                    Some(s) => format!("{} – {}", waveform::fmt_time(s.start_secs), waveform::fmt_time(s.end_secs)),
+                    None => "whole file".into(),
+                };
+                ui.label(RichText::new(format!("→ {}", rel.display())).size(12.5));
+                ui.label(RichText::new(detail).color(theme.muted).size(12.0));
+            }
+            Some(Err(e)) => {
+                ui.label(RichText::new(e).color(theme.warn).size(12.0));
+            }
+            None => {
+                ui.label(RichText::new("select a file").color(theme.muted).size(12.0));
+            }
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.overwrite, "overwrite");
+        });
+        ui.add_space(4.0);
+        let can = self.selected.is_some() && self.config.output_root().is_some();
+        let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 14.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), if can { Color32::WHITE } else { theme.muted }))
+            .fill(if can { theme.accent } else { theme.overlay })
+            .min_size(egui::vec2(ui.available_width(), 32.0));
+        if ui.add_enabled(can, button).on_hover_text("E").clicked() {
+            self.export();
+        }
+        if let Some(result) = &self.last_export {
+            ui.add_space(8.0);
+            match result {
+                Ok(msg) => {
+                    for (k, line) in msg.lines().enumerate() {
+                        ui.label(RichText::new(line).color(if k == 0 { theme.ok } else { theme.warn }).size(12.0));
+                    }
+                }
+                Err(e) => {
+                    ui.label(RichText::new(e).color(theme.err).size(12.0));
+                }
+            }
+        }
     }
 
     fn switch_project(&mut self, name: &str) {
@@ -1071,7 +1224,7 @@ impl App {
         self.config.active_project = name.to_string();
         self.db.set_project(name);
         let _ = self.config.save();
-        self.selected_dir = None;
+        self.location = None;
         self.list_dirty = true;
         self.expanded = self.config.scope_folders().into_iter().map(|(_, p)| p).collect();
     }
@@ -1107,7 +1260,7 @@ impl App {
         ui.add_space(6.0);
         let active = self.config.active_project.clone();
         let favs = self.db.favorite_count(&active).unwrap_or(0);
-        egui::Grid::new("project-grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+        egui::Grid::new("project-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
             ui.label(RichText::new("name").color(self.theme.muted));
             let editing = self.project_edit.is_some();
             if editing {
@@ -1201,14 +1354,14 @@ impl App {
         let mut open = true;
         egui::Window::new("Settings").open(&mut open).resizable(true).default_width(560.0).show(ctx, |ui| {
             self.ui_projects_settings(ui);
-            ui.add_space(12.0);
+            ui.add_space(theme::GAP * 1.5);
             ui.label(theme::semibold("Tags").size(15.0));
             ui.label(RichText::new("Order is the 1 to 9 hotkey order. Renaming rewrites the marks; removing drops them.").color(self.theme.muted).size(12.0));
             ui.add_space(6.0);
             let used: HashMap<String, usize> = self.db.tags_in_use().unwrap_or_default().into_iter().collect();
             let mut action: Option<TagAction> = None;
             let n = self.config.tags.len();
-            egui::Grid::new("tags-grid").num_columns(6).spacing([10.0, 6.0]).show(ui, |ui| {
+            egui::Grid::new("tags-grid").num_columns(6).spacing([12.0, 8.0]).show(ui, |ui| {
                 for k in 0..n {
                     let def = self.config.tags[k].clone();
                     let color = self.theme.color_of(k, Some(&def));
@@ -1262,9 +1415,9 @@ impl App {
             if let Some(a) = action {
                 self.apply_tag_action(a);
             }
-            ui.add_space(12.0);
+            ui.add_space(theme::GAP * 1.5);
             ui.label(theme::semibold("Export").size(15.0));
-            egui::Grid::new("general-grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+            egui::Grid::new("general-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                 ui.label(RichText::new("default preset").color(self.theme.muted));
                 let mut changed = false;
                 egui::ComboBox::from_id_salt("default-preset").selected_text(&self.config.default_preset).show_ui(ui, |ui| {
@@ -1276,7 +1429,13 @@ impl App {
                 });
                 ui.end_row();
                 ui.label(RichText::new("ui zoom").color(self.theme.muted));
-                ui.label(format!("{:.2}  (Ctrl+= / Ctrl+-)", ctx.zoom_factor()));
+                let zoom = ui.add(egui::Slider::new(&mut self.config.ui_zoom, 0.8..=2.0).step_by(0.05).fixed_decimals(2)).on_hover_text("Ctrl+= and Ctrl+- also change it");
+                if zoom.changed() {
+                    ctx.set_zoom_factor(self.config.ui_zoom);
+                }
+                if zoom.drag_stopped() || zoom.lost_focus() {
+                    changed = true;
+                }
                 ui.end_row();
                 if changed {
                     let _ = self.config.save();
@@ -1301,8 +1460,8 @@ impl App {
                     match self.db.rename_tag(&old, &new) {
                         Ok(_) => {
                             self.config.tags[k].name = new.clone();
-                            if self.filter_tag.as_deref() == Some(old.as_str()) {
-                                self.filter_tag = Some(new);
+                            for t in self.filter.tags.iter_mut().filter(|t| **t == old) {
+                                *t = new.clone();
                             }
                         }
                         Err(e) => self.set_status(format!("rename tag: {e:#}"), true),
@@ -1318,9 +1477,7 @@ impl App {
                 if let Err(e) = self.db.remove_tag(&t.name) {
                     self.set_status(format!("remove tag: {e:#}"), true);
                 }
-                if self.filter_tag.as_deref() == Some(t.name.as_str()) {
-                    self.filter_tag = None;
-                }
+                self.filter.tags.retain(|x| *x != t.name);
             }
             TagAction::Add => {
                 let mut name = "new".to_string();
@@ -1341,11 +1498,9 @@ impl App {
 
     fn ui_status(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.add_space(6.0);
             let color = if self.status_is_error { self.theme.err } else { self.theme.muted };
             ui.label(RichText::new(&self.status).color(color).size(12.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(6.0);
                 let device = match (&self.player, &self.audio_error) {
                     (Some(p), _) => theme::icon_text(icons::SPEAKER_HIGH, &format!("{}  ·  {} Hz", p.device_name, p.sample_rate), 12.0, egui::FontFamily::Proportional, self.theme.muted),
                     (None, Some(e)) => theme::icon_text(icons::SPEAKER_HIGH, &format!("no audio: {e}"), 12.0, egui::FontFamily::Proportional, self.theme.err),
@@ -1364,6 +1519,25 @@ impl App {
     }
 }
 
+/// Two lines: what the file becomes, and what is done to the signal on the way.
+fn preset_summary(p: &hark_core::ExportPreset) -> [String; 2] {
+    use hark_core::config::Normalize;
+    let rate = p.sample_rate.map(|r| format!("{:.1} kHz", r as f64 / 1000.0)).unwrap_or_else(|| "source rate".into());
+    let channels = if p.mono.is_some() { "mono" } else { "source channels" };
+    let dither = if p.dither && p.bits < 32 { " dithered" } else { "" };
+    let format = format!("{} {} bit{dither} · {rate} · {channels}", p.format.extension().to_uppercase(), p.bits);
+    let mut steps: Vec<String> = Vec::new();
+    if let Some(t) = p.trim_silence {
+        steps.push(format!("trim below {} dBFS", t.threshold_dbfs));
+    }
+    steps.push(match p.normalize {
+        Normalize::None => "no normalisation".into(),
+        Normalize::Peak { target_dbfs } => format!("peak to {target_dbfs} dBFS"),
+        Normalize::Lufs { target_lufs, true_peak_ceiling_dbfs } => format!("{target_lufs} LUFS, ceiling {true_peak_ceiling_dbfs} dBTP"),
+    });
+    [format, steps.join(" · ")]
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -1378,20 +1552,21 @@ impl eframe::App for App {
         }
         self.handle_keys(&ctx);
 
-        let bar = egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(6, 6));
+        let pad = theme::PAD;
+        let bar = egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(pad, 8));
         egui::Panel::top("top").frame(bar).show(ui, |ui| {
             self.ui_top(ui);
         });
-        egui::Panel::bottom("status").frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(4, 3))).show(ui, |ui| {
+        egui::Panel::bottom("status").frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(pad, 4))).show(ui, |ui| {
             self.ui_status(ui);
         });
-        egui::Panel::bottom("bottom").resizable(true).default_size(350.0).frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin::symmetric(8, 4))).show(ui, |ui| {
+        egui::Panel::bottom("bottom").resizable(true).default_size(350.0).frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 8 })).show(ui, |ui| {
             self.ui_bottom(ui);
         });
-        egui::Panel::left("tree").resizable(true).default_size(250.0).frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(4, 4))).show(ui, |ui| {
+        egui::Panel::left("tree").resizable(true).default_size(250.0).frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin { left: 4, right: 4, top: 8, bottom: 8 })).show(ui, |ui| {
             self.ui_tree(ui);
         });
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin::symmetric(8, 0))).show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 0 })).show(ui, |ui| {
             self.ui_list(ui);
         });
 

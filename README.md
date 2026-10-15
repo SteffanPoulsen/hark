@@ -6,7 +6,7 @@ Linux (Wayland) first, Windows supported from the same codebase. No accounts, no
 
 ## What it does
 
-- **Browse** one or more library folders in a tree. The list shows duration, channels, sample rate, bit depth, codec and loudness for every file, and search covers the whole library.
+- **Browse** one or more library folders in a tree. The list shows duration, channels, sample rate, bit depth, codec and loudness for every file, and search covers the whole library. A filter narrows any view by favorites, tags, file type and channels, and a Favorites row above the tree lists the project's stars.
 - **Audition** at speed: arrowing through the list plays each file instantly. One always-open audio stream, pre-decoded neighbours, cached waveform peaks. Loop, seek by clicking the waveform, gain trim.
 - **Mark** favorites and tags. Tags are yours to define, with a color and an export preset each, edited in the settings window. Marks follow a file through renames because they key on content, not path.
 - **Projects** hold the target: an output folder, a library scope (the folders that matter for this game), and favorites of their own. Switch projects from the top bar; tags and presets stay global.
@@ -42,14 +42,14 @@ Start `hark`, add a library folder, pick a folder in the tree, and arrow through
 | Delete | Clear the selection and fades |
 | E | Export the selection with the chosen preset |
 
-On the waveform: drag to select, drag a selection edge to adjust it, shift-drag inside to move it, drag the triangles in the strip above to set fades, click to play from there, wheel to zoom, shift-wheel or middle-drag to pan, double-click to zoom out. Ctrl+= and Ctrl+- scale the whole window.
+On the waveform: drag to select, drag a selection edge to adjust it, shift-drag inside to move it, drag the triangles in the strip above to set fades, click to play from there, wheel to zoom, shift-wheel or middle-drag to pan, double-click to zoom out. The window scale is in settings; Ctrl+= and Ctrl+- change it too.
 
 ### CLI
 
 ```
 hark-cli roots add ~/Audio/Libraries --name libraries
 hark-cli scan
-hark-cli search footstep gravel --tag sfx
+hark-cli search footstep gravel --tag sfx --tag foley --type wav --channels mono
 hark-cli tag "Footsteps/gravel_03.wav" +sfx +foley
 hark-cli fav "Footsteps/gravel_03.wav"
 hark-cli analyze "Footsteps/gravel_03.wav" --store

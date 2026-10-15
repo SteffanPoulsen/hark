@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use hark_core::config::Root;
 use hark_core::export::{ExportRequest, Selection};
-use hark_core::library::Query;
+use hark_core::library::{ChannelClass, Query};
 use hark_core::{Config, Db};
 
 #[derive(Parser)]
@@ -39,13 +39,20 @@ enum Cmd {
     },
     /// Files directly inside a folder.
     Ls { dir: PathBuf },
-    /// Search the library by path words, tag and favorite.
+    /// Search the library by path words, tags, favorite, file type and channels.
     Search {
         words: Vec<String>,
+        /// Files carrying any of the given tags; repeatable.
         #[arg(long)]
-        tag: Option<String>,
+        tag: Vec<String>,
         #[arg(long)]
         fav: bool,
+        /// File extension such as wav or flac; repeatable.
+        #[arg(long = "type")]
+        extension: Vec<String>,
+        /// mono, stereo or multi; repeatable.
+        #[arg(long)]
+        channels: Vec<ChannelClass>,
         #[arg(long)]
         under: Option<PathBuf>,
         #[arg(long, default_value_t = 200)]
@@ -436,9 +443,19 @@ fn run() -> Result<()> {
             let records = open_db(&project)?.list_dir(&abs(&dir)?)?;
             print_records(&records, json)?;
         }
-        Cmd::Search { words, tag, fav, under, limit } => {
+        Cmd::Search { words, tag, fav, extension, channels, under, limit } => {
             let config = load(&project)?;
-            let q = Query { text: words.join(" "), tag, favorites_only: fav, under: under.map(|u| abs(&u)).transpose()?, scope: config.project().scope.clone(), limit };
+            let q = Query {
+                text: words.join(" "),
+                dir: None,
+                under: under.map(|u| abs(&u)).transpose()?,
+                scope: config.project().scope.clone(),
+                favorites_only: fav,
+                tags: tag,
+                extensions: extension,
+                channels,
+                limit,
+            };
             let records = open_db(&project)?.search(&q)?;
             print_records(&records, json)?;
         }
