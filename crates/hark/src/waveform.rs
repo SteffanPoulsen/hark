@@ -24,7 +24,7 @@ enum Drag {
     FadeOut,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WaveState {
     /// Visible span in seconds.
     pub view: (f64, f64),
@@ -32,6 +32,8 @@ pub struct WaveState {
     pub fade_in: f64,
     pub fade_out: f64,
     pub fade_shape: FadeShape,
+    /// Linear gain the drawing is scaled by, so the picture follows the audition gain.
+    pub gain: f32,
     drag: Option<Drag>,
     /// The edge moved last. When both edges sit on one spot, it is the one a grab takes, so
     /// dragging back reopens the selection the way it was just closed.
@@ -50,6 +52,12 @@ pub struct WaveColors {
     pub fade: Color32,
     pub playhead: Color32,
     pub axis: Color32,
+}
+
+impl Default for WaveState {
+    fn default() -> Self {
+        WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), gain: 1.0, drag: None, last_edge: None }
+    }
 }
 
 impl WaveState {
@@ -140,7 +148,16 @@ fn band(xs: &[f32], top: &[f32], bottom: &[f32], color: Color32) -> Shape {
     Shape::mesh(mesh)
 }
 
-fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, rect: Rect, v0: f64, v1: f64, colors: &WaveColors) {
+/// Dashed lines between the channel lanes, so each channel's bounds are plain.
+fn draw_lane_dividers(painter: &egui::Painter, rect: Rect, channels: usize, colors: &WaveColors) {
+    let lane_h = rect.height() / channels as f32;
+    for ch in 1..channels {
+        let y = rect.top() + lane_h * ch as f32;
+        painter.add(Shape::dashed_line(&[Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], Stroke::new(1.0, colors.axis.gamma_multiply(1.6)), 6.0, 4.0));
+    }
+}
+
+fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, rect: Rect, v0: f64, v1: f64, gain: f32, colors: &WaveColors) {
     let channels = peaks.channels.max(1) as usize;
     let lane_h = rect.height() / channels as f32;
     let cols = rect.width().max(1.0) as usize;
@@ -150,20 +167,21 @@ fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, rect: Rect, v0: f64, v1
         painter.hline(rect.x_range(), mid, Stroke::new(1.0, colors.axis));
         let bins = peaks.columns(ch, v0, v1, cols);
         let xs: Vec<f32> = (0..cols).map(|i| rect.left() + i as f32 + 0.5).collect();
-        let top: Vec<f32> = bins.iter().map(|b| mid - b.max.clamp(-1.0, 1.0) * amp).collect();
-        let bottom: Vec<f32> = bins.iter().map(|b| mid - b.min.clamp(-1.0, 1.0) * amp).collect();
+        let top: Vec<f32> = bins.iter().map(|b| mid - (b.max * gain).clamp(-1.0, 1.0) * amp).collect();
+        let bottom: Vec<f32> = bins.iter().map(|b| mid - (b.min * gain).clamp(-1.0, 1.0) * amp).collect();
         painter.add(band(&xs, &top, &bottom, colors.peak));
-        let rms_top: Vec<f32> = bins.iter().map(|b| mid - b.rms.clamp(0.0, 1.0) * amp).collect();
-        let rms_bottom: Vec<f32> = bins.iter().map(|b| mid + b.rms.clamp(0.0, 1.0) * amp).collect();
+        let rms_top: Vec<f32> = bins.iter().map(|b| mid - (b.rms * gain).clamp(0.0, 1.0) * amp).collect();
+        let rms_bottom: Vec<f32> = bins.iter().map(|b| mid + (b.rms * gain).clamp(0.0, 1.0) * amp).collect();
         painter.add(band(&xs, &rms_top, &rms_bottom, colors.rms));
         let outline: Vec<Pos2> = xs.iter().zip(&top).map(|(&x, &y)| Pos2::new(x, y)).collect();
         painter.add(Shape::line(outline, Stroke::new(1.0, colors.peak.gamma_multiply(1.3))));
         let outline: Vec<Pos2> = xs.iter().zip(&bottom).map(|(&x, &y)| Pos2::new(x, y)).collect();
         painter.add(Shape::line(outline, Stroke::new(1.0, colors.peak.gamma_multiply(1.3))));
     }
+    draw_lane_dividers(painter, rect, channels, colors);
 }
 
-fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64, colors: &WaveColors) {
+fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64, gain: f32, colors: &WaveColors) {
     let channels = pcm.channels.max(1) as usize;
     let lane_h = rect.height() / channels as f32;
     let rate = pcm.sample_rate as f64;
@@ -177,7 +195,7 @@ fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64
         let mid = rect.top() + lane_h * (ch as f32 + 0.5);
         let amp = lane_h * 0.46;
         painter.hline(rect.x_range(), mid, Stroke::new(1.0, colors.axis));
-        let pts: Vec<Pos2> = (f0..f1).map(|f| Pos2::new(x_of(f), mid - pcm.samples[f * channels + ch].clamp(-1.0, 1.0) * amp)).collect();
+        let pts: Vec<Pos2> = (f0..f1).map(|f| Pos2::new(x_of(f), mid - (pcm.samples[f * channels + ch] * gain).clamp(-1.0, 1.0) * amp)).collect();
         if pts.len() >= 2 {
             let xs: Vec<f32> = pts.iter().map(|p| p.x).collect();
             let top: Vec<f32> = pts.iter().map(|p| p.y.min(mid)).collect();
@@ -191,6 +209,7 @@ fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64
             }
         }
     }
+    draw_lane_dividers(painter, rect, channels, colors);
 }
 
 pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: Option<&Pcm>, duration: f64, playhead: Option<f64>, height: f32, colors: &WaveColors) -> WaveEvent {
@@ -243,8 +262,8 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
     // The wave itself.
     let frames_per_px = span * peaks.sample_rate as f64 / rect.width().max(1.0) as f64;
     match samples {
-        Some(pcm) if frames_per_px * (pcm.sample_rate as f64 / peaks.sample_rate as f64) <= SAMPLE_VIEW_FRAMES_PER_PX => draw_samples(&painter, pcm, rect, v0, v1, colors),
-        _ => draw_envelope(&painter, peaks, rect, v0, v1, colors),
+        Some(pcm) if frames_per_px * (pcm.sample_rate as f64 / peaks.sample_rate as f64) <= SAMPLE_VIEW_FRAMES_PER_PX => draw_samples(&painter, pcm, rect, v0, v1, state.gain, colors),
+        _ => draw_envelope(&painter, peaks, rect, v0, v1, state.gain, colors),
     }
 
     // Selection, fades, handles.

@@ -1201,7 +1201,32 @@ impl App {
             playhead: self.theme.err,
             axis: self.theme.line,
         };
-        let event = waveform::show(ui, &mut self.wave, peaks.as_deref(), samples.as_deref(), duration, playhead, wave_h, &colors);
+        // The gain fader stands beside the waveform and scales it, so what you hear is what
+        // you see.
+        const FADER_W: f32 = 36.0;
+        self.wave.gain = hark_core::pcm::db_to_gain(self.gain_db as f64) as f32;
+        let mut event = WaveEvent::None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let wave_w = ui.available_width() - FADER_W - 8.0;
+            ui.allocate_ui_with_layout(egui::vec2(wave_w, wave_h), egui::Layout::top_down(egui::Align::Min), |ui| {
+                event = waveform::show(ui, &mut self.wave, peaks.as_deref(), samples.as_deref(), duration, playhead, wave_h, &colors);
+            });
+            ui.allocate_ui_with_layout(egui::vec2(FADER_W, wave_h), egui::Layout::top_down(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.spacing_mut().slider_width = wave_h - 24.0;
+                let fader = ui.add(egui::Slider::new(&mut self.gain_db, -36.0..=12.0).vertical().show_value(false).trailing_fill(false)).on_hover_text("Audition gain; double-click resets");
+                if fader.double_clicked() {
+                    self.gain_db = 0.0;
+                }
+                if fader.changed() || fader.double_clicked() {
+                    if let Some(p) = &self.player {
+                        p.set_gain(hark_core::pcm::db_to_gain(self.gain_db as f64));
+                    }
+                }
+                ui.label(RichText::new(format!("{:+.0}", self.gain_db)).size(11.0).color(self.theme.muted)).on_hover_text("dB");
+            });
+        });
         if let WaveEvent::Seek(t) = event {
             self.play(Some(t));
         }
@@ -1278,15 +1303,6 @@ impl App {
             }
             let t = playhead.unwrap_or(0.0);
             ui.add_sized(egui::vec2(52.0, CONTROL_H), egui::Label::new(RichText::new(waveform::fmt_time(t)).monospace().color(if playing { self.theme.text } else { self.theme.muted })));
-            ui.scope(|ui| {
-                ui.spacing_mut().slider_width = 90.0;
-                ui.add(egui::Slider::new(&mut self.gain_db, -36.0..=12.0).suffix(" dB").show_value(true).trailing_fill(false)).on_hover_text("Audition gain");
-            });
-            if ui.input(|i| i.pointer.any_released()) {
-                if let Some(p) = &self.player {
-                    p.set_gain(hark_core::pcm::db_to_gain(self.gain_db as f64));
-                }
-            }
             group(ui);
             ui.label(RichText::new("Sel").color(self.theme.muted));
             let mut sel = self.wave.selection.unwrap_or((0.0, 0.0));
