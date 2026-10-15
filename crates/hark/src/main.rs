@@ -745,13 +745,24 @@ impl App {
     fn ui_top(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP;
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = 7.0;
-                let [w, h] = self.mark.size();
-                let mark_h = 18.0;
-                ui.add(egui::Image::new(&self.mark).fit_to_exact_size(egui::vec2(mark_h * w as f32 / h as f32, mark_h)).tint(self.theme.accent2));
-                ui.label(theme::semibold("hark").size(18.0).color(self.theme.accent));
-            });
+            // The brand is one word: the mark stands on the text baseline and reaches the
+            // ascender line, and that block, not the font box, is centred on the controls.
+            // Inter's box is 0.97 em above the baseline and 0.24 em below; its ascenders reach
+            // 0.73 em.
+            let control_h = 28.0;
+            let font = FontId::new(18.0, egui::FontFamily::Name(theme::SEMIBOLD.into()));
+            let word = ui.fonts_mut(|f| f.layout_no_wrap("hark".into(), font.clone(), self.theme.accent));
+            let ascender = font.size * 0.73;
+            let [w, h] = self.mark.size();
+            let mark_w = ascender * w as f32 / h as f32;
+            let gap = 5.0;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(mark_w + gap + word.size().x, control_h), Sense::hover());
+            let baseline = rect.center().y + ascender / 2.0;
+            // The glyphs sit a touch above egui's baseline estimate; the mark follows them.
+            let mark_rect = egui::Rect::from_min_size(egui::pos2(rect.left(), baseline - ascender - font.size * 0.08), egui::vec2(mark_w, ascender));
+            egui::Image::new(&self.mark).tint(self.theme.accent2).paint_at(ui, mark_rect);
+            let box_top = baseline - word.size().y * (0.97 / (0.97 + 0.24));
+            ui.painter().galley(egui::pos2(mark_rect.right() + gap, box_top), word, self.theme.accent);
             if let Some(action) = self.project_menu(ui, "project", 0.0) {
                 self.apply_project_action(action);
             }
