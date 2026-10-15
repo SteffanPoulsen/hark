@@ -17,7 +17,27 @@ pub enum FadeShape {
     Logarithmic,
 }
 
+impl std::str::FromStr for FadeShape {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "linear" | "lin" => Ok(FadeShape::Linear),
+            "equal_power" | "eq" => Ok(FadeShape::EqualPower),
+            "logarithmic" | "log" => Ok(FadeShape::Logarithmic),
+            _ => Err(format!("unknown fade shape {s}: linear, equal_power or logarithmic")),
+        }
+    }
+}
+
 impl FadeShape {
+    pub fn name(self) -> &'static str {
+        match self {
+            FadeShape::Linear => "linear",
+            FadeShape::EqualPower => "equal power",
+            FadeShape::Logarithmic => "logarithmic",
+        }
+    }
+
     /// Gain at normalised position `t` in `0..=1` of a fade-in; a fade-out uses `1 - t`.
     pub fn gain(self, t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
@@ -45,6 +65,30 @@ pub enum DownmixMode {
     SumMinus3,
     Left,
     Right,
+}
+
+impl std::str::FromStr for DownmixMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "average" | "avg" => Ok(DownmixMode::Average),
+            "sum" | "sum_minus3" => Ok(DownmixMode::SumMinus3),
+            "left" => Ok(DownmixMode::Left),
+            "right" => Ok(DownmixMode::Right),
+            _ => Err(format!("unknown downmix {s}: average, sum, left or right")),
+        }
+    }
+}
+
+impl DownmixMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            DownmixMode::Average => "mono, average",
+            DownmixMode::SumMinus3 => "mono, sum −3 dB",
+            DownmixMode::Left => "left channel",
+            DownmixMode::Right => "right channel",
+        }
+    }
 }
 
 impl Pcm {

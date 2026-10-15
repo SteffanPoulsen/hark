@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::pcm::{DownmixMode, FadeShape};
@@ -18,9 +18,6 @@ pub struct TagDef {
     /// `#rrggbb`; a tag without one takes a color from its position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
-    /// Export preset this tag selects by default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preset: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -29,6 +26,17 @@ pub enum OutputFormat {
     #[default]
     Wav,
     Flac,
+}
+
+impl std::str::FromStr for OutputFormat {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "wav" => Ok(OutputFormat::Wav),
+            "flac" => Ok(OutputFormat::Flac),
+            _ => Err(format!("unknown format {s}: wav or flac")),
+        }
+    }
 }
 
 impl OutputFormat {
@@ -201,13 +209,13 @@ impl Default for Config {
                 ..ExportPreset::default()
             },
         );
-        let tag = |name: &str, preset: &str| TagDef { name: name.into(), color: None, preset: Some(preset.into()) };
+        let tag = |name: &str| TagDef { name: name.into(), color: None };
         Config {
             roots: Vec::new(),
             output_root: None,
             projects: vec![Project { name: DEFAULT_PROJECT.into(), output_root: None, scope: Vec::new() }],
             active_project: DEFAULT_PROJECT.into(),
-            tags: vec![tag("sfx", "sfx"), tag("ambient", "ambient"), tag("music", "music"), tag("voice", "voice"), tag("ui", "sfx"), tag("foley", "sfx")],
+            tags: ["sfx", "ambient", "music", "voice", "ui", "foley"].map(tag).to_vec(),
             presets,
             default_preset: default_preset_name(),
             audition_sample_rate: None,
@@ -298,15 +306,51 @@ impl Config {
         self.presets.get(name)
     }
 
-    /// Preset the file's tags select: the first tag with a preset, else the default preset.
-    pub fn preset_for_tags<'a>(&'a self, tags: &[String]) -> (String, &'a ExportPreset) {
-        for t in tags {
-            if let Some(name) = self.tags.iter().find(|d| &d.name == t).and_then(|d| d.preset.as_ref()) {
-                if let Some(p) = self.presets.get(name) {
-                    return (name.clone(), p);
-                }
-            }
+    /// A preset name not yet taken, from `base` or `base2`, `base3`, …
+    pub fn free_preset_name(&self, base: &str) -> String {
+        let mut name = base.to_string();
+        let mut n = 2;
+        while self.presets.contains_key(&name) {
+            name = format!("{base}{n}");
+            n += 1;
         }
+        name
+    }
+
+    /// Renames a preset; the default follows it.
+    pub fn rename_preset(&mut self, old: &str, new: &str) -> Result<()> {
+        if old == new {
+            return Ok(());
+        }
+        if new.is_empty() || self.presets.contains_key(new) {
+            return Err(anyhow!("preset name {new:?} is taken or empty"));
+        }
+        let preset = self.presets.remove(old).ok_or_else(|| anyhow!("no preset {old}"))?;
+        self.presets.insert(new.to_string(), preset);
+        if self.default_preset == old {
+            self.default_preset = new.to_string();
+        }
+        Ok(())
+    }
+
+    /// Removes a preset; the default falls back to the first remaining one. The last preset
+    /// stays.
+    pub fn remove_preset(&mut self, name: &str) -> Result<()> {
+        if !self.presets.contains_key(name) {
+            return Err(anyhow!("no preset {name}"));
+        }
+        if self.presets.len() == 1 {
+            return Err(anyhow!("cannot remove the only preset"));
+        }
+        self.presets.remove(name);
+        if self.default_preset == name {
+            self.default_preset = self.presets.keys().next().cloned().unwrap_or_default();
+        }
+        Ok(())
+    }
+
+    /// The default preset, or the first one when the default names none.
+    pub fn default_preset(&self) -> (String, &ExportPreset) {
         match self.presets.get(&self.default_preset) {
             Some(p) => (self.default_preset.clone(), p),
             None => self.presets.iter().next().map(|(n, p)| (n.clone(), p)).expect("at least one preset"),

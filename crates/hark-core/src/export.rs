@@ -47,7 +47,7 @@ impl ExportRequest {
         let (preset_name, preset) = match preset_name {
             Some(n) => (n.to_string(), config.preset(n).ok_or_else(|| anyhow!("unknown preset {n}"))?.clone()),
             None => {
-                let (n, p) = config.preset_for_tags(&tags);
+                let (n, p) = config.default_preset();
                 (n, p.clone())
             }
         };

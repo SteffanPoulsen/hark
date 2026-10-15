@@ -169,16 +169,12 @@ enum TagsCmd {
         name: String,
         #[arg(long)]
         color: Option<String>,
-        #[arg(long)]
-        preset: Option<String>,
     },
-    /// Change a tag's color or preset; an empty value clears it.
+    /// Change a tag's color; an empty value clears it.
     Set {
         name: String,
         #[arg(long)]
         color: Option<String>,
-        #[arg(long)]
-        preset: Option<String>,
     },
     /// Rename a tag and rewrite the marks that carry it.
     Rename { old: String, new: String },
@@ -192,6 +188,127 @@ enum TagsCmd {
 enum PresetsCmd {
     List,
     Show { name: String },
+    /// A new preset with the default values, or a copy of another.
+    Add {
+        name: String,
+        #[arg(long)]
+        from: Option<String>,
+    },
+    /// Change a preset's values; only the given ones change.
+    Set {
+        name: String,
+        #[command(flatten)]
+        values: PresetValues,
+    },
+    /// Rename a preset; tags and the default follow it.
+    Rename { old: String, new: String },
+    /// Remove a preset; tags that selected it select none.
+    Remove { name: String },
+}
+
+#[derive(Args)]
+struct PresetValues {
+    /// wav or flac.
+    #[arg(long)]
+    format: Option<hark_core::config::OutputFormat>,
+    /// 16, 24 or 32 (WAV only).
+    #[arg(long)]
+    bits: Option<u16>,
+    /// Output sample rate in Hz, or "source".
+    #[arg(long)]
+    rate: Option<String>,
+    /// "source", or a downmix: average, sum, left, right.
+    #[arg(long)]
+    channels: Option<String>,
+    /// none, peak or lufs.
+    #[arg(long)]
+    normalize: Option<String>,
+    /// Peak target in dBFS or LUFS target (negative: --target=-16).
+    #[arg(long, allow_hyphen_values = true)]
+    target: Option<f64>,
+    /// True-peak ceiling in dBTP for LUFS normalisation.
+    #[arg(long, allow_hyphen_values = true)]
+    ceiling: Option<f64>,
+    /// Trim threshold in dBFS (--trim=-60), or "off".
+    #[arg(long, allow_hyphen_values = true)]
+    trim: Option<String>,
+    /// Pad kept around the trimmed sound, in ms.
+    #[arg(long)]
+    pad: Option<f64>,
+    #[arg(long)]
+    dither: Option<bool>,
+    /// linear, equal_power or logarithmic.
+    #[arg(long)]
+    fade: Option<hark_core::pcm::FadeShape>,
+    /// Output path template under the output folder.
+    #[arg(long)]
+    template: Option<String>,
+}
+
+impl PresetValues {
+    fn apply(&self, p: &mut hark_core::ExportPreset) -> Result<()> {
+        use hark_core::config::Normalize;
+        if let Some(f) = self.format {
+            p.format = f;
+        }
+        if let Some(b) = self.bits {
+            if !matches!(b, 16 | 24 | 32) {
+                return Err(anyhow!("bits must be 16, 24 or 32"));
+            }
+            p.bits = b;
+        }
+        if let Some(r) = &self.rate {
+            p.sample_rate = if r == "source" { None } else { Some(r.parse().map_err(|_| anyhow!("rate must be a number in Hz or source"))?) };
+        }
+        if let Some(c) = &self.channels {
+            p.mono = if c == "source" { None } else { Some(c.parse().map_err(|e| anyhow!("{e}"))?) };
+        }
+        if let Some(n) = &self.normalize {
+            p.normalize = match n.as_str() {
+                "none" => Normalize::None,
+                "peak" => Normalize::Peak { target_dbfs: -1.0 },
+                "lufs" => Normalize::Lufs { target_lufs: -16.0, true_peak_ceiling_dbfs: -1.0 },
+                _ => return Err(anyhow!("normalize must be none, peak or lufs")),
+            };
+        }
+        match (&mut p.normalize, self.target, self.ceiling) {
+            (Normalize::Peak { target_dbfs }, Some(t), _) => *target_dbfs = t,
+            (Normalize::Lufs { target_lufs, true_peak_ceiling_dbfs }, t, c) => {
+                if let Some(t) = t {
+                    *target_lufs = t;
+                }
+                if let Some(c) = c {
+                    *true_peak_ceiling_dbfs = c;
+                }
+            }
+            (_, Some(_), _) | (_, _, Some(_)) => return Err(anyhow!("target and ceiling need peak or lufs normalisation")),
+            _ => {}
+        }
+        if let Some(t) = &self.trim {
+            p.trim_silence = if t == "off" {
+                None
+            } else {
+                let threshold_dbfs = t.parse().map_err(|_| anyhow!("trim must be a threshold in dBFS or off"))?;
+                Some(hark_core::config::TrimSilence { threshold_dbfs, pad_ms: p.trim_silence.map(|x| x.pad_ms).unwrap_or(10.0) })
+            };
+        }
+        if let Some(pad) = self.pad {
+            match &mut p.trim_silence {
+                Some(t) => t.pad_ms = pad,
+                None => return Err(anyhow!("pad needs trim")),
+            }
+        }
+        if let Some(d) = self.dither {
+            p.dither = d;
+        }
+        if let Some(f) = self.fade {
+            p.fade_shape = f;
+        }
+        if let Some(t) = &self.template {
+            p.path_template = t.clone();
+        }
+        Ok(())
+    }
 }
 
 #[derive(Args)]
@@ -540,20 +657,17 @@ fn run() -> Result<()> {
             let find = |config: &Config, name: &str| config.tags.iter().position(|t| t.name == name).ok_or_else(|| anyhow!("no tag {name}"));
             match cmd.unwrap_or(TagsCmd::List) {
                 TagsCmd::List => {}
-                TagsCmd::Add { name, color, preset } => {
+                TagsCmd::Add { name, color } => {
                     if config.tags.iter().any(|t| t.name == name) {
                         return Err(anyhow!("tag {name} exists"));
                     }
-                    config.tags.push(hark_core::TagDef { name, color, preset });
+                    config.tags.push(hark_core::TagDef { name, color });
                     config.save()?;
                 }
-                TagsCmd::Set { name, color, preset } => {
+                TagsCmd::Set { name, color } => {
                     let i = find(&config, &name)?;
                     if let Some(c) = color {
                         config.tags[i].color = if c.is_empty() { None } else { Some(c) };
-                    }
-                    if let Some(p) = preset {
-                        config.tags[i].preset = if p.is_empty() { None } else { Some(p) };
                     }
                     config.save()?;
                 }
@@ -592,7 +706,7 @@ fn run() -> Result<()> {
             } else {
                 for (k, t) in config.tags.iter().enumerate() {
                     let n = used.iter().find(|(u, _)| u == &t.name).map(|(_, n)| *n).unwrap_or(0);
-                    println!("{:>2} {:<12} {:>5} files  {:<8} preset {}", k + 1, t.name, n, t.color.as_deref().unwrap_or("-"), t.preset.as_deref().unwrap_or("-"));
+                    println!("{:>2} {:<12} {:>5} files  {}", k + 1, t.name, n, t.color.as_deref().unwrap_or("-"));
                 }
                 for (u, n) in used.iter().filter(|(u, _)| !config.tags.iter().any(|t| &t.name == u)) {
                     println!("{u:<12} {n:>5} files  (undefined)");
@@ -600,7 +714,7 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Presets { cmd } => {
-            let config = load(&project)?;
+            let mut config = load(&project)?;
             match cmd.unwrap_or(PresetsCmd::List) {
                 PresetsCmd::List => {
                     if json {
@@ -622,6 +736,33 @@ fn run() -> Result<()> {
                     }
                 }
                 PresetsCmd::Show { name } => print_json(config.preset(&name).ok_or_else(|| anyhow!("no preset {name}"))?)?,
+                PresetsCmd::Add { name, from } => {
+                    if config.presets.contains_key(&name) {
+                        return Err(anyhow!("preset {name} exists"));
+                    }
+                    let values = match from {
+                        Some(f) => config.preset(&f).ok_or_else(|| anyhow!("no preset {f}"))?.clone(),
+                        None => hark_core::ExportPreset::default(),
+                    };
+                    config.presets.insert(name.clone(), values);
+                    config.save()?;
+                    print_json(&config.preset(&name))?;
+                }
+                PresetsCmd::Set { name, values } => {
+                    let mut p = config.preset(&name).ok_or_else(|| anyhow!("no preset {name}"))?.clone();
+                    values.apply(&mut p)?;
+                    config.presets.insert(name.clone(), p);
+                    config.save()?;
+                    print_json(&config.preset(&name))?;
+                }
+                PresetsCmd::Rename { old, new } => {
+                    config.rename_preset(&old, &new)?;
+                    config.save()?;
+                }
+                PresetsCmd::Remove { name } => {
+                    config.remove_preset(&name)?;
+                    config.save()?;
+                }
             }
         }
         Cmd::Export(a) => {

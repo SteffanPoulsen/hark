@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod preset_ui;
 mod settings;
 mod theme;
 mod waveform;
@@ -16,7 +17,7 @@ use egui_phosphor::regular as icons;
 use hark_core::audition::{Clip, Player};
 use hark_core::export::{ExportRequest, Selection};
 use hark_core::library::{ChannelClass, Query};
-use hark_core::{Config, Db, FileRecord};
+use hark_core::{Config, Db, ExportPreset, FileRecord};
 
 use theme::Theme;
 use waveform::{WaveEvent, WaveState};
@@ -50,7 +51,7 @@ fn main() -> eframe::Result {
                 settings = Some(match args.next().as_deref() {
                     Some("projects") => settings::Page::Projects,
                     Some("tags") => settings::Page::Tags,
-                    Some("export") => settings::Page::Export,
+                    Some("presets") | Some("export") => settings::Page::Presets,
                     Some("general") | None => settings::Page::General,
                     Some(other) => {
                         open = Some(PathBuf::from(other));
@@ -59,7 +60,7 @@ fn main() -> eframe::Result {
                 })
             }
             "-h" | "--help" => {
-                println!("hark [--open <audio file or folder>] [--settings [general|projects|tags|export]]");
+                println!("hark [--open <audio file or folder>] [--settings [general|projects|tags|presets]]");
                 return Ok(());
             }
             other => open = Some(PathBuf::from(other)),
@@ -89,7 +90,6 @@ fn main() -> eframe::Result {
 
 enum TagAction {
     Color(usize, String),
-    Preset(usize, Option<String>),
     Rename(usize, String),
     Move(usize, usize),
     Remove(usize),
@@ -165,11 +165,15 @@ struct App {
     loop_on: bool,
     transport_h: f32,
     gain_db: f32,
-    preset: String,
+    /// The preset the card's values came from; `None` once they were edited.
+    preset_name: Option<String>,
+    /// The values the next export uses.
+    preset: ExportPreset,
     overwrite: bool,
     status: String,
     status_is_error: bool,
-    last_export: Option<Result<String, String>>,
+    /// The last export: the written file and its applied gain, or the error.
+    last_export: Option<Result<(PathBuf, String), String>>,
     scanning: bool,
     settings_open: bool,
     settings_page: settings::Page,
@@ -178,8 +182,9 @@ struct App {
     project_edit: Option<String>,
     /// Output file name for the next export; empty takes the preset's template.
     export_name: String,
-    /// Exports of this session, newest first: the written file and its applied gain.
-    recent_exports: VecDeque<(PathBuf, String)>,
+    /// The preset the settings page edits.
+    preset_edit: String,
+    preset_rename: Option<String>,
     file_count: usize,
 }
 
@@ -202,7 +207,8 @@ impl App {
         if !config.roots.is_empty() {
             worker.send(Job::Scan(config.roots.clone()));
         }
-        let preset = config.default_preset.clone();
+        let preset_name = config.default_preset.clone();
+        let preset = config.preset(&preset_name).cloned().unwrap_or_default();
         let scanning = !config.roots.is_empty();
         let expanded = config.scope_folders().into_iter().map(|(_, p)| p).collect();
         App {
@@ -231,6 +237,7 @@ impl App {
             loop_on: false,
             transport_h: 34.0,
             gain_db: 0.0,
+            preset_name: Some(preset_name.clone()),
             preset,
             overwrite: false,
             status: String::new(),
@@ -244,7 +251,8 @@ impl App {
             tag_edit: None,
             project_edit: None,
             export_name: String::new(),
-            recent_exports: VecDeque::new(),
+            preset_edit: preset_name,
+            preset_rename: None,
         }
     }
 
@@ -474,10 +482,12 @@ impl App {
     fn export_request(&self) -> Option<Result<ExportRequest, String>> {
         let i = self.selected?;
         let f = &self.files[i];
-        let mut req = match ExportRequest::from_config(&self.config, &f.path, Some(&self.preset), f.tags.clone(), f.favorite) {
+        let mut req = match ExportRequest::from_config(&self.config, &f.path, None, f.tags.clone(), f.favorite) {
             Ok(r) => r,
             Err(e) => return Some(Err(format!("{e:#}"))),
         };
+        req.preset = self.preset.clone();
+        req.preset_name = self.preset_name.clone();
         req.selection = self.wave.selection.map(|(a, b)| Selection { start_secs: a, end_secs: b });
         req.fade_in_secs = self.wave.fade_in;
         req.fade_out_secs = self.wave.fade_out;
@@ -550,16 +560,13 @@ impl App {
                 }
                 Done::Exported(result) => match result {
                     Ok(r) => {
-                        let mut msg = format!("{}  ·  {:+.2} dB", r.output.display(), r.origin.measured.applied_gain_db);
+                        let mut gain = format!("{:+.2} dB", r.origin.measured.applied_gain_db);
                         for w in &r.warnings {
-                            msg.push_str("\n");
-                            msg.push_str(w);
+                            gain.push_str("  ·  ");
+                            gain.push_str(w);
                         }
                         self.set_status(format!("exported {}", r.output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), false);
-                        self.recent_exports.retain(|(p, _)| *p != r.output);
-                        self.recent_exports.push_front((r.output.clone(), format!("{:+.2} dB", r.origin.measured.applied_gain_db)));
-                        self.recent_exports.truncate(20);
-                        self.last_export = Some(Ok(msg));
+                        self.last_export = Some(Ok((r.output, gain)));
                     }
                     Err(e) => {
                         self.set_status("export failed", true);
@@ -1282,60 +1289,75 @@ impl App {
         });
     }
 
-    /// Inside the export card: the preset, a labelled column of what will be written, the
-    /// button, and the session's exports, each a click away from its folder.
+    /// Inside the export card: the preset and its values, where the file goes, the button.
     fn ui_export_card(&mut self, ui: &mut egui::Ui) {
+        use preset_ui::CONTROL_H;
         let theme = self.theme.clone();
-        ui.spacing_mut().item_spacing.y = 6.0;
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        ui.spacing_mut().interact_size = egui::vec2(CONTROL_H, CONTROL_H);
+        ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
         let small = |text: String, color: Color32| egui::Label::new(RichText::new(text).color(color).size(12.5)).truncate();
+        let key_w = 52.0;
+        let value_w = ui.available_width() - key_w - 6.0;
         let key = |ui: &mut egui::Ui, text: &str| {
-            ui.add_sized(egui::vec2(52.0, 20.0), egui::Label::new(RichText::new(text).color(theme.muted).size(12.5)));
+            ui.add_sized(egui::vec2(key_w, CONTROL_H), egui::Label::new(RichText::new(text).color(theme.muted).size(12.5)));
         };
         let rule = |ui: &mut egui::Ui| {
-            ui.add_space(4.0);
+            ui.add_space(2.0);
             ui.separator();
-            ui.add_space(4.0);
+            ui.add_space(2.0);
         };
 
         ui.horizontal(|ui| {
             ui.label(theme::semibold("Export").size(15.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                egui::ComboBox::from_id_salt("preset").width(150.0).selected_text(&self.preset).show_ui(ui, |ui| {
-                    for name in self.config.presets.keys().cloned().collect::<Vec<_>>() {
-                        ui.selectable_value(&mut self.preset, name.clone(), name);
-                    }
-                });
-            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.preset_picker(ui));
         });
-        if let Some(p) = self.config.preset(&self.preset).cloned() {
-            for l in preset_summary(&p) {
-                ui.add(small(l, theme.muted));
-            }
+        rule(ui);
+
+        let mut edited = false;
+        let p = &mut self.preset;
+        egui::Grid::new("export-preset").num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
+            key(ui, "format");
+            ui.horizontal(|ui| {
+                edited |= preset_ui::format(ui, "card", p);
+                edited |= preset_ui::bits(ui, "card", p);
+                edited |= preset_ui::dither(ui, p);
+            });
+            ui.end_row();
+            key(ui, "rate");
+            edited |= preset_ui::sample_rate(ui, "card", p);
+            ui.end_row();
+            key(ui, "channels");
+            edited |= preset_ui::channels(ui, "card", p);
+            ui.end_row();
+            key(ui, "level");
+            ui.horizontal(|ui| edited |= preset_ui::normalize(ui, "card", p));
+            ui.end_row();
+            key(ui, "trim");
+            ui.horizontal(|ui| edited |= preset_ui::trim_silence(ui, p));
+            ui.end_row();
+        });
+        if edited {
+            self.preset_name = None;
         }
         rule(ui);
 
         let req = self.export_request();
         let file = self.selected.map(|i| self.files[i].clone());
-        let (target, span, outcome) = match (&req, &file) {
+        let (target, outcome) = match (&req, &file) {
             (Some(Ok(r)), Some(f)) => {
                 let rel = r.output_path();
                 let rel = rel.strip_prefix(&r.output_root).map(|p| p.to_path_buf()).unwrap_or(rel);
-                let span = match r.selection {
-                    Some(s) => format!("{} – {}", waveform::fmt_time(s.start_secs), waveform::fmt_time(s.end_secs)),
-                    None => "whole file".into(),
-                };
-                (rel.display().to_string(), span, self.export_outcome(r, f))
+                (rel.display().to_string(), self.export_outcome(r, f))
             }
-            _ => ("…".into(), "whole file".into(), "…".into()),
+            _ => ("…".into(), "…".into()),
         };
         let stem = file.as_ref().and_then(|f| f.path.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "file name".into());
         let out = self.config.output_root().map(|p| p.display().to_string());
         let have = file.is_some();
-        // Grid cells report an unbounded width, so the value column is sized here, outside.
-        let value_w = ui.available_width() - 52.0 - 8.0;
-        egui::Grid::new("export-grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+        egui::Grid::new("export-target").num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
             key(ui, "folder");
-            let folder = egui::Button::new(theme::icon_text(icons::FOLDER, out.as_deref().unwrap_or("choose…"), 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(value_w, 26.0)).truncate();
+            let folder = egui::Button::new(theme::icon_text(icons::FOLDER, out.as_deref().unwrap_or("choose…"), 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(value_w, CONTROL_H)).truncate();
             let folder = ui.add(folder);
             let folder = match &out {
                 Some(o) => folder.on_hover_text(o),
@@ -1349,20 +1371,13 @@ impl App {
             }
             ui.end_row();
             key(ui, "name");
-            ui.add_enabled(have, egui::TextEdit::singleline(&mut self.export_name).hint_text(stem).desired_width(value_w));
+            ui.horizontal(|ui| {
+                ui.add_enabled(have, egui::TextEdit::singleline(&mut self.export_name).hint_text(stem).desired_width(value_w - 96.0).vertical_align(egui::Align::Center).min_size(egui::vec2(0.0, CONTROL_H)));
+                ui.add_enabled(have, egui::Checkbox::new(&mut self.overwrite, RichText::new("overwrite").size(12.5)));
+            });
             ui.end_row();
             key(ui, "to");
-            ui.add_enabled(have, small(target, theme.text));
-            ui.end_row();
-            key(ui, "range");
-            ui.add_enabled_ui(have, |ui| {
-                ui.allocate_ui_with_layout(egui::vec2(value_w, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.add(small(span, theme.text));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.checkbox(&mut self.overwrite, RichText::new("overwrite").size(12.5));
-                    });
-                });
-            });
+            ui.add_enabled(have, small(target, theme.text)).on_hover_text("the preset's path template, under the output folder");
             ui.end_row();
             key(ui, "writes");
             ui.add_enabled(have, small(outcome, theme.text));
@@ -1371,11 +1386,11 @@ impl App {
         if let Some(Err(e)) = &req {
             ui.add(small(e.clone(), theme.warn));
         }
-        if let Some(Err(e)) = &self.last_export {
-            ui.add(small(e.clone(), theme.err));
-        }
-        rule(ui);
 
+        // The button sits at the bottom whatever height the panel has; the last export's
+        // result stays under it.
+        let footer_h = 40.0 + 6.0 + 20.0;
+        ui.add_space((ui.available_height() - footer_h).max(0.0));
         let can = matches!(req, Some(Ok(_)));
         let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 15.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), if can { Color32::WHITE } else { theme.muted }))
             .fill(if can { theme.accent } else { theme.overlay })
@@ -1386,32 +1401,66 @@ impl App {
                 self.export();
             }
         });
-        rule(ui);
-
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Exported this session").color(theme.muted).size(12.5));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let n = self.recent_exports.len();
-                ui.label(RichText::new(if n == 0 { "nothing yet".to_string() } else { n.to_string() }).color(theme.muted.gamma_multiply(0.7)).size(12.5));
-            });
-        });
-        let root = self.config.output_root().map(|p| p.to_path_buf());
         let mut show: Option<PathBuf> = None;
-        let left = ui.available_height();
-        egui::ScrollArea::vertical().max_height(left).auto_shrink([false, true]).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            for (p, gain) in &self.recent_exports {
-                let shown = root.as_ref().and_then(|r| p.strip_prefix(r).ok()).map(|x| x.display().to_string()).unwrap_or_else(|| p.display().to_string());
-                let row = egui::Button::new(theme::icon_text(icons::CHECK, &shown, 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).frame(false).truncate().min_size(egui::vec2(ui.available_width(), 24.0));
-                if ui.add(row).on_hover_text(format!("{}\n{gain}\nclick to show in folder", p.display())).clicked() {
-                    show = Some(p.clone());
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| match &self.last_export {
+            Some(Ok((path, gain))) => {
+                let root = self.config.output_root();
+                let shown = root.and_then(|r| path.strip_prefix(r).ok()).unwrap_or(path).display().to_string();
+                let row = egui::Button::new(theme::icon_text(icons::CHECK, &format!("{shown}  ·  {gain}"), 12.5, egui::FontFamily::Proportional, theme.muted)).frame(false).truncate();
+                if ui.add(row).on_hover_text(format!("{}\nclick to show in folder", path.display())).clicked() {
+                    show = Some(path.clone());
                 }
             }
+            Some(Err(e)) => {
+                ui.add(small(e.clone(), theme.err)).on_hover_text(e);
+            }
+            None => {}
         });
         if let Some(p) = show {
             if let Err(e) = reveal(&p) {
                 self.set_status(format!("show in folder: {e}"), true);
             }
+        }
+    }
+
+    /// The preset combo: the saved presets, "custom" once the values were edited, and a way to
+    /// keep the edited values as a new preset.
+    fn preset_picker(&mut self, ui: &mut egui::Ui) {
+        let label = self.preset_name.clone().unwrap_or_else(|| "custom".into());
+        let mut pick: Option<String> = None;
+        let mut save_as = false;
+        egui::ComboBox::from_id_salt("preset").width(150.0).selected_text(label).show_ui(ui, |ui| {
+            for name in self.config.presets.keys() {
+                if ui.selectable_label(self.preset_name.as_deref() == Some(name), name).clicked() {
+                    pick = Some(name.clone());
+                }
+            }
+            if self.preset_name.is_none() {
+                let _ = ui.selectable_label(true, "custom");
+                ui.separator();
+                if ui.selectable_label(false, theme::icon_text(icons::FLOPPY_DISK, "save as preset…", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
+                    save_as = true;
+                }
+            }
+        });
+        if let Some(name) = pick {
+            self.use_preset(&name);
+        }
+        if save_as {
+            let name = self.config.free_preset_name("custom");
+            self.config.presets.insert(name.clone(), self.preset.clone());
+            let _ = self.config.save();
+            self.preset_name = Some(name.clone());
+            self.preset_edit = name;
+            self.settings_page = settings::Page::Presets;
+            self.settings_open = true;
+        }
+    }
+
+    fn use_preset(&mut self, name: &str) {
+        if let Some(p) = self.config.preset(name) {
+            self.preset = p.clone();
+            self.preset_name = Some(name.to_string());
         }
     }
 
@@ -1443,7 +1492,6 @@ impl App {
     fn apply_tag_action(&mut self, action: TagAction) {
         match action {
             TagAction::Color(k, hex) => self.config.tags[k].color = Some(hex),
-            TagAction::Preset(k, p) => self.config.tags[k].preset = p,
             TagAction::Rename(k, new) => {
                 let old = self.config.tags[k].name.clone();
                 self.tag_edit = None;
@@ -1477,7 +1525,7 @@ impl App {
                     name = format!("new{n}");
                     n += 1;
                 }
-                self.config.tags.push(hark_core::TagDef { name: name.clone(), color: None, preset: None });
+                self.config.tags.push(hark_core::TagDef { name: name.clone(), color: None });
                 self.tag_edit = Some((self.config.tags.len() - 1, name));
             }
         }
@@ -1574,24 +1622,6 @@ fn reveal(path: &Path) -> std::io::Result<()> {
 }
 
 /// Two lines: what the file becomes, and what is done to the signal on the way.
-fn preset_summary(p: &hark_core::ExportPreset) -> [String; 2] {
-    use hark_core::config::Normalize;
-    let rate = p.sample_rate.map(|r| format!("{:.1} kHz", r as f64 / 1000.0)).unwrap_or_else(|| "source rate".into());
-    let channels = if p.mono.is_some() { "mono" } else { "source ch" };
-    let dither = if p.dither && p.bits < 32 { " dither" } else { "" };
-    let format = format!("{} {} bit{dither} · {rate} · {channels}", p.format.extension().to_uppercase(), p.bits);
-    let mut steps: Vec<String> = Vec::new();
-    if let Some(t) = p.trim_silence {
-        steps.push(format!("trim below {} dBFS", t.threshold_dbfs));
-    }
-    steps.push(match p.normalize {
-        Normalize::None => "no normalisation".into(),
-        Normalize::Peak { target_dbfs } => format!("peak to {target_dbfs} dBFS"),
-        Normalize::Lufs { target_lufs, true_peak_ceiling_dbfs } => format!("{target_lufs} LUFS, ceiling {true_peak_ceiling_dbfs} dBTP"),
-    });
-    [format, steps.join(" · ")]
-}
-
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -1614,7 +1644,7 @@ impl eframe::App for App {
         egui::Panel::bottom("status").frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(pad, 4))).show(ui, |ui| {
             self.ui_status(ui);
         });
-        egui::Panel::bottom("bottom").resizable(true).default_size(440.0).frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 8 })).show(ui, |ui| {
+        egui::Panel::bottom("bottom").resizable(true).default_size(500.0).frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 8 })).show(ui, |ui| {
             self.ui_bottom(ui);
         });
         egui::Panel::left("tree").resizable(true).default_size(250.0).frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin { left: 4, right: 4, top: 8, bottom: 8 })).show(ui, |ui| {
