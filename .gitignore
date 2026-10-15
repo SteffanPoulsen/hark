@@ -1,3 +1,4 @@
 /target
 *.resume.md
 /.plan/
+.claude/
