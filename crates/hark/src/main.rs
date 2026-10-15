@@ -176,6 +176,8 @@ struct App {
     autoplay: bool,
     loop_on: bool,
     transport_h: f32,
+    /// Height the export card's content took on the last frame; the bottom panel is sized to it.
+    export_card_h: f32,
     gain_db: f32,
     /// The preset the card's values came from; `None` once they were edited.
     preset_name: Option<String>,
@@ -248,6 +250,7 @@ impl App {
             autoplay: true,
             loop_on: false,
             transport_h: 34.0,
+            export_card_h: 380.0,
             gain_db: 0.0,
             preset_name: Some(preset_name.clone()),
             preset,
@@ -1388,10 +1391,7 @@ impl App {
             ui.add(small(e.clone(), theme.warn));
         }
 
-        // The button sits at the bottom whatever height the panel has; the last export's
-        // result stays under it.
-        let footer_h = 40.0 + 6.0 + 20.0;
-        ui.add_space((ui.available_height() - footer_h).max(0.0));
+        ui.add_space(10.0);
         let can = matches!(req, Some(Ok(_)));
         let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 15.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), if can { Color32::WHITE } else { theme.muted }))
             .fill(if can { theme.accent } else { theme.overlay })
@@ -1421,6 +1421,11 @@ impl App {
             if let Err(e) = reveal(&p) {
                 self.set_status(format!("show in folder: {e}"), true);
             }
+        }
+        let h = ui.min_rect().height();
+        if (h - self.export_card_h).abs() > 0.5 {
+            self.export_card_h = h;
+            ui.ctx().request_repaint();
         }
     }
 
@@ -1686,7 +1691,9 @@ impl eframe::App for App {
         egui::Panel::bottom("status").frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(pad, 4))).show(ui, |ui| {
             self.ui_status(ui);
         });
-        egui::Panel::bottom("bottom").resizable(true).default_size(440.0).frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 8 })).show(ui, |ui| {
+        // The export card decides the height of the whole bottom panel.
+        let bottom_h = self.export_card_h + 2.0 * theme::CARD_PAD as f32 + 16.0;
+        egui::Panel::bottom("bottom").resizable(false).exact_size(bottom_h).frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 8 })).show(ui, |ui| {
             self.ui_bottom(ui);
         });
         egui::Panel::left("tree").resizable(true).default_size(250.0).frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin { left: 4, right: 4, top: 8, bottom: 8 })).show(ui, |ui| {
