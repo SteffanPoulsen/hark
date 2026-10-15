@@ -61,9 +61,9 @@ impl Default for Theme {
             line: hex("#3a3a3a").unwrap(),
             muted: hex("#9a9a9a").unwrap(),
             text: hex("#dcddde").unwrap(),
-            accent: hex("#e3a447").unwrap(),
-            accent_soft: hex("#3d3119").unwrap(),
-            accent2: hex("#5aa9d6").unwrap(),
+            accent: hex("#d08a62").unwrap(),
+            accent_soft: hex("#3b2b22").unwrap(),
+            accent2: hex("#6aa6c9").unwrap(),
             ok: hex("#6fbf73").unwrap(),
             warn: hex("#e8c75c").unwrap(),
             err: hex("#f05a5a").unwrap(),
@@ -99,6 +99,13 @@ impl Theme {
             err: get("err").unwrap_or(d.err),
             tag_colors: Self::default_tag_colors(),
         })
+    }
+
+    /// Text on an accent fill: dark on a light accent, white on a dark one.
+    pub fn on_accent(&self) -> Color32 {
+        let c = self.accent;
+        let luma = 0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32;
+        if luma > 140.0 { self.bg_deep } else { Color32::WHITE }
     }
 
     pub fn tag_color(&self, index: usize) -> Color32 {
@@ -267,7 +274,8 @@ impl egui::Widget for Check<'_> {
             if *self.on {
                 let c = square.center();
                 let tick = [egui::pos2(c.x - 4.5, c.y + 0.5), egui::pos2(c.x - 1.5, c.y + 3.5), egui::pos2(c.x + 4.5, c.y - 3.5)];
-                ui.painter().add(egui::Shape::line(tick.to_vec(), Stroke::new(2.0, Color32::from_rgb(0x1e, 0x1e, 0x1e))));
+                let on = { let luma = 0.2126 * accent.r() as f32 + 0.7152 * accent.g() as f32 + 0.0722 * accent.b() as f32; if luma > 140.0 { Color32::from_rgb(0x16, 0x16, 0x16) } else { Color32::WHITE } };
+                ui.painter().add(egui::Shape::line(tick.to_vec(), Stroke::new(2.0, on)));
             }
             if !galley.is_empty() {
                 let pos = egui::pos2(square.right() + GAP, rect.center().y - galley.size().y / 2.0);

@@ -145,7 +145,7 @@ pub fn fade_shape(ui: &mut egui::Ui, id: &str, p: &mut ExportPreset) -> bool {
     changed
 }
 
-pub const TEMPLATE_HELP: &str = "Relative to the output folder; the extension follows the format.\n{name} source stem\n{tag} first tag, or untagged\n{tags} all tags joined by +\n{root} library root name\n{folder} source folder name\n{relpath} source folder under its root\n{date} YYYY-MM-DD";
+pub const TEMPLATE_HELP: &str = "The file name inside the export folder; the extension follows the format.\n{name} source stem\n{root} library root name\n{folder} source folder name\n{relpath} source folder under its root\n{date} YYYY-MM-DD";
 
 pub fn path_template(ui: &mut egui::Ui, p: &mut ExportPreset, width: f32) -> bool {
     ui.add_sized(egui::vec2(width, CONTROL_H), egui::TextEdit::singleline(&mut p.path_template).font(egui::TextStyle::Monospace)).on_hover_text(TEMPLATE_HELP).changed()

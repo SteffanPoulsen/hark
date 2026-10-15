@@ -33,6 +33,9 @@ pub struct WaveState {
     pub fade_out: f64,
     pub fade_shape: FadeShape,
     drag: Option<Drag>,
+    /// The edge moved last. When both edges sit on one spot, it is the one a grab takes, so
+    /// dragging back reopens the selection the way it was just closed.
+    last_edge: Option<Drag>,
 }
 
 pub enum WaveEvent {
@@ -56,6 +59,7 @@ impl WaveState {
         self.fade_in = 0.0;
         self.fade_out = 0.0;
         self.drag = None;
+        self.last_edge = None;
     }
 
     /// The span the fades hang off: the selection, or the whole file.
@@ -111,12 +115,13 @@ fn hit(state: &WaveState, lane: Rect, p: Pos2, duration: f64, x_of: &dyn Fn(f64)
         };
     }
     state.selection?;
-    if (p.x - x_of(a)).abs() <= EDGE_GRAB_PX {
-        Some(Drag::Start)
-    } else if (p.x - x_of(b)).abs() <= EDGE_GRAB_PX {
-        Some(Drag::End)
-    } else {
-        None
+    let near_a = (p.x - x_of(a)).abs() <= EDGE_GRAB_PX;
+    let near_b = (p.x - x_of(b)).abs() <= EDGE_GRAB_PX;
+    match (near_a, near_b) {
+        (true, true) => Some(state.last_edge.unwrap_or(Drag::Start)),
+        (true, false) => Some(Drag::Start),
+        (false, true) => Some(Drag::End),
+        (false, false) => None,
     }
 }
 
@@ -346,15 +351,18 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
                 Drag::New { anchor } => {
                     let (a, b) = if t < anchor { (t, anchor) } else { (anchor, t) };
                     state.selection = Some((a, b));
+                    state.last_edge = Some(if t < anchor { Drag::Start } else { Drag::End });
                 }
                 Drag::Start => {
                     if let Some((_, b)) = state.selection {
                         state.selection = Some((t.min(b), b));
+                        state.last_edge = Some(Drag::Start);
                     }
                 }
                 Drag::End => {
                     if let Some((a, _)) = state.selection {
                         state.selection = Some((a, t.max(a)));
+                        state.last_edge = Some(Drag::End);
                     }
                 }
                 Drag::Move { grab } => {

@@ -25,7 +25,7 @@ use worker::{Done, Job, Loaded, Worker};
 
 const CACHE_FRAMES: usize = 48_000 * 60 * 20;
 const PRELOAD: usize = 3;
-const EXPORT_CARD_W: f32 = 330.0;
+const EXPORT_CARD_W: f32 = 380.0;
 /// Search results are cut here so typing stays quick; folder and favorites views are whole.
 const SEARCH_LIMIT: usize = 2000;
 
@@ -206,7 +206,8 @@ impl App {
             eprintln!("config: {e:#}");
             Config::default()
         });
-        let theme = config.theme_file.as_ref().and_then(|p| Theme::from_file(p)).unwrap_or_default();
+        let theme_file = std::env::var_os("HARK_THEME").map(PathBuf::from).or_else(|| config.theme_file.clone());
+        let theme = theme_file.as_ref().and_then(|p| Theme::from_file(p)).unwrap_or_default();
         theme.apply(&cc.egui_ctx);
         cc.egui_ctx.set_zoom_factor(config.ui_zoom.clamp(0.5, 3.0));
         let mut db = Db::open().expect("library database");
@@ -1348,32 +1349,30 @@ impl App {
         let have = file.is_some();
         egui::Grid::new("export-target").num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
             key(ui, "Folder");
-            let folder = egui::Button::new(theme::icon_text(icons::FOLDER, out.as_deref().unwrap_or("Choose…"), 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(value_w, CONTROL_H)).truncate();
-            let folder = ui.add(folder);
-            let folder = match &out {
-                Some(o) => folder.on_hover_text(o),
-                None => folder,
-            };
-            if folder.clicked() {
-                if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    if let Err(e) = self.config.set_output_root(Some(path)) {
-                        self.set_status(format!("Output folder: {e:#}"), true);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let sub_w = 120.0;
+                let root_w = value_w - sub_w - 4.0;
+                let folder = egui::Button::new(theme::icon_text(icons::FOLDER, out.as_deref().unwrap_or("Choose…"), 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(root_w, CONTROL_H)).truncate();
+                let folder = ui.add_sized(egui::vec2(root_w, CONTROL_H), folder);
+                let folder = match &out {
+                    Some(o) => folder.on_hover_text(format!("{o}\nThe output folder")),
+                    None => folder.on_hover_text("The output folder"),
+                };
+                if folder.clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        if let Err(e) = self.config.set_output_root(Some(path)) {
+                            self.set_status(format!("Output folder: {e:#}"), true);
+                        }
                     }
                 }
-            }
-            ui.end_row();
-            key(ui, "To");
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let ext_w = 34.0;
-                let folder_w = (value_w * 0.45).max(90.0);
                 let root = self.config.output_root().map(|p| p.to_path_buf());
                 let current = self.config.export_folder().map(|p| p.to_path_buf());
                 let shown = current.as_ref().map(|p| format!("{}/", p.display())).unwrap_or_else(|| "/".into());
                 let mut pick: Option<Option<PathBuf>> = None;
                 let mut browse = false;
                 ui.add_enabled_ui(root.is_some(), |ui| {
-                    egui::ComboBox::from_id_salt("export-subfolder").width(folder_w).truncate().selected_text(RichText::new(shown).size(12.5)).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt("export-subfolder").width(sub_w).truncate().selected_text(RichText::new(shown).size(12.5)).show_ui(ui, |ui| {
                         if ui.selectable_label(current.is_none(), "/").clicked() {
                             pick = Some(None);
                         }
@@ -1387,7 +1386,7 @@ impl App {
                             browse = true;
                         }
                     });
-                });
+                }).response.on_hover_text("The folder under the output folder this export goes to");
                 if browse {
                     if let Some(root) = &root {
                         if let Some(path) = rfd::FileDialog::new().set_directory(root).pick_folder() {
@@ -1403,7 +1402,13 @@ impl App {
                         self.set_status(format!("Export folder: {e:#}"), true);
                     }
                 }
-                let mut rest = value_w - folder_w - ext_w - 4.0;
+            });
+            ui.end_row();
+            key(ui, "Name");
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let ext_w = 34.0;
+                let mut rest = value_w - ext_w - 2.0;
                 if !dir.is_empty() {
                     let dir_w = ui.fonts_mut(|f| f.layout_no_wrap(dir.clone(), FontId::proportional(12.5), theme.muted).size().x).min(rest * 0.4);
                     ui.add_sized(egui::vec2(dir_w, CONTROL_H), egui::Label::new(RichText::new(&dir).color(theme.muted).size(12.5)).truncate()).on_hover_text("From the preset's path template");
@@ -1428,7 +1433,7 @@ impl App {
 
         ui.add_space(10.0);
         let can = matches!(req, Some(Ok(_)));
-        let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 15.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), if can { Color32::WHITE } else { theme.muted }))
+        let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 15.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), if can { theme.on_accent() } else { theme.muted }))
             .fill(if can { theme.accent } else { theme.overlay })
             .corner_radius(CornerRadius::same(6))
             .min_size(egui::vec2(ui.available_width(), 40.0));
