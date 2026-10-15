@@ -1,10 +1,10 @@
 <img src="docs/brand/hark-logo.png" alt="hark" width="240">
 
-**Listen fast, export clean.** A local audio asset browser for game development.
+**Listen fast, export clean.** A local audio asset browser for anyone who works from a library of sounds: game audio, film and video post, apps, theatre, podcasts, sample packs.
 
 ![hark auditioning a sword take, one hit selected with fades, the export card set to the sfx preset](docs/screenshots/hero.png)
 
-hark sits between your sound libraries and your game project. Point it at the folders the libraries live in, arrow through them at keyboard speed, star and tag what works, select the part you want on the waveform, and export it through a preset into the project's audio folder with a consistent name, format and loudness. Every exported file carries where it came from and how it was made, embedded in the file itself, so months later `hark-cli inspect` still knows.
+hark sits between your sound libraries and the project they feed. Point it at the folders the libraries live in, arrow through them at keyboard speed, star and tag what works, select the part you want on the waveform, and export it through a preset into the project's audio folder with a consistent name, format and loudness. Every exported file carries where it came from and how it was made, embedded in the file itself, so months later `hark-cli inspect` still knows.
 
 Linux (Wayland) first, Windows from the same code. No accounts, no subscriptions, no cloud. MIT.
 
@@ -17,7 +17,7 @@ Auditioning a big library in a DAW means importing first, and in a file manager 
 - **Instant audition.** Arrowing through the list plays each file as it lands: one always-open audio stream, pre-decoded neighbours, cached waveform peaks. Hour-long recordings stream from disk and start as fast as a one-shot.
 - **Library, not import.** Folders stay where they are and are never modified. The list shows duration, channels, rate, bit depth, codec and loudness; search covers everything, and a filter narrows by favorites, tags, type and channels.
 - **Favorites and tags** from the keyboard. Tags are yours to define, with a colour each. Marks key on the file's content, so a renamed or moved file keeps them.
-- **Projects.** A `.hark` file beside the game holds its library folders, its output folder and its own favorites. Switch between games from the top bar.
+- **Projects.** A `.hark` file beside the game, the edit or the show holds its library folders, its output folder and its own favorites. Switch between projects from the top bar.
 - **Waveform selection with fades.** Drag a region or trim it to the sound, step through the takes a recording holds with Left and Right, set fade in and out, zoom, loop, seek by clicking, and scale the level with the fader beside the waveform.
 - **Preset-driven export.** WAV or FLAC, bit depth with dither, resampling, mono downmix, peak or EBU R128 loudness normalisation under a true-peak ceiling, and a file name template. Override any of it for one export.
 - **An origin inside every export.** A `hark` RIFF chunk and a BWF `bext` description in WAV, an APPLICATION block and a Vorbis comment in FLAC: source path and hash, pack, selection, fades, preset and measured gain. `hark-cli reexport` runs that recipe again with changes.

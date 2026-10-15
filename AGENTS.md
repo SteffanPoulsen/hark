@@ -4,7 +4,7 @@ Guidance for coding agents working in this repository.
 
 ## What this is
 
-hark: a local audio asset browser for game development. Fast audition of a folder-based library, favorites and user-defined tags, waveform selection with fades, preset-driven export into a project, and an origin record embedded in every exported file. Linux and Wayland first, Windows from the same code. Public repository, git, MIT.
+hark: a local audio asset browser for anyone who works from a library of sounds, game audio first but film, apps, theatre and podcasts alike. Fast audition of a folder-based library, favorites and user-defined tags, waveform selection with fades, preset-driven export into a project, and an origin record embedded in every exported file. Linux and Wayland first, Windows from the same code. Public repository, git, MIT.
 
 The design note that started it lives in the user's Obsidian vault (`Audio Asset Browser - idea.md`); `README.md` is the current description for users.
 
@@ -22,7 +22,7 @@ A Cargo workspace with one core and two thin frontends. The frontends never reim
 - **Originals are never modified.** The library reads and hashes source files; only exports are written.
 - **Exports carry their origin inside the file.** WAV: a `hark` RIFF chunk with the JSON and a BWF `bext` description. FLAC: an APPLICATION block with id `hark` and a `HARK_ORIGIN` Vorbis comment. A sidecar is never the only copy.
 - **Marks key on the content hash**, so a renamed or moved file keeps its tags and favorite once re-scanned and re-hashed. Tags are global; favorites belong to a project, and `Db` reads and writes them for the project set with `set_project`.
-- **A project is the target**: a `.hark` file beside the game holding an id, its library folders, and its output folder; favorites key on its id and its name is the file's stem. No project open is the default state: the config's own folders and output folder, favorites under `default`. The database is global and keyed by path, so projects that share a folder share its rows. Presets and tags are not per project; move them only when a real case demands it.
+- **A project is the target**: a `.hark` file beside the game, edit or show holding an id, its library folders, and its output folder; favorites key on its id and its name is the file's stem. No project open is the default state: the config's own folders and output folder, favorites under `default`. The database is global and keyed by path, so projects that share a folder share its rows. Presets and tags are not per project; move them only when a real case demands it.
 - **The audio callback allocates nothing and locks nothing.** Short clips arrive pre-decoded at the device rate through a channel; large files (decoded size over `stream_above_mb`) arrive as a lock-free ring that a decoder thread keeps a few seconds ahead at the device rate, and the callback plays counted silence if it ever runs dry. The callback never frees a stream either: the decoder thread outlives the callback's reference and releases the ring. The GUI reads the playhead and the underrun count from atomics.
 - **The CLI and the window are peers over the core.** A feature that exists only in the window is a bug; add the command.
 

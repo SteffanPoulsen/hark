@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=hark
-Comment=Audio asset browser for game development
+Comment=Audio asset browser for sound design
 Exec=hark %f
 Icon=hark
 Terminal=false
