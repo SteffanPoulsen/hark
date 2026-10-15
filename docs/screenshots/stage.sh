@@ -163,13 +163,20 @@ config() {
   echo "config: project $game/Emberwake.hark, xdg under $STAGE/xdg"
 }
 
+# The window the user had focused, to give focus back to after the stage touches theirs.
+active() { hyprctl activewindow -j | python3 -I -c "import json,sys; print(json.load(sys.stdin).get('address',''))"; }
+refocus() { [ -n "$1" ] && hyprctl eval "hl.dispatch(hl.dsp.focus({ window = 'address:$1' }))" >/dev/null || true; }
+
 run() {
-  local extra=()
-  [ "${1:-}" = settings ] && extra=(--settings presets)
+  local extra=() prev title=hark
+  [ "${1:-}" = settings ] && extra=(--settings presets) && title="hark settings"
+  prev=$(active)
   pkill -x hark 2>/dev/null || true
   sleep 0.3
   HOME="$home" "$app" --project "$game/Emberwake.hark" --open "$lib/Impacts/sword_hits_take03.wav" --in 1.43 --out 2.62 --fade-in 0.008 --fade-out 0.18 "${extra[@]}" >/dev/null 2>&1 &
   disown
+  window "$title" >/dev/null || true
+  refocus "$prev"
 }
 
 # The address of the hark window with this title, once Hyprland lists it.
@@ -187,7 +194,8 @@ window() {
 # multiple of four logical pixels so the position is whole at any scale up to 1.25 and
 # grim's region starts on the window's own first pixel.
 shot() {
-  local name=${1:-hero} title=${2:-hark} w=${3:-1500} h=${4:-900} addr geo d pos
+  local name=${1:-hero} title=${2:-hark} w=${3:-1500} h=${4:-900} addr geo d pos prev
+  prev=$(active)
   addr=$(window "$title")
   pos=$(hyprctl monitors -j | python3 -I -c "import json,sys; m=max(json.load(sys.stdin), key=lambda m: m['scale']); w,h=m['width']/m['scale'],m['height']/m['scale']; print(*(int(c)//4*4 for c in (m['x']+(w-$w)/2, m['y']+(h-$h)/2)))")
   for d in "float({ window = 'address:$addr', action = 'on' })" \
@@ -198,10 +206,8 @@ shot() {
     hyprctl eval "hl.dispatch(hl.dsp.window.$d)" >/dev/null
   done
   hyprctl eval "hl.dispatch(hl.dsp.cursor.move({ x = ${pos% *}, y = $(( ${pos#* } - 40 )) }))" >/dev/null
-  # Focus draws a line inside the window; another monitor takes it for the capture.
-  local other
-  other=$(hyprctl monitors -j | python3 -I -c "import json,sys; print(min(json.load(sys.stdin), key=lambda m: m['scale'])['name'])")
-  hyprctl eval "hl.dispatch(hl.dsp.focus({ monitor = '$other' }))" >/dev/null
+  # Focus draws a line inside the window; the user's own window keeps it for the capture.
+  refocus "$prev"
   sleep 2
   geo=$(hyprctl clients -j | python3 -I -c "import json,sys; c=[x for x in json.load(sys.stdin) if x['address']=='$addr'][0]; print(f\"{c['at'][0]},{c['at'][1]} {c['size'][0]}x{c['size'][1]}\")")
   grim -g "$geo" "$here/$name.png"
@@ -213,6 +219,6 @@ case ${1:-all} in
   config) config ;;
   run) run "${2:-}" ;;
   shot) shot "${2:-hero}" "${3:-hark}" "${4:-1500}" "${5:-900}" ;;
-  all) library; config; run; shot hero; run settings; shot presets "hark settings" 960 900 ;;
+  all) library; config; run; shot hero; run settings; shot presets "hark settings" 960 820 ;;
   *) sed -n 2,12p "$0" ;;
 esac
