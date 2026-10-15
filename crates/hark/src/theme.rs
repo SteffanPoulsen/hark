@@ -269,7 +269,8 @@ impl egui::Widget for Check<'_> {
             let accent = ui.visuals().selection.stroke.color;
             let square = egui::Rect::from_center_size(egui::pos2(rect.left() + BOX / 2.0, rect.center().y), egui::Vec2::splat(BOX));
             let (fill, stroke) = if *self.on {
-                (accent, Stroke::new(1.0, accent))
+                let fill = if response.hovered() { accent.gamma_multiply(1.2).to_opaque() } else { accent };
+                (fill, Stroke::new(1.0, fill))
             } else {
                 (visuals.bg_fill, Stroke::new(1.0, if response.hovered() { visuals.fg_stroke.color } else { ui.visuals().widgets.noninteractive.bg_stroke.color }))
             };
