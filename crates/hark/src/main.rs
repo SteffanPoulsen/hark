@@ -186,8 +186,6 @@ struct App {
     overwrite: bool,
     status: String,
     status_is_error: bool,
-    /// The last export: the written file and its applied gain, or the error.
-    last_export: Option<Result<(PathBuf, String), String>>,
     scanning: bool,
     settings_open: bool,
     settings_page: settings::Page,
@@ -257,7 +255,6 @@ impl App {
             overwrite: false,
             status: String::new(),
             status_is_error: false,
-            last_export: None,
             scanning,
             file_count: 0,
             settings_open: false,
@@ -534,7 +531,6 @@ impl App {
     fn export(&mut self) {
         match self.export_request() {
             Some(Ok(req)) => {
-                self.last_export = None;
                 self.set_status(format!("exporting {}", req.output_path().display()), false);
                 self.worker.send(Job::Export(req));
             }
@@ -580,13 +576,10 @@ impl App {
                             gain.push_str("  ·  ");
                             gain.push_str(w);
                         }
-                        self.set_status(format!("exported {}", r.output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), false);
-                        self.last_export = Some(Ok((r.output, gain)));
+                        let shown = self.config.output_root().and_then(|root| r.output.strip_prefix(root).ok()).unwrap_or(&r.output);
+                        self.set_status(format!("exported {}  ·  {gain}", shown.display()), false);
                     }
-                    Err(e) => {
-                        self.set_status("export failed", true);
-                        self.last_export = Some(Err(e));
-                    }
+                    Err(e) => self.set_status(format!("export failed: {e}"), true),
                 },
                 Done::Scanned(reports) => {
                     self.scanning = false;
@@ -1153,7 +1146,7 @@ impl App {
         ui.add_space(4.0);
         // The transport row wraps at narrow widths; the waveform leaves it the height it took on
         // the last frame.
-        let wave_h = (ui.available_height() - self.transport_h - 10.0).max(80.0);
+        let wave_h = (ui.available_height() - self.transport_h - ui.spacing().item_spacing.y).max(80.0);
         let peaks = self.current.as_ref().map(|c| c.peaks.clone());
         let samples = self.current.as_ref().map(|c| c.device.clone());
         let colors = waveform::WaveColors {
@@ -1168,7 +1161,6 @@ impl App {
         if let WaveEvent::Seek(t) = event {
             self.play(Some(t));
         }
-        ui.add_space(4.0);
         let row = ui.scope(|ui| self.ui_transport(ui, playing, playhead, duration)).response.rect.height();
         if (row - self.transport_h).abs() > 0.5 {
             self.transport_h = row;
@@ -1402,26 +1394,6 @@ impl App {
                 self.export();
             }
         });
-        let mut show: Option<PathBuf> = None;
-        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| match &self.last_export {
-            Some(Ok((path, gain))) => {
-                let root = self.config.output_root();
-                let shown = root.and_then(|r| path.strip_prefix(r).ok()).unwrap_or(path).display().to_string();
-                let row = egui::Button::new(theme::icon_text(icons::CHECK, &format!("{shown}  ·  {gain}"), 12.5, egui::FontFamily::Proportional, theme.muted)).frame(false).truncate();
-                if ui.add(row).on_hover_text(format!("{}\nclick to show in folder", path.display())).clicked() {
-                    show = Some(path.clone());
-                }
-            }
-            Some(Err(e)) => {
-                ui.add(small(e.clone(), theme.err)).on_hover_text(e);
-            }
-            None => {}
-        });
-        if let Some(p) = show {
-            if let Err(e) = reveal(&p) {
-                self.set_status(format!("show in folder: {e}"), true);
-            }
-        }
         let h = ui.min_rect().height();
         if (h - self.export_card_h).abs() > 0.5 {
             self.export_card_h = h;
