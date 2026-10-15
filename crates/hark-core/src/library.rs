@@ -263,13 +263,18 @@ impl Db {
                 .collect();
             sql.push_str(&format!(" AND ({})", ors.join(" OR ")));
         }
+        let within = |names: &mut Vec<String>, values: &mut Vec<String>, dir: &Path| -> String {
+            let (lo, hi) = below(dir);
+            let lo = bind(names, values, lo);
+            let hi = bind(names, values, hi);
+            format!("(f.path >= {lo} AND f.path < {hi})")
+        };
         if let Some(under) = &q.under {
-            let n = bind(&mut names, &mut values, format!("{}{}%", under.to_string_lossy(), std::path::MAIN_SEPARATOR));
-            sql.push_str(&format!(" AND f.path LIKE {n}"));
+            sql.push_str(&format!(" AND {}", within(&mut names, &mut values, under)));
         }
         if !q.scope.is_empty() {
-            let prefixes: Vec<String> = q.scope.iter().map(|s| format!("{}{}%", s.to_string_lossy(), std::path::MAIN_SEPARATOR)).collect();
-            sql.push_str(&any_of(&mut names, &mut values, &prefixes, &|n| format!("f.path LIKE {n}")));
+            let ors: Vec<String> = q.scope.iter().map(|s| within(&mut names, &mut values, s)).collect();
+            sql.push_str(&format!(" AND ({})", ors.join(" OR ")));
         }
         sql.push_str(" ORDER BY f.name COLLATE NOCASE");
         if q.limit > 0 {
@@ -291,10 +296,10 @@ impl Db {
     /// Walks `root`, probes new and changed files, and drops rows whose file is gone.
     pub fn scan(&mut self, root: &Path, mut progress: impl FnMut(&Path, usize)) -> Result<ScanReport> {
         let mut report = ScanReport::default();
-        let prefix = format!("{}{}", root.to_string_lossy(), std::path::MAIN_SEPARATOR);
+        let (lo, hi) = below(root);
         let mut known: std::collections::HashMap<String, (u64, i64)> = {
-            let mut stmt = self.conn.prepare("SELECT path, size, mtime_ns FROM files WHERE path LIKE ?1")?;
-            let rows = stmt.query_map(params![format!("{prefix}%")], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?))))?;
+            let mut stmt = self.conn.prepare("SELECT path, size, mtime_ns FROM files WHERE path >= ?1 AND path < ?2")?;
+            let rows = stmt.query_map(params![lo, hi], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?))))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
         let tx = self.conn.transaction()?;
@@ -364,8 +369,8 @@ impl Db {
     }
 
     pub fn forget_root(&self, root: &Path) -> Result<usize> {
-        let prefix = format!("{}{}%", root.to_string_lossy(), std::path::MAIN_SEPARATOR);
-        Ok(self.conn.execute("DELETE FROM files WHERE path LIKE ?1", params![prefix])?)
+        let (lo, hi) = below(root);
+        Ok(self.conn.execute("DELETE FROM files WHERE path >= ?1 AND path < ?2", params![lo, hi])?)
     }
 
     /// The file's content hash, computed and stored when the row has none yet.
@@ -426,6 +431,14 @@ impl Db {
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+}
+
+/// The half-open range of path strings under `dir`: a seek on the path index, where a LIKE
+/// prefix scans it and reads `_` and `%` in a folder name as wildcards.
+fn below(dir: &Path) -> (String, String) {
+    let lo = format!("{}{}", dir.to_string_lossy(), std::path::MAIN_SEPARATOR);
+    let hi = format!("{}{}", dir.to_string_lossy(), (std::path::MAIN_SEPARATOR as u8 + 1) as char);
+    (lo, hi)
 }
 
 pub fn hash_file(path: &Path) -> Result<String> {
