@@ -23,7 +23,8 @@ use theme::Theme;
 use waveform::{WaveEvent, WaveState};
 use worker::{Done, Job, Loaded, Worker};
 
-const CACHE_FRAMES: usize = 48_000 * 60 * 20;
+/// Twenty minutes of stereo at 48 kHz, decoded audio and peaks together.
+const CACHE_BYTES: usize = 48_000 * 60 * 20 * 2 * 4;
 const PRELOAD: usize = 3;
 const EXPORT_CARD_W: f32 = 380.0;
 /// Search results are cut here so typing stays quick; folder and favorites views are whole.
@@ -365,8 +366,7 @@ impl App {
             return;
         }
         self.pending.insert(path.to_path_buf());
-        let analyzed = self.files.iter().find(|f| f.path == path).map(|f| f.lufs.is_some()).unwrap_or(false);
-        self.worker.send(Job::Load { path: path.to_path_buf(), device_rate: self.device_rate(), stream_above_secs: self.config.stream_above_secs, analyzed });
+        self.worker.send(Job::Load { path: path.to_path_buf(), device_rate: self.device_rate(), stream_above_secs: self.config.stream_above_secs });
     }
 
     fn remember(&mut self, loaded: Arc<Loaded>) {
@@ -374,8 +374,8 @@ impl App {
         self.cache_order.retain(|p| p != &path);
         self.cache_order.push_back(path.clone());
         self.cache.insert(path, loaded);
-        let mut frames: usize = self.cache.values().map(|l| l.resident_frames()).sum();
-        while frames > CACHE_FRAMES && self.cache_order.len() > 1 {
+        let mut bytes: usize = self.cache.values().map(|l| l.resident_bytes()).sum();
+        while bytes > CACHE_BYTES && self.cache_order.len() > 1 {
             let Some(old) = self.cache_order.pop_front() else { break };
             if self.current.as_ref().map(|c| c.path == old).unwrap_or(false) {
                 self.cache_order.push_back(old);
@@ -385,7 +385,7 @@ impl App {
                 continue;
             }
             if let Some(l) = self.cache.remove(&old) {
-                frames -= l.resident_frames();
+                bytes -= l.resident_bytes();
             }
         }
     }
@@ -428,6 +428,10 @@ impl App {
     fn show_loaded(&mut self, l: Arc<Loaded>) {
         let duration = l.duration_secs;
         self.wave.reset(duration);
+        let measured = l.loudness.is_some() || self.files.iter().find(|f| f.path == l.path).map(|f| f.lufs.is_some()).unwrap_or(false);
+        if l.source.is_streamed() && (l.peaks.is_none() || !measured) {
+            self.worker.analyze(l.path.clone(), l.peaks.clone());
+        }
         self.current = Some(l);
     }
 
@@ -577,7 +581,8 @@ impl App {
                         Err(e) => self.set_status(format!("{}: {e}", path.display()), true),
                     }
                 }
-                Done::Analyzed(path, peaks, loudness) => {
+                Done::Analyzed(path, Err(e)) => self.set_status(format!("{}: {e}", path.display()), true),
+                Done::Analyzed(path, Ok((peaks, loudness))) => {
                     self.record_loudness(&path, loudness);
                     if let Some(old) = self.cache.get(&path) {
                         let l = Arc::new(Loaded { path: old.path.clone(), source_rate: old.source_rate, channels: old.channels, duration_secs: old.duration_secs, source: old.source.clone(), peaks: Some(peaks), loudness });
