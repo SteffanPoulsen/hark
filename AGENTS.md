@@ -22,7 +22,7 @@ A Cargo workspace with one core and two thin frontends. The frontends never reim
 - **Originals are never modified.** The library reads and hashes source files; only exports are written.
 - **Exports carry their origin inside the file.** WAV: a `hark` RIFF chunk with the JSON and a BWF `bext` description. FLAC: an APPLICATION block with id `hark` and a `HARK_ORIGIN` Vorbis comment. A sidecar is never the only copy.
 - **Marks key on the content hash**, so a renamed or moved file keeps its tags and favorite once re-scanned and re-hashed. Tags are global; favorites belong to a project, and `Db` reads and writes them for the project set with `set_project`.
-- **A project is the target**: output folder, library scope, favorites. Presets and tags are not per project; move them only when a real case demands it.
+- **A project is the target**: a `.hark` file beside the game holding an id, output folder and library scope; favorites key on its id. No project open is the default state: whole library, the config's output folder, favorites under `default`. Presets and tags are not per project; move them only when a real case demands it.
 - **The audio callback allocates nothing and locks nothing.** Clips arrive pre-decoded at the device rate through a channel; the GUI reads the playhead from atomics.
 - **The CLI and the window are peers over the core.** A feature that exists only in the window is a bug; add the command.
 

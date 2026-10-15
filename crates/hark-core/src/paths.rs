@@ -10,6 +10,11 @@ pub fn config_file() -> PathBuf {
     dirs().config_dir().join("config.json")
 }
 
+/// Where projects moved from the config file live.
+pub fn projects_dir() -> PathBuf {
+    dirs().config_dir().join("projects")
+}
+
 pub fn db_file() -> PathBuf {
     dirs().data_dir().join("library.sqlite")
 }

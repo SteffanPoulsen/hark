@@ -7,7 +7,7 @@ use hark_core::audition::Player;
 
 use crate::theme::{self, Theme};
 use crate::preset_ui;
-use crate::{App, TagAction};
+use crate::{App, ProjectAction, TagAction};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -219,42 +219,58 @@ impl App {
 
     fn page_projects(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme.clone();
-        heading(ui, &theme, "Projects", "A project owns an output folder, a library scope and its own favorites. Tags and presets are shared.");
-        let names: Vec<String> = self.config.projects.iter().map(|p| p.name.clone()).collect();
-        let active = self.config.active_project.clone();
-        let mut switch: Option<String> = None;
-        let mut new_project = false;
+        heading(ui, &theme, "Projects", "A project file holds an output folder, a library scope and its own favorites, and lives beside the game it serves. With none open, hark works on the whole library with the default output folder.");
+        let mut action: Option<ProjectAction> = None;
         card(ui, &theme, |ui| {
-            row(ui, &theme, true, "Active project", "The one the window and the CLI work in.", |ui| {
-                if theme::tool_button(ui, icons::PLUS, "new").clicked() {
-                    new_project = true;
+            row(ui, &theme, true, "Project", "The one the window and the CLI work in.", |ui| {
+                if theme::tool_button(ui, icons::PLUS, "new").on_hover_text("save a new project file").clicked() {
+                    action = Some(ProjectAction::New);
                 }
-                egui::ComboBox::from_id_salt("settings-project").width(180.0).selected_text(&active).show_ui(ui, |ui| {
-                    for n in &names {
-                        if ui.selectable_label(*n == active, n).clicked() {
-                            switch = Some(n.clone());
-                        }
-                    }
-                });
+                if theme::tool_button(ui, icons::FOLDER_OPEN, "open").on_hover_text("open a project file").clicked() {
+                    action = Some(ProjectAction::Browse);
+                }
+                if let Some(a) = self.project_menu(ui, "settings-project", 180.0) {
+                    action = Some(a);
+                }
             });
         });
-        if new_project {
-            self.new_project();
-        }
-        if let Some(n) = switch {
-            self.switch_project(&n);
-        }
         ui.add_space(theme::GAP);
 
-        let favs = self.db.favorite_count(&active).unwrap_or(0);
-        let mut save = false;
+        let favs = self.db.favorite_count(self.config.project_id()).unwrap_or(0);
+        let favs_text = format!("{favs} file{} starred.", if favs == 1 { "" } else { "s" });
+        let out = self.config.output_root().map(|p| p.display().to_string());
+        let mut set_output = false;
+        let output_row = |ui: &mut egui::Ui, first: bool, set_output: &mut bool| {
+            row(ui, &theme, first, "Output folder", "Exports land here, under the preset's path template.", |ui| {
+                let label = out.as_deref().unwrap_or("choose…");
+                let b = ui.add(egui::Button::new(theme::icon_text(icons::FOLDER, label, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(0.0, 28.0)).truncate());
+                let b = match &out {
+                    Some(o) => b.on_hover_text(o),
+                    None => b,
+                };
+                if b.clicked() {
+                    *set_output = true;
+                }
+            });
+        };
+
+        let Some(active) = self.config.active.clone() else {
+            card(ui, &theme, |ui| {
+                output_row(ui, true, &mut set_output);
+                row(ui, &theme, false, "Favorites", &favs_text, |_| {});
+                row(ui, &theme, false, "Scope", "The default state sees the whole library. Open or create a project to narrow it to the folders a game uses.", |_| {});
+            });
+            self.finish_projects(action, set_output, None);
+            return;
+        };
+
         let mut rename: Option<String> = None;
         let mut remove_scope: Option<usize> = None;
         let mut add_scope = false;
-        let mut remove_project = false;
+        let mut reveal_file = false;
         card(ui, &theme, |ui| {
-            row(ui, &theme, true, "Name", "Favorites follow the project through a rename.", |ui| {
-                let mut buf = self.project_edit.clone().unwrap_or_else(|| active.clone());
+            row(ui, &theme, true, "Name", "Favorites follow the project through a rename; they key on the file's id.", |ui| {
+                let mut buf = self.project_edit.clone().unwrap_or_else(|| active.project.name.clone());
                 let resp = ui.add(egui::TextEdit::singleline(&mut buf).desired_width(180.0));
                 if resp.has_focus() {
                     self.project_edit = Some(buf.clone());
@@ -264,29 +280,19 @@ impl App {
                     rename = Some(buf.trim().to_string());
                 }
             });
-            let out = self.config.output_root().map(|p| p.display().to_string());
-            row(ui, &theme, false, "Output folder", "Exports land here, under the preset's path template.", |ui| {
-                let label = out.as_deref().unwrap_or("choose…");
-                let b = ui.add(egui::Button::new(theme::icon_text(icons::FOLDER, label, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(0.0, 28.0)).truncate());
-                let b = match &out {
-                    Some(o) => b.on_hover_text(o),
-                    None => b,
-                };
-                if b.clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        self.config.project_mut().output_root = Some(path);
-                        save = true;
-                    }
+            row(ui, &theme, false, "File", &active.path.display().to_string(), |ui| {
+                if theme::tool_button(ui, icons::ARROW_SQUARE_OUT, "show").on_hover_text("show in folder").clicked() {
+                    reveal_file = true;
                 }
             });
-            row(ui, &theme, false, "Favorites", &format!("{favs} file{} starred in this project.", if favs == 1 { "" } else { "s" }), |_| {});
+            output_row(ui, false, &mut set_output);
+            row(ui, &theme, false, "Favorites", &favs_text, |_| {});
             row(ui, &theme, false, "Scope", "Library folders this project cares about. Empty means the whole library.", |ui| {
                 if theme::tool_button(ui, icons::FOLDER_PLUS, "add folder").clicked() {
                     add_scope = true;
                 }
             });
-            let scope = self.config.project().scope.clone();
-            for (i, p) in scope.iter().enumerate() {
+            for (i, p) in active.project.scope.iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.add_space(16.0);
                     ui.label(theme::icon(icons::FOLDER).color(theme.muted));
@@ -299,34 +305,38 @@ impl App {
                 });
                 ui.add_space(4.0);
             }
-            if !scope.is_empty() {
+            if !active.project.scope.is_empty() {
                 ui.add_space(4.0);
             }
-            row(ui, &theme, false, "Remove project", "Drops its favorites. Exports and the library stay.", |ui| {
-                let b = egui::Button::new(theme::icon_text(icons::TRASH, "remove", 14.0, egui::FontFamily::Proportional, theme.err)).min_size(egui::vec2(0.0, 28.0));
-                if ui.add_enabled(self.config.projects.len() > 1, b).clicked() {
-                    remove_project = true;
+            row(ui, &theme, false, "Close project", "Back to the default state. The file stays in the list.", |ui| {
+                if theme::tool_button(ui, icons::X, "close").clicked() {
+                    action = Some(ProjectAction::Close);
+                }
+            });
+            row(ui, &theme, false, "Forget project", "Drops it from the list. The file, its exports and its favorites stay.", |ui| {
+                let b = egui::Button::new(theme::icon_text(icons::TRASH, "forget", 14.0, egui::FontFamily::Proportional, theme.err)).min_size(egui::vec2(0.0, 28.0));
+                if ui.add(b).clicked() {
+                    action = Some(ProjectAction::Forget(active.path.clone()));
                 }
             });
         });
-        if let Some(new) = rename {
-            if !new.is_empty() && new != active && !self.config.projects.iter().any(|p| p.name == new) {
-                match self.db.rename_project(&active, &new) {
-                    Ok(_) => {
-                        self.config.project_mut().name = new.clone();
-                        self.config.active_project = new.clone();
-                        self.db.set_project(&new);
-                        save = true;
-                    }
-                    Err(e) => self.set_status(format!("rename project: {e:#}"), true),
-                }
+        if reveal_file {
+            if let Err(e) = crate::reveal(&active.path) {
+                self.set_status(format!("show in folder: {e}"), true);
             }
         }
-        if let Some(i) = remove_scope {
-            self.config.project_mut().scope.remove(i);
-            self.expanded = self.config.scope_folders().into_iter().map(|(_, p)| p).collect();
-            self.list_dirty = true;
-            save = true;
+        let mut changed = false;
+        if let Some(a) = self.config.active.as_mut() {
+            if let Some(new) = rename {
+                if !new.is_empty() && new != a.project.name {
+                    a.project.name = new;
+                    changed = true;
+                }
+            }
+            if let Some(i) = remove_scope {
+                a.project.scope.remove(i);
+                changed = true;
+            }
         }
         if add_scope {
             let mut dialog = rfd::FileDialog::new();
@@ -334,23 +344,37 @@ impl App {
                 dialog = dialog.set_directory(&r.path);
             }
             if let Some(path) = dialog.pick_folder() {
-                if !self.config.project().scope.contains(&path) {
-                    self.config.project_mut().scope.push(path.clone());
-                    self.expanded.insert(path);
-                    self.list_dirty = true;
-                    save = true;
+                if let Some(a) = self.config.active.as_mut() {
+                    if !a.project.scope.contains(&path) {
+                        a.project.scope.push(path.clone());
+                        self.expanded.insert(path);
+                        changed = true;
+                    }
                 }
             }
         }
-        if save {
-            let _ = self.config.save();
+        self.finish_projects(action, set_output, changed.then_some(()));
+    }
+
+    /// The tail of the projects page: the switcher's action, the output folder dialog, and the
+    /// project file written after a change.
+    fn finish_projects(&mut self, action: Option<ProjectAction>, set_output: bool, changed: Option<()>) {
+        if set_output {
+            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                if let Err(e) = self.config.set_output_root(Some(path)) {
+                    self.set_status(format!("output folder: {e:#}"), true);
+                }
+            }
         }
-        if remove_project {
-            let i = self.config.projects.iter().position(|p| p.name == active).unwrap_or(0);
-            self.config.projects.remove(i);
-            let _ = self.db.forget_project(&active);
-            let next = self.config.projects[0].name.clone();
-            self.switch_project(&next);
+        if changed.is_some() {
+            if let Err(e) = self.config.save_project() {
+                self.set_status(format!("project: {e:#}"), true);
+            }
+            self.expanded = self.config.scope_folders().into_iter().map(|(_, p)| p).collect();
+            self.list_dirty = true;
+        }
+        if let Some(a) = action {
+            self.apply_project_action(a);
         }
     }
 

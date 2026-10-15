@@ -13,7 +13,7 @@ struct Cli {
     /// Machine-readable output.
     #[arg(long, global = true)]
     json: bool,
-    /// Act as this project instead of the active one.
+    /// Act in this project file (or a known project's name) instead of the open one.
     #[arg(long, global = true)]
     project: Option<String>,
     #[command(subcommand)]
@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Projects: an output folder, a library scope and favorites of their own.
+    /// Project files: an output folder, a library scope and favorites of their own.
     Projects {
         #[command(subcommand)]
         cmd: Option<ProjectsCmd>,
@@ -131,22 +131,25 @@ enum RootsCmd {
 
 #[derive(Subcommand)]
 enum ProjectsCmd {
+    /// The known project files, the open one starred.
     List,
-    Add {
-        name: String,
+    /// Write a new project file and open it.
+    New {
+        file: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long)]
         output: Option<PathBuf>,
-        /// Make it the active project.
-        #[arg(long)]
-        activate: bool,
     },
-    /// Make a project the active one.
-    Use { name: String },
-    /// Remove a project and its favorites.
-    Remove { name: String },
-    /// Set the active project's output folder.
+    /// Open a project file, or a known project by name.
+    Open { project: String },
+    /// Back to the default state: whole library, default output folder, default favorites.
+    Close,
+    /// Drop a project from the known list. The file and its favorites stay.
+    Forget { project: String },
+    /// Set the output folder of the open project, or the default one.
     Output { dir: PathBuf },
-    /// The active project's library scope.
+    /// The open project's library scope.
     Scope {
         #[command(subcommand)]
         cmd: Option<ScopeCmd>,
@@ -390,10 +393,13 @@ fn print_records(records: &[hark_core::FileRecord], json: bool) -> Result<()> {
 fn load(project: &Option<String>) -> Result<Config> {
     let mut config = Config::load()?;
     if let Some(p) = project {
-        if !config.projects.iter().any(|x| &x.name == p) {
-            return Err(anyhow!("no project {p}"));
-        }
-        config.active_project = p.clone();
+        let path = match config.find_project(p) {
+            Some(path) => path,
+            None if Path::new(p).is_file() => abs(Path::new(p))?,
+            None => return Err(anyhow!("no project {p}")),
+        };
+        let project = hark_core::Project::load(&path)?;
+        config.active = Some(hark_core::config::ActiveProject { path, project });
     }
     Ok(config)
 }
@@ -401,7 +407,7 @@ fn load(project: &Option<String>) -> Result<Config> {
 fn open_db(project: &Option<String>) -> Result<Db> {
     let config = load(project)?;
     let mut db = Db::open()?;
-    db.set_project(&config.active_project);
+    db.set_project(config.project_id());
     Ok(db)
 }
 
@@ -415,84 +421,92 @@ fn run() -> Result<()> {
             let db = open_db(&project)?;
             match cmd.unwrap_or(ProjectsCmd::List) {
                 ProjectsCmd::List => {}
-                ProjectsCmd::Add { name, output, activate } => {
-                    if config.projects.iter().any(|p| p.name == name) {
-                        return Err(anyhow!("project {name} exists"));
-                    }
-                    let output_root = output.map(|o| abs_dir(&o)).transpose()?;
-                    config.projects.push(hark_core::Project { name: name.clone(), output_root, scope: Vec::new() });
-                    if activate {
-                        config.active_project = name;
-                    }
-                    config.save()?;
-                }
-                ProjectsCmd::Use { name } => {
-                    if !config.projects.iter().any(|p| p.name == name) {
-                        return Err(anyhow!("no project {name}"));
-                    }
-                    config.active_project = name;
-                    config.save()?;
-                }
-                ProjectsCmd::Remove { name } => {
-                    let Some(i) = config.projects.iter().position(|p| p.name == name) else { return Err(anyhow!("no project {name}")) };
-                    if config.projects.len() == 1 {
-                        return Err(anyhow!("cannot remove the only project"));
-                    }
-                    config.projects.remove(i);
-                    if config.active_project == name {
-                        config.active_project = config.projects[0].name.clone();
-                    }
-                    config.save()?;
-                    let n = db.forget_project(&name)?;
-                    if !json {
-                        println!("removed {name} and {n} favorites");
+                ProjectsCmd::New { file, name, output } => {
+                    let name = name.unwrap_or_else(|| hark_core::project::name_of_path(&file));
+                    config.create_project(&file, &name)?;
+                    if let Some(o) = output {
+                        config.set_output_root(Some(abs_dir(&o)?))?;
                     }
                 }
-                ProjectsCmd::Output { dir } => {
-                    config.project_mut().output_root = Some(abs_dir(&dir)?);
-                    config.save()?;
+                ProjectsCmd::Open { project: key } => {
+                    let path = config.find_project(&key).unwrap_or(PathBuf::from(&key));
+                    config.open_project(&path)?;
                 }
+                ProjectsCmd::Close => config.close_project()?,
+                ProjectsCmd::Forget { project: key } => {
+                    let path = config.find_project(&key).ok_or_else(|| anyhow!("no project {key}"))?;
+                    config.forget_project(&path)?;
+                }
+                ProjectsCmd::Output { dir } => config.set_output_root(Some(abs_dir(&dir)?))?,
                 ProjectsCmd::Scope { cmd } => {
+                    let Some(active) = config.active.as_mut() else { return Err(anyhow!("no project open; the default state has no scope")) };
                     match cmd.unwrap_or(ScopeCmd::List) {
                         ScopeCmd::List => {}
                         ScopeCmd::Add { folder } => {
                             let f = abs(&folder)?;
-                            if !config.project().scope.contains(&f) {
-                                config.project_mut().scope.push(f);
+                            if !active.project.scope.contains(&f) {
+                                active.project.scope.push(f);
                             }
                         }
                         ScopeCmd::Remove { folder } => {
                             let f = abs(&folder)?;
-                            config.project_mut().scope.retain(|p| p != &f);
+                            active.project.scope.retain(|p| p != &f);
                         }
-                        ScopeCmd::Clear => config.project_mut().scope.clear(),
+                        ScopeCmd::Clear => active.project.scope.clear(),
                     }
-                    config.save()?;
+                    config.save_project()?;
                     if json {
-                        print_json(&config.project().scope)?;
+                        print_json(&config.scope())?;
                     } else {
-                        for p in &config.project().scope {
+                        for p in config.scope() {
                             println!("{}", p.display());
                         }
-                        if config.project().scope.is_empty() {
+                        if config.scope().is_empty() {
                             println!("(whole library)");
                         }
                     }
                     return Ok(());
                 }
             }
+            let open = config.project.clone();
+            let rows: Vec<serde_json::Value> = config
+                .project_files
+                .iter()
+                .map(|path| {
+                    let loaded = hark_core::Project::load(path).ok();
+                    serde_json::json!({
+                        "file": path,
+                        "open": Some(path) == open.as_ref(),
+                        "missing": loaded.is_none(),
+                        "name": loaded.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| hark_core::project::name_of_path(path)),
+                        "id": loaded.as_ref().map(|p| p.id.clone()),
+                        "output_root": loaded.as_ref().and_then(|p| p.output_root.clone()),
+                        "scope": loaded.as_ref().map(|p| p.scope.clone()).unwrap_or_default(),
+                        "favorites": loaded.as_ref().and_then(|p| db.favorite_count(&p.id).ok()).unwrap_or(0),
+                    })
+                })
+                .collect();
             if json {
-                print_json(&serde_json::json!({ "active": config.active_project, "projects": config.projects }))?;
+                print_json(&serde_json::json!({ "open": open, "default_output_root": config.output_root, "default_favorites": db.favorite_count(hark_core::config::DEFAULT_PROJECT).unwrap_or(0), "projects": rows }))?;
             } else {
-                for p in &config.projects {
-                    let favs = db.favorite_count(&p.name).unwrap_or(0);
+                println!(
+                    "{} {:<16} {:<40} {} favorites, whole library",
+                    if open.is_none() { "*" } else { " " },
+                    "Default",
+                    config.output_root.as_ref().map(|o| o.display().to_string()).unwrap_or_else(|| "(no output folder)".into()),
+                    db.favorite_count(hark_core::config::DEFAULT_PROJECT).unwrap_or(0)
+                );
+                for r in &rows {
+                    let scope = r["scope"].as_array().map(|s| s.len()).unwrap_or(0);
                     println!(
-                        "{} {:<16} {:<40} {} favorites, scope: {}",
-                        if p.name == config.active_project { "*" } else { " " },
-                        p.name,
-                        p.output_root.as_ref().map(|o| o.display().to_string()).unwrap_or_else(|| "(no output folder)".into()),
-                        favs,
-                        if p.scope.is_empty() { "whole library".to_string() } else { format!("{} folders", p.scope.len()) }
+                        "{} {:<16} {:<40} {} favorites, scope: {}  {}{}",
+                        if r["open"].as_bool() == Some(true) { "*" } else { " " },
+                        r["name"].as_str().unwrap_or(""),
+                        r["output_root"].as_str().unwrap_or("(no output folder)"),
+                        r["favorites"],
+                        if scope == 0 { "whole library".to_string() } else { format!("{scope} folders") },
+                        r["file"].as_str().unwrap_or(""),
+                        if r["missing"].as_bool() == Some(true) { "  (missing)" } else { "" }
                     );
                 }
             }
@@ -566,7 +580,7 @@ fn run() -> Result<()> {
                 text: words.join(" "),
                 dir: None,
                 under: under.map(|u| abs(&u)).transpose()?,
-                scope: config.project().scope.clone(),
+                scope: config.scope().to_vec(),
                 favorites_only: fav,
                 tags: tag,
                 extensions: extension,
@@ -768,7 +782,11 @@ fn run() -> Result<()> {
         Cmd::Export(a) => {
             let mut config = load(&project)?;
             if let Some(o) = &a.output_root {
-                config.project_mut().output_root = Some(abs_dir(o)?);
+                let root = Some(abs_dir(o)?);
+                match config.active.as_mut() {
+                    Some(active) => active.project.output_root = root,
+                    None => config.output_root = root,
+                }
             }
             let file = abs(&a.file)?;
             let db = open_db(&project)?;
@@ -799,7 +817,7 @@ fn run() -> Result<()> {
                 let origin = hark_core::origin::read(&f)?.ok_or_else(|| anyhow!("{}: carries no hark origin", f.display()))?;
                 let root = match &output_root {
                     Some(o) => abs_dir(o)?,
-                    None => config.output_root().map(|p| p.to_path_buf()).ok_or_else(|| anyhow!("project {} has no output folder", config.active_project))?,
+                    None => config.output_root().map(|p| p.to_path_buf()).ok_or_else(|| anyhow!("{} has no output folder", config.project_name()))?,
                 };
                 let mut req = hark_core::export::request_from_origin(&origin, &root, if in_place { Some(f.clone()) } else { None });
                 if let Some(p) = &preset {
@@ -820,8 +838,7 @@ fn run() -> Result<()> {
             let mut config = load(&project)?;
             let mut changed = false;
             if let Some(o) = output_root {
-                config.project_mut().output_root = Some(abs_dir(&o)?);
-                changed = true;
+                config.set_output_root(Some(abs_dir(&o)?))?;
             }
             if let Some(p) = default_preset {
                 if !config.presets.contains_key(&p) {

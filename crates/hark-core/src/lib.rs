@@ -9,10 +9,12 @@ pub mod origin;
 pub mod paths;
 pub mod pcm;
 pub mod peaks;
+pub mod project;
 pub mod resample;
 pub mod wav;
 
-pub use config::{Config, ExportPreset, Project, Root, TagDef};
+pub use config::{Config, ExportPreset, Root, TagDef};
+pub use project::Project;
 pub use decode::{decode, probe, AudioInfo};
 pub use export::{ExportRequest, ExportResult, Selection};
 pub use library::{Db, FileRecord};

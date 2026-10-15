@@ -5,6 +5,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::pcm::{DownmixMode, FadeShape};
+use crate::project::Project;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Root {
@@ -116,31 +117,36 @@ impl Default for ExportPreset {
     }
 }
 
-/// The target of the work: where exports go, which part of the library matters, and its own
-/// favorites. Tags and presets stay global.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Project {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_root: Option<PathBuf>,
-    /// Library folders this project cares about; empty means the whole library.
-    #[serde(default)]
-    pub scope: Vec<PathBuf>,
-}
-
+/// The favorites key of the default state, with no project open.
 pub const DEFAULT_PROJECT: &str = "default";
+
+/// The project file in use, loaded.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveProject {
+    pub path: PathBuf,
+    pub project: Project,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default)]
     pub roots: Vec<Root>,
-    /// Output folder from before projects existed; moved into the default project on load.
-    #[serde(default, skip_serializing)]
-    output_root: Option<PathBuf>,
+    /// Where exports go with no project open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_root: Option<PathBuf>,
+    /// Project files hark knows: the switcher lists them.
     #[serde(default)]
-    pub projects: Vec<Project>,
-    #[serde(default = "default_project_name")]
-    pub active_project: String,
+    pub project_files: Vec<PathBuf>,
+    /// The project file in use, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<PathBuf>,
+    /// Projects from when they lived in this file; written out as project files on load.
+    #[serde(default, rename = "projects", skip_serializing)]
+    legacy_projects: Vec<serde_json::Value>,
+    #[serde(default, rename = "active_project", skip_serializing)]
+    legacy_active: Option<String>,
+    #[serde(skip)]
+    pub active: Option<ActiveProject>,
     #[serde(default)]
     pub tags: Vec<TagDef>,
     #[serde(default)]
@@ -164,10 +170,6 @@ fn default_ui_zoom() -> f32 {
 
 fn default_preset_name() -> String {
     "clean".to_string()
-}
-
-fn default_project_name() -> String {
-    DEFAULT_PROJECT.to_string()
 }
 
 impl Default for Config {
@@ -213,8 +215,11 @@ impl Default for Config {
         Config {
             roots: Vec::new(),
             output_root: None,
-            projects: vec![Project { name: DEFAULT_PROJECT.into(), output_root: None, scope: Vec::new() }],
-            active_project: DEFAULT_PROJECT.into(),
+            project_files: Vec::new(),
+            project: None,
+            legacy_projects: Vec::new(),
+            legacy_active: None,
+            active: None,
             tags: ["sfx", "ambient", "music", "voice", "ui", "foley"].map(tag).to_vec(),
             presets,
             default_preset: default_preset_name(),
@@ -234,7 +239,18 @@ impl Config {
         match std::fs::read(path) {
             Ok(bytes) => {
                 let mut cfg: Config = serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
-                cfg.migrate();
+                if cfg.migrate() {
+                    cfg.save_to(path)?;
+                }
+                if let Some(file) = cfg.project.clone() {
+                    match Project::load(&file) {
+                        Ok(project) => cfg.active = Some(ActiveProject { path: file, project }),
+                        Err(e) => {
+                            eprintln!("project {}: {e:#}; back to the default", file.display());
+                            cfg.project = None;
+                        }
+                    }
+                }
                 Ok(cfg)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
@@ -251,36 +267,143 @@ impl Config {
         std::fs::write(path, serde_json::to_vec_pretty(self)?).with_context(|| format!("write {}", path.display()))
     }
 
-    fn migrate(&mut self) {
-        if self.projects.is_empty() {
-            self.projects.push(Project { name: DEFAULT_PROJECT.into(), output_root: self.output_root.take(), scope: Vec::new() });
+    /// Projects that lived in the config become files under the config folder, keeping their
+    /// name as the id so their favorites stay attached; the old default project's output
+    /// folder becomes the default output folder. Returns whether anything moved.
+    fn migrate(&mut self) -> bool {
+        if self.legacy_projects.is_empty() {
+            return false;
         }
-        if !self.projects.iter().any(|p| p.name == self.active_project) {
-            self.active_project = self.projects[0].name.clone();
+        let dir = crate::paths::projects_dir();
+        for v in std::mem::take(&mut self.legacy_projects) {
+            let Some(name) = v.get("name").and_then(|n| n.as_str()).map(str::to_string) else { continue };
+            let output_root = v.get("output_root").and_then(|o| o.as_str()).map(PathBuf::from);
+            let scope: Vec<PathBuf> = v.get("scope").and_then(|s| serde_json::from_value(s.clone()).ok()).unwrap_or_default();
+            if name == DEFAULT_PROJECT && scope.is_empty() {
+                if self.output_root.is_none() {
+                    self.output_root = output_root;
+                }
+                continue;
+            }
+            let file = dir.join(format!("{name}.{}", crate::project::EXTENSION));
+            let project = Project { id: name.clone(), name: name.clone(), output_root, scope };
+            if let Err(e) = project.save(&file) {
+                eprintln!("project {name}: {e:#}");
+                continue;
+            }
+            if !self.project_files.contains(&file) {
+                self.project_files.push(file.clone());
+            }
+            if self.legacy_active.as_deref() == Some(&name) {
+                self.project = Some(file);
+            }
         }
+        self.legacy_active = None;
+        true
     }
 
-    pub fn project(&self) -> &Project {
-        self.projects.iter().find(|p| p.name == self.active_project).unwrap_or(&self.projects[0])
+    /// The favorites key: the open project's id, or the default's.
+    pub fn project_id(&self) -> &str {
+        self.active.as_ref().map(|a| a.project.id.as_str()).unwrap_or(DEFAULT_PROJECT)
     }
 
-    pub fn project_mut(&mut self) -> &mut Project {
-        let i = self.projects.iter().position(|p| p.name == self.active_project).unwrap_or(0);
-        &mut self.projects[i]
+    pub fn project_name(&self) -> &str {
+        self.active.as_ref().map(|a| a.project.name.as_str()).unwrap_or("Default")
     }
 
     pub fn output_root(&self) -> Option<&Path> {
-        self.project().output_root.as_deref()
+        match &self.active {
+            Some(a) => a.project.output_root.as_deref(),
+            None => self.output_root.as_deref(),
+        }
     }
 
-    /// The folders the tree starts from under the active project: its scope, or every root.
+    /// Sets the output folder of the open project, or the default one, and writes it down.
+    pub fn set_output_root(&mut self, path: Option<PathBuf>) -> Result<()> {
+        match &mut self.active {
+            Some(a) => {
+                a.project.output_root = path;
+                a.project.save(&a.path)
+            }
+            None => {
+                self.output_root = path;
+                self.save()
+            }
+        }
+    }
+
+    /// The open project's scope; the default state has none.
+    pub fn scope(&self) -> &[PathBuf] {
+        self.active.as_ref().map(|a| a.project.scope.as_slice()).unwrap_or(&[])
+    }
+
+    /// Writes the open project's file after a change to it.
+    pub fn save_project(&self) -> Result<()> {
+        match &self.active {
+            Some(a) => a.project.save(&a.path),
+            None => Ok(()),
+        }
+    }
+
+    /// Opens a project file, remembers it and makes it the one in use.
+    pub fn open_project(&mut self, path: &Path) -> Result<()> {
+        let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let project = Project::load(&path)?;
+        if !self.project_files.contains(&path) {
+            self.project_files.push(path.clone());
+        }
+        self.project = Some(path.clone());
+        self.active = Some(ActiveProject { path, project });
+        self.save()
+    }
+
+    /// Writes a new project file and opens it.
+    pub fn create_project(&mut self, path: &Path, name: &str) -> Result<()> {
+        let mut path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        if path.extension().and_then(|e| e.to_str()) != Some(crate::project::EXTENSION) {
+            path.set_extension(crate::project::EXTENSION);
+        }
+        if path.exists() {
+            return Err(anyhow!("{} exists", path.display()));
+        }
+        Project::new(name).save(&path)?;
+        self.open_project(&path)
+    }
+
+    /// Back to the default state; the file stays known.
+    pub fn close_project(&mut self) -> Result<()> {
+        self.project = None;
+        self.active = None;
+        self.save()
+    }
+
+    /// Drops a project file from the known list, closing it if open. The file and its favorites
+    /// stay.
+    pub fn forget_project(&mut self, path: &Path) -> Result<()> {
+        self.project_files.retain(|p| p != path);
+        if self.project.as_deref() == Some(path) {
+            self.project = None;
+            self.active = None;
+        }
+        self.save()
+    }
+
+    /// A known project file by its path or, when readable, its name.
+    pub fn find_project(&self, key: &str) -> Option<PathBuf> {
+        let as_path = std::path::absolute(key).ok();
+        self.project_files
+            .iter()
+            .find(|p| as_path.as_deref() == Some(p) || Project::load(p).map(|x| x.name == key).unwrap_or(false) || crate::project::name_of_path(p) == key)
+            .cloned()
+    }
+
+    /// The folders the tree starts from: the open project's scope, or every root.
     pub fn scope_folders(&self) -> Vec<(String, PathBuf)> {
-        let project = self.project();
-        if project.scope.is_empty() {
+        let scope = self.scope();
+        if scope.is_empty() {
             self.roots.iter().map(|r| (r.name.clone(), r.path.clone())).collect()
         } else {
-            project
-                .scope
+            scope
                 .iter()
                 .map(|p| {
                     let name = match self.root_of(p) {

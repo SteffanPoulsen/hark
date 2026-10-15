@@ -88,6 +88,18 @@ fn main() -> eframe::Result {
     )
 }
 
+enum ProjectAction {
+    /// Back to the default state.
+    Default,
+    Open(PathBuf),
+    /// Pick a project file.
+    Browse,
+    /// Save a new project file.
+    New,
+    Close,
+    Forget(PathBuf),
+}
+
 enum TagAction {
     Color(usize, String),
     Rename(usize, String),
@@ -198,7 +210,7 @@ impl App {
         theme.apply(&cc.egui_ctx);
         cc.egui_ctx.set_zoom_factor(config.ui_zoom.clamp(0.5, 3.0));
         let mut db = Db::open().expect("library database");
-        db.set_project(&config.active_project);
+        db.set_project(config.project_id());
         let (player, audio_error) = match Player::open(config.audition_sample_rate) {
             Ok(p) => (Some(p), None),
             Err(e) => (None, Some(format!("{e:#}"))),
@@ -305,14 +317,14 @@ impl App {
         };
         if !self.search.trim().is_empty() {
             q.text = self.search.clone();
-            q.scope = self.config.project().scope.clone();
+            q.scope = self.config.scope().to_vec();
             q.limit = SEARCH_LIMIT;
         } else {
             match &self.location {
                 Some(Location::Folder(d)) => q.dir = Some(d.clone()),
                 Some(Location::Favorites) => {
                     q.favorites_only = true;
-                    q.scope = self.config.project().scope.clone();
+                    q.scope = self.config.scope().to_vec();
                 }
                 None => {
                     self.files.clear();
@@ -501,17 +513,17 @@ impl App {
         Some(Ok(req))
     }
 
-    /// What the export would write: length, channels, rate, depth and, for WAV, the rough size.
+    /// What the export would write: its length and, for WAV, the rough size.
     fn export_outcome(&self, req: &ExportRequest, f: &FileRecord) -> String {
         let Some(info) = &f.info else { return String::new() };
         let preset = req.effective_preset();
         let secs = req.selection.map(|s| s.end_secs - s.start_secs).unwrap_or(info.duration_secs);
-        let channels = if preset.mono.is_some() { 1 } else { info.channels };
-        let rate = preset.sample_rate.unwrap_or(info.sample_rate);
-        let mut out = format!("{} · {} ch · {:.1}k · {} bit", waveform::fmt_time(secs), channels, rate as f64 / 1000.0, preset.bits);
+        let mut out = format!("{} s", waveform::fmt_time(secs));
         if preset.format == hark_core::config::OutputFormat::Wav {
+            let channels = if preset.mono.is_some() { 1 } else { info.channels };
+            let rate = preset.sample_rate.unwrap_or(info.sample_rate);
             let bytes = secs * rate as f64 * channels as f64 * preset.bits as f64 / 8.0;
-            out.push_str(&if bytes >= 1e6 { format!(" · ≈ {:.1} MB", bytes / 1e6) } else { format!(" · ≈ {:.0} KB", bytes / 1e3) });
+            out.push_str(&if bytes >= 1e6 { format!("  ·  ≈ {:.1} MB", bytes / 1e6) } else { format!("  ·  ≈ {:.0} KB", bytes / 1e3) });
         }
         out
     }
@@ -697,26 +709,8 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP;
             ui.label(theme::semibold("hark").size(18.0).color(self.theme.accent));
-            let mut switch: Option<String> = None;
-            egui::ComboBox::from_id_salt("project")
-                .selected_text(theme::icon_text(icons::CUBE, &self.config.active_project, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER))
-                .show_ui(ui, |ui| {
-                    for p in self.config.projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>() {
-                        if ui.selectable_label(p == self.config.active_project, &p).clicked() {
-                            switch = Some(p);
-                        }
-                    }
-                    ui.separator();
-                    if ui.selectable_label(false, theme::icon_text(icons::PLUS, "new project", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
-                        switch = Some(String::new());
-                    }
-                });
-            if let Some(p) = switch {
-                if p.is_empty() {
-                    self.new_project();
-                } else {
-                    self.switch_project(&p);
-                }
+            if let Some(action) = self.project_menu(ui, "project", 0.0) {
+                self.apply_project_action(action);
             }
             let focused = ui.memory(|m| m.has_focus(self.search_id));
             let box_frame = egui::Frame::new()
@@ -939,7 +933,7 @@ impl App {
                         _ => format!("{}   ·   {n} files", d.display()),
                     }
                 }
-                Some(Location::Favorites) => format!("Favorites of {}   ·   {n} files", self.config.active_project),
+                Some(Location::Favorites) => format!("Favorites of {}   ·   {n} files", self.config.project_name()),
                 None => "pick a folder".to_string(),
             }
         };
@@ -1333,9 +1327,6 @@ impl App {
             key(ui, "level");
             ui.horizontal(|ui| edited |= preset_ui::normalize(ui, "card", p));
             ui.end_row();
-            key(ui, "trim");
-            ui.horizontal(|ui| edited |= preset_ui::trim_silence(ui, p));
-            ui.end_row();
         });
         if edited {
             self.preset_name = None;
@@ -1344,13 +1335,15 @@ impl App {
 
         let req = self.export_request();
         let file = self.selected.map(|i| self.files[i].clone());
-        let (target, outcome) = match (&req, &file) {
+        // The target row: the template's folder, the name field, the extension.
+        let (dir, ext, outcome) = match (&req, &file) {
             (Some(Ok(r)), Some(f)) => {
                 let rel = r.output_path();
                 let rel = rel.strip_prefix(&r.output_root).map(|p| p.to_path_buf()).unwrap_or(rel);
-                (rel.display().to_string(), self.export_outcome(r, f))
+                let dir = rel.parent().filter(|d| !d.as_os_str().is_empty()).map(|d| format!("{}/", d.display())).unwrap_or_default();
+                (dir, format!(".{}", r.effective_preset().format.extension()), self.export_outcome(r, f))
             }
-            _ => ("…".into(), "…".into()),
+            _ => (String::new(), String::new(), "…".into()),
         };
         let stem = file.as_ref().and_then(|f| f.path.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "file name".into());
         let out = self.config.output_root().map(|p| p.display().to_string());
@@ -1365,22 +1358,30 @@ impl App {
             };
             if folder.clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    self.config.project_mut().output_root = Some(path);
-                    let _ = self.config.save();
+                    if let Err(e) = self.config.set_output_root(Some(path)) {
+                        self.set_status(format!("output folder: {e:#}"), true);
+                    }
                 }
             }
             ui.end_row();
-            key(ui, "name");
+            key(ui, "to");
             ui.horizontal(|ui| {
-                ui.add_enabled(have, egui::TextEdit::singleline(&mut self.export_name).hint_text(stem).desired_width(value_w - 96.0).vertical_align(egui::Align::Center).min_size(egui::vec2(0.0, CONTROL_H)));
-                ui.add_enabled(have, egui::Checkbox::new(&mut self.overwrite, RichText::new("overwrite").size(12.5)));
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let dir_w = ui.fonts_mut(|f| f.layout_no_wrap(dir.clone(), FontId::proportional(12.5), theme.muted).size().x).min(value_w * 0.45);
+                ui.add_sized(egui::vec2(dir_w, CONTROL_H), egui::Label::new(RichText::new(&dir).color(theme.muted).size(12.5)).truncate()).on_hover_text("the preset's path template");
+                let ext_w = 34.0;
+                let name_w = (value_w - dir_w - ext_w - 4.0).max(60.0);
+                ui.add_enabled(have, egui::TextEdit::singleline(&mut self.export_name).hint_text(&stem).desired_width(name_w).vertical_align(egui::Align::Center).min_size(egui::vec2(0.0, CONTROL_H)));
+                ui.add_sized(egui::vec2(ext_w, CONTROL_H), egui::Label::new(RichText::new(&ext).color(theme.muted).size(12.5)));
             });
             ui.end_row();
-            key(ui, "to");
-            ui.add_enabled(have, small(target, theme.text)).on_hover_text("the preset's path template, under the output folder");
-            ui.end_row();
             key(ui, "writes");
-            ui.add_enabled(have, small(outcome, theme.text));
+            ui.horizontal(|ui| {
+                ui.add_enabled(have, small(outcome, theme.text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_enabled(have, egui::Checkbox::new(&mut self.overwrite, RichText::new("overwrite").size(12.5)));
+                });
+            });
             ui.end_row();
         });
         if let Some(Err(e)) = &req {
@@ -1464,29 +1465,70 @@ impl App {
         }
     }
 
-    fn switch_project(&mut self, name: &str) {
-        if !self.config.projects.iter().any(|p| p.name == name) {
-            return;
+    /// The project switcher: the default state, the known project files, and ways to open or
+    /// start one. `width` of zero lets the button size itself.
+    pub fn project_menu(&mut self, ui: &mut egui::Ui, id: &str, width: f32) -> Option<ProjectAction> {
+        let mut action = None;
+        let label = theme::icon_text(icons::CUBE, self.config.project_name(), 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER);
+        let mut combo = egui::ComboBox::from_id_salt(id).selected_text(label);
+        if width > 0.0 {
+            combo = combo.width(width);
         }
-        self.config.active_project = name.to_string();
-        self.db.set_project(name);
-        let _ = self.config.save();
+        combo.show_ui(ui, |ui| {
+            if ui.selectable_label(self.config.active.is_none(), "Default").clicked() {
+                action = Some(ProjectAction::Default);
+            }
+            for path in self.config.project_files.clone() {
+                let open = self.config.project.as_deref() == Some(&path);
+                let (name, missing) = match hark_core::Project::load(&path) {
+                    Ok(p) => (p.name, false),
+                    Err(_) => (hark_core::project::name_of_path(&path), true),
+                };
+                let text = if missing { RichText::new(format!("{name}  (missing)")).color(self.theme.muted) } else { RichText::new(name) };
+                if ui.add_enabled(!missing, egui::Button::selectable(open, text)).on_hover_text(path.display().to_string()).clicked() {
+                    action = Some(ProjectAction::Open(path));
+                }
+            }
+            ui.separator();
+            if ui.selectable_label(false, theme::icon_text(icons::FOLDER_OPEN, "open…", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
+                action = Some(ProjectAction::Browse);
+            }
+            if ui.selectable_label(false, theme::icon_text(icons::PLUS, "new…", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
+                action = Some(ProjectAction::New);
+            }
+        });
+        action
+    }
+
+    pub fn apply_project_action(&mut self, action: ProjectAction) {
+        let result = match action {
+            ProjectAction::Default | ProjectAction::Close => self.config.close_project(),
+            ProjectAction::Open(path) => self.config.open_project(&path),
+            ProjectAction::Forget(path) => self.config.forget_project(&path),
+            ProjectAction::Browse => match rfd::FileDialog::new().add_filter("hark project", &[hark_core::project::EXTENSION]).pick_file() {
+                Some(path) => self.config.open_project(&path),
+                None => return,
+            },
+            ProjectAction::New => {
+                let dialog = rfd::FileDialog::new().add_filter("hark project", &[hark_core::project::EXTENSION]).set_file_name(format!("project.{}", hark_core::project::EXTENSION));
+                let Some(path) = dialog.save_file() else { return };
+                let name = hark_core::project::name_of_path(&path);
+                let r = self.config.create_project(&path, &name);
+                if r.is_ok() {
+                    self.settings_page = settings::Page::Projects;
+                    self.settings_open = true;
+                }
+                r
+            }
+        };
+        if let Err(e) = result {
+            self.set_status(format!("project: {e:#}"), true);
+        }
+        self.db.set_project(self.config.project_id());
+        self.project_edit = None;
         self.location = None;
         self.list_dirty = true;
         self.expanded = self.config.scope_folders().into_iter().map(|(_, p)| p).collect();
-    }
-
-    fn new_project(&mut self) {
-        let mut name = "project".to_string();
-        let mut n = 2;
-        while self.config.projects.iter().any(|p| p.name == name) {
-            name = format!("project{n}");
-            n += 1;
-        }
-        self.config.projects.push(hark_core::Project { name: name.clone(), output_root: None, scope: Vec::new() });
-        self.switch_project(&name);
-        self.settings_page = settings::Page::Projects;
-        self.settings_open = true;
     }
 
     fn apply_tag_action(&mut self, action: TagAction) {
@@ -1644,7 +1686,7 @@ impl eframe::App for App {
         egui::Panel::bottom("status").frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(pad, 4))).show(ui, |ui| {
             self.ui_status(ui);
         });
-        egui::Panel::bottom("bottom").resizable(true).default_size(500.0).frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 8 })).show(ui, |ui| {
+        egui::Panel::bottom("bottom").resizable(true).default_size(440.0).frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 8 })).show(ui, |ui| {
             self.ui_bottom(ui);
         });
         egui::Panel::left("tree").resizable(true).default_size(250.0).frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin { left: 4, right: 4, top: 8, bottom: 8 })).show(ui, |ui| {
