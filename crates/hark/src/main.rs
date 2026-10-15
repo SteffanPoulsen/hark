@@ -1096,7 +1096,7 @@ impl App {
     /// Two cards side by side: the file with its waveform and transport, and the export.
     fn ui_bottom(&mut self, ui: &mut egui::Ui) {
         let card = egui::Frame::new().fill(self.theme.surface).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(theme::CARD_PAD));
-        egui::Panel::right("export").resizable(false).exact_size(EXPORT_CARD_W).frame(egui::Frame::new().inner_margin(Margin { left: theme::PAD, right: 0, top: 0, bottom: 0 })).show(ui, |ui| {
+        egui::Panel::right("export").resizable(false).exact_size(EXPORT_CARD_W).show_separator_line(false).frame(egui::Frame::new().inner_margin(Margin { left: theme::PAD, right: 0, top: 0, bottom: 0 })).show(ui, |ui| {
             card.show(ui, |ui| {
                 ui.set_min_height(ui.available_height());
                 self.ui_export_card(ui);
@@ -1395,14 +1395,18 @@ impl App {
         });
         rule(ui);
 
-        ui.label(RichText::new("Exported this session").color(theme.muted).size(12.5));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Exported this session").color(theme.muted).size(12.5));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let n = self.recent_exports.len();
+                ui.label(RichText::new(if n == 0 { "nothing yet".to_string() } else { n.to_string() }).color(theme.muted.gamma_multiply(0.7)).size(12.5));
+            });
+        });
         let root = self.config.output_root().map(|p| p.to_path_buf());
         let mut show: Option<PathBuf> = None;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let left = ui.available_height();
+        egui::ScrollArea::vertical().max_height(left).auto_shrink([false, true]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            if self.recent_exports.is_empty() {
-                ui.add(small("nothing yet".into(), theme.muted.gamma_multiply(0.6)));
-            }
             for (p, gain) in &self.recent_exports {
                 let shown = root.as_ref().and_then(|r| p.strip_prefix(r).ok()).map(|x| x.display().to_string()).unwrap_or_else(|| p.display().to_string());
                 let row = egui::Button::new(theme::icon_text(icons::CHECK, &shown, 12.5, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).frame(false).truncate().min_size(egui::vec2(ui.available_width(), 24.0));
