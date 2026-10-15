@@ -922,43 +922,39 @@ impl App {
             egui::Popup::open_id(ui.ctx(), popup.get_id());
         }
         let theme = self.theme.clone();
+        // The list scrolls before it can run off the window; Clear stays below it.
+        let max_h = ui.ctx().content_rect().height() - button.rect.bottom() - 90.0;
         popup.show(|ui| {
             theme::menu_items(ui);
-            ui.spacing_mut().item_spacing.y = 6.0;
-            // Two columns: the marks on the left, what the file is on the right.
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    changed |= theme::menu_check(ui, &mut self.filter.favorites, theme::icon_text(icons::STAR, "Favorites", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).changed();
-                    theme::menu_heading(ui, &theme, "Tags");
-                    for (k, t) in self.config.tags.clone().iter().enumerate() {
-                        let mut on = self.filter.tags.contains(&t.name);
-                        if theme::menu_check(ui, &mut on, RichText::new(&t.name).color(theme.color_of(k, Some(t)).gamma_multiply(1.3).to_opaque())).changed() {
-                            toggle_in(&mut self.filter.tags, t.name.clone());
-                            changed = true;
-                        }
+            ui.spacing_mut().item_spacing.y = 4.0;
+            egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                changed |= theme::menu_check(ui, &mut self.filter.favorites, theme::icon_text(icons::STAR, "Favorites", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).changed();
+                theme::menu_heading(ui, &theme, "Tags");
+                for (k, t) in self.config.tags.clone().iter().enumerate() {
+                    let mut on = self.filter.tags.contains(&t.name);
+                    if theme::menu_check(ui, &mut on, RichText::new(&t.name).color(theme.color_of(k, Some(t)).gamma_multiply(1.3).to_opaque())).changed() {
+                        toggle_in(&mut self.filter.tags, t.name.clone());
+                        changed = true;
                     }
-                });
-                ui.add_space(16.0);
-                ui.vertical(|ui| {
-                    theme::menu_heading(ui, &theme, "File type");
-                    for (name, _) in FILE_TYPES {
-                        let mut on = self.filter.types.contains(&name);
-                        if theme::menu_check(ui, &mut on, name).changed() {
-                            toggle_in(&mut self.filter.types, name);
-                            changed = true;
-                        }
+                }
+                theme::menu_heading(ui, &theme, "File type");
+                for (name, _) in FILE_TYPES {
+                    let mut on = self.filter.types.contains(&name);
+                    if theme::menu_check(ui, &mut on, name).changed() {
+                        toggle_in(&mut self.filter.types, name);
+                        changed = true;
                     }
-                    theme::menu_heading(ui, &theme, "Channels");
-                    for c in ChannelClass::ALL {
-                        let mut on = self.filter.channels.contains(&c);
-                        if theme::menu_check(ui, &mut on, c.name()).changed() {
-                            toggle_in(&mut self.filter.channels, c);
-                            changed = true;
-                        }
+                }
+                theme::menu_heading(ui, &theme, "Channels");
+                for c in ChannelClass::ALL {
+                    let mut on = self.filter.channels.contains(&c);
+                    if theme::menu_check(ui, &mut on, c.name()).changed() {
+                        toggle_in(&mut self.filter.channels, c);
+                        changed = true;
                     }
-                });
+                }
             });
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             if ui.add_enabled(n > 0, egui::Button::new("Clear")).clicked() {
                 self.filter.clear();
                 changed = true;

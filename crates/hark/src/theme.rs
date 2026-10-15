@@ -202,7 +202,7 @@ impl Theme {
             s.spacing.button_padding = egui::vec2(10.0, 5.0);
             s.spacing.interact_size = egui::vec2(40.0, 24.0);
             s.spacing.window_margin = Margin::same(12);
-            s.spacing.menu_margin = Margin::same(10);
+            s.spacing.menu_margin = Margin::symmetric(10, 12);
             s.spacing.indent = 16.0;
             s.spacing.icon_width = 18.0;
             s.spacing.icon_width_inner = 10.0;
@@ -241,7 +241,7 @@ pub fn tool_button_widget(icon: &str, label: &str) -> egui::Button<'static> {
 }
 
 /// The inset every row of a menu shares, so buttons, checks and headings start on one line.
-pub const MENU_INSET: f32 = 8.0;
+pub const MENU_INSET: f32 = 10.0;
 
 /// egui gives menu buttons a two-pixel padding; a menu of ours pads its rows alike.
 pub fn menu_items(ui: &mut egui::Ui) {
