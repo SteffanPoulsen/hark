@@ -185,10 +185,10 @@ impl Pcm {
         Pcm { sample_rate: self.sample_rate, channels: 1, samples: out }
     }
 
-    /// The span of sound inside `start..end` seconds: the first and last frame within
-    /// `TRIM_BELOW_PEAK_DB` of the span's own peak, with `TRIM_PAD_SECS` kept on each side
-    /// inside the span. Relative to the peak, so a quiet recording trims like a loud one and
-    /// a tail goes where it stops showing. `None` when the span is silent.
+    /// The span of sound inside `start..end` seconds: from the first to the last frame within
+    /// `TRIM_BELOW_PEAK_DB` of the span's own peak, which is where the waveform's drawing
+    /// starts and stops showing anything. Relative to the peak, so a quiet recording trims
+    /// like a loud one. `None` when the span is silent.
     pub fn sound_span(&self, start_secs: f64, end_secs: f64) -> Option<(f64, f64)> {
         let c = self.channels as usize;
         let (from, to) = (self.frame_at(start_secs), self.frame_at(end_secs).min(self.frames()));
@@ -206,15 +206,12 @@ impl Pcm {
         let first = frames.clone().position(loud)?;
         let last = frames.rposition(loud)?;
         let rate = self.sample_rate as f64;
-        let a = ((from + first) as f64 / rate - TRIM_PAD_SECS).max(start_secs);
-        let b = ((from + last + 1) as f64 / rate + TRIM_PAD_SECS).min(end_secs);
-        Some((a, b))
+        Some(((from + first) as f64 / rate, (from + last + 1) as f64 / rate))
     }
 }
 
-/// A trim cuts what stays this far below the span's peak, and keeps this much around the sound.
+/// A trim cuts what stays this far below the span's peak.
 pub const TRIM_BELOW_PEAK_DB: f64 = 40.0;
-pub const TRIM_PAD_SECS: f64 = 0.01;
 
 pub fn db_to_gain(db: f64) -> f32 {
     10f64.powf(db / 20.0) as f32
