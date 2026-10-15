@@ -534,18 +534,31 @@ fn run() -> Result<()> {
                 None => config.roots().iter().collect(),
             };
             let mut reports = Vec::new();
+            let mut failed = Vec::new();
             for r in roots {
-                let report = db.scan(&r.path, |_, _| {})?;
-                if !json {
-                    println!("{}: {} seen, {} added, {} updated, {} removed, {} errors", r.name, report.seen, report.added, report.updated, report.removed, report.errors.len());
-                    for (p, e) in &report.errors {
-                        println!("  {}: {e}", p.display());
+                match db.scan(&r.path, |_, _| {}) {
+                    Ok(report) => {
+                        if !json {
+                            println!("{}: {} seen, {} added, {} updated, {} removed, {} errors", r.name, report.seen, report.added, report.updated, report.removed, report.errors.len());
+                            for (p, e) in &report.errors {
+                                println!("  {}: {e}", p.display());
+                            }
+                        }
+                        reports.push((r.name.clone(), report));
+                    }
+                    Err(e) => {
+                        if !json {
+                            eprintln!("{}: {e:#}", r.name);
+                        }
+                        failed.push((r.name.clone(), format!("{e:#}")));
                     }
                 }
-                reports.push((r.name.clone(), report));
             }
+            let hashed = db.match_orphaned_marks(|_, _| {})?;
             if json {
-                print_json(&reports)?;
+                print_json(&serde_json::json!({ "roots": reports, "failed": failed, "hashed": hashed }))?;
+            } else if hashed > 0 {
+                println!("{hashed} files hashed so that moved files keep their marks");
             }
         }
         Cmd::Ls { dir } => {

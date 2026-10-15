@@ -726,10 +726,18 @@ impl App {
                 },
                 Done::Scanned(reports) => {
                     self.scanning = false;
-                    let total: usize = reports.iter().map(|(_, r)| r.seen).sum();
-                    let errors: usize = reports.iter().map(|(_, r)| r.errors.len()).sum();
-                    self.file_count = total;
-                    self.set_status(if errors > 0 { format!("{errors} files could not be read") } else { String::new() }, errors > 0);
+                    let scanned = reports.iter().filter_map(|(_, r)| r.as_ref().ok());
+                    self.file_count = scanned.clone().map(|r| r.seen).sum();
+                    let errors: usize = scanned.map(|r| r.errors.len()).sum();
+                    let failed: Vec<String> = reports.iter().filter_map(|(name, r)| r.as_ref().err().map(|e| format!("{name}: {e}"))).collect();
+                    let status = if !failed.is_empty() {
+                        failed.join("  ·  ")
+                    } else if errors > 0 {
+                        format!("{errors} files could not be read")
+                    } else {
+                        String::new()
+                    };
+                    self.set_status(status, errors > 0 || !failed.is_empty());
                     self.list_dirty = true;
                 }
             }

@@ -122,6 +122,8 @@ CREATE INDEX IF NOT EXISTS files_hash ON files(hash);
 CREATE INDEX IF NOT EXISTS files_name ON files(name COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS file_tags (hash TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY (hash, tag));
 CREATE TABLE IF NOT EXISTS favorites (project TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (project, hash));
+CREATE TABLE IF NOT EXISTS hashes (hash TEXT PRIMARY KEY, size INTEGER NOT NULL);
+INSERT OR IGNORE INTO hashes SELECT hash, size FROM files WHERE hash IS NOT NULL;
 ";
 
 const FAVORITES_BY_PROJECT: &str = "
@@ -293,8 +295,12 @@ impl Db {
         Ok(self.conn.query_row("SELECT count(*) FROM files WHERE dir = ?1", params![dir.to_string_lossy()], |r| r.get::<_, i64>(0))? as usize)
     }
 
-    /// Walks `root`, probes new and changed files, and drops rows whose file is gone.
+    /// Walks `root`, probes new and changed files, and drops rows whose file is gone. A root
+    /// that cannot be reached is an error, not an empty folder: its rows stay as they are.
     pub fn scan(&mut self, root: &Path, mut progress: impl FnMut(&Path, usize)) -> Result<ScanReport> {
+        if !root.is_dir() {
+            anyhow::bail!("{} is not reachable; its files are kept as last seen", root.display());
+        }
         let mut report = ScanReport::default();
         let (lo, hi) = below(root);
         let mut known: std::collections::HashMap<String, (u64, i64)> = {
@@ -368,6 +374,49 @@ impl Db {
         Ok(report)
     }
 
+    /// Hashes unhashed files until every tag and favorite whose file is unknown has found it
+    /// again, so a moved or renamed file carries its marks by content. Only files the size of
+    /// a missing one are read; a mark from before sizes were recorded has no size and admits
+    /// every unhashed file. Returns how many files were hashed; with no such marks that is
+    /// zero and nothing is read.
+    pub fn match_orphaned_marks(&self, mut progress: impl FnMut(&Path, usize)) -> Result<usize> {
+        let orphans: Vec<(String, Option<i64>)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT o.hash, h.size FROM (SELECT hash FROM file_tags UNION SELECT hash FROM favorites EXCEPT SELECT hash FROM files WHERE hash IS NOT NULL) o
+                 LEFT JOIN hashes h ON h.hash = o.hash",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        if orphans.is_empty() {
+            return Ok(0);
+        }
+        let any_size = orphans.iter().any(|(_, size)| size.is_none());
+        let sizes: std::collections::HashSet<i64> = orphans.iter().filter_map(|(_, size)| *size).collect();
+        let mut orphans: std::collections::HashSet<String> = orphans.into_iter().map(|(hash, _)| hash).collect();
+        let unhashed: Vec<(String, i64)> = {
+            let mut stmt = self.conn.prepare("SELECT path, size FROM files WHERE hash IS NULL AND error IS NULL ORDER BY path")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut hashed = 0;
+        for (path, size) in &unhashed {
+            if orphans.is_empty() {
+                break;
+            }
+            if !any_size && !sizes.contains(size) {
+                continue;
+            }
+            let path = Path::new(path);
+            let Ok(hash) = hash_file(path) else { continue };
+            self.record_hash(path, &hash)?;
+            orphans.remove(&hash);
+            hashed += 1;
+            progress(path, hashed);
+        }
+        Ok(hashed)
+    }
+
     pub fn forget_root(&self, root: &Path) -> Result<usize> {
         let (lo, hi) = below(root);
         Ok(self.conn.execute("DELETE FROM files WHERE path >= ?1 AND path < ?2", params![lo, hi])?)
@@ -379,8 +428,17 @@ impl Db {
             return Ok(h);
         }
         let hash = hash_file(path)?;
-        self.conn.execute("UPDATE files SET hash = ?2 WHERE path = ?1", params![path.to_string_lossy(), hash])?;
+        self.record_hash(path, &hash)?;
         Ok(hash)
+    }
+
+    /// Stores a computed hash on its row, and the row's size against the hash so a mark whose
+    /// file goes missing still knows how big that file was.
+    fn record_hash(&self, path: &Path, hash: &str) -> Result<()> {
+        let path = path.to_string_lossy();
+        self.conn.execute("UPDATE files SET hash = ?2 WHERE path = ?1", params![path, hash])?;
+        self.conn.execute("INSERT OR IGNORE INTO hashes SELECT hash, size FROM files WHERE path = ?1", params![path])?;
+        Ok(())
     }
 
     pub fn set_loudness(&self, path: &Path, lufs: f64, true_peak_dbfs: f64) -> Result<()> {
@@ -446,4 +504,72 @@ pub fn hash_file(path: &Path) -> Result<String> {
     let mut f = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     std::io::copy(&mut f, &mut hasher)?;
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh folder for one test, with a readable WAV per name whose content follows the name
+    /// and whose data is the given number of bytes.
+    fn library(test: &str, files: &[(&str, usize)]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("hark-library-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (name, bytes_of_data) in files {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let samples: Vec<u8> = name.bytes().cycle().take(*bytes_of_data).collect();
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"RIFF");
+            bytes.extend_from_slice(&(36 + samples.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(b"WAVEfmt ");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            for v in [1u16, 1] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            bytes.extend_from_slice(&48_000u32.to_le_bytes());
+            bytes.extend_from_slice(&96_000u32.to_le_bytes());
+            for v in [2u16, 16] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&samples);
+            std::fs::write(path, bytes).unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn marks_follow_a_moved_file() {
+        let root = library("moved", &[("a/one.wav", 400), ("a/two.wav", 400), ("a/three.wav", 600)]);
+        let mut db = Db::open_memory().unwrap();
+        db.scan(&root, |_, _| {}).unwrap();
+        let hash = db.ensure_hash(&root.join("a/one.wav")).unwrap();
+        db.set_tag(&hash, "hit", true).unwrap();
+        db.set_favorite(&hash, true).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        std::fs::rename(root.join("a/one.wav"), root.join("b/moved.wav")).unwrap();
+        db.scan(&root, |_, _| {}).unwrap();
+        let mut read = Vec::new();
+        db.match_orphaned_marks(|p, _| read.push(p.to_path_buf())).unwrap();
+        let moved = db.get(&root.join("b/moved.wav")).unwrap().unwrap();
+        assert_eq!(moved.tags, vec!["hit"]);
+        assert!(moved.favorite);
+        assert!(!read.contains(&root.join("a/three.wav")), "a file of another size is never read");
+        assert_eq!(db.match_orphaned_marks(|_, _| {}).unwrap(), 0, "nothing left to find");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_unreachable_root_keeps_its_rows() {
+        let root = library("unplugged", &[("one.wav", 400), ("two.wav", 400)]);
+        let mut db = Db::open_memory().unwrap();
+        db.scan(&root, |_, _| {}).unwrap();
+        let parked = root.with_extension("parked");
+        std::fs::rename(&root, &parked).unwrap();
+        assert!(db.scan(&root, |_, _| {}).is_err());
+        assert_eq!(db.search(&Query { under: Some(root.clone()), ..Query::default() }).unwrap().len(), 2);
+        std::fs::remove_dir_all(&parked).unwrap();
+    }
 }

@@ -47,7 +47,8 @@ pub enum Done {
     /// The analysis pass of a streamed file.
     Analyzed(PathBuf, Result<(Arc<Peaks>, Option<Loudness>), String>),
     Exported(Result<ExportResult, String>),
-    Scanned(Vec<(String, ScanReport)>),
+    /// One result per root, by name; a root that could not be scanned carries the reason.
+    Scanned(Vec<(String, Result<ScanReport, String>)>),
 }
 
 /// The one analysis pass in flight: a newer request replaces a waiting one and makes a
@@ -221,14 +222,9 @@ fn analyze(path: &Path, cached: Option<Arc<Peaks>>, abort: &dyn Fn() -> bool) ->
     Ok((peaks, meter.and_then(|m| m.finish())))
 }
 
-fn scan(roots: &[Root]) -> Vec<(String, ScanReport)> {
-    let mut out = Vec::new();
-    let Ok(mut db) = hark_core::Db::open() else { return out };
-    for r in roots {
-        match db.scan(&r.path, |_, _| {}) {
-            Ok(report) => out.push((r.name.clone(), report)),
-            Err(e) => out.push((r.name.clone(), ScanReport { errors: vec![(r.path.clone(), format!("{e:#}"))], ..Default::default() })),
-        }
-    }
+fn scan(roots: &[Root]) -> Vec<(String, Result<ScanReport, String>)> {
+    let Ok(mut db) = hark_core::Db::open() else { return Vec::new() };
+    let out = roots.iter().map(|r| (r.name.clone(), db.scan(&r.path, |_, _| {}).map_err(|e| format!("{e:#}")))).collect();
+    let _ = db.match_orphaned_marks(|_, _| {});
     out
 }
