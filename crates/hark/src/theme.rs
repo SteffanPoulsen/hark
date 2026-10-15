@@ -202,7 +202,7 @@ impl Theme {
             s.spacing.button_padding = egui::vec2(10.0, 5.0);
             s.spacing.interact_size = egui::vec2(40.0, 24.0);
             s.spacing.window_margin = Margin::same(12);
-            s.spacing.menu_margin = Margin::symmetric(10, 12);
+            s.spacing.menu_margin = Margin::symmetric(6, 8);
             s.spacing.indent = 16.0;
             s.spacing.icon_width = 18.0;
             s.spacing.icon_width_inner = 10.0;
@@ -246,15 +246,13 @@ pub const MENU_INSET: f32 = 10.0;
 /// egui gives menu buttons a two-pixel padding; a menu of ours pads its rows alike.
 pub fn menu_items(ui: &mut egui::Ui) {
     ui.spacing_mut().button_padding = egui::vec2(MENU_INSET, 5.0);
+    ui.spacing_mut().item_spacing.y = 2.0;
 }
 
-/// A check box on a menu row, inset like the buttons around it.
+/// A check box on a menu row: the row highlights across its width like a button's, with
+/// the box and text inset like a button's text.
 pub fn menu_check(ui: &mut egui::Ui, on: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response {
-    ui.horizontal(|ui| {
-        ui.add_space(MENU_INSET);
-        ui.add(Check::new(on, text))
-    })
-    .inner
+    ui.add(Check::new(on, text).menu_row())
 }
 
 /// A muted heading on a menu row.
@@ -270,11 +268,17 @@ pub fn menu_heading(ui: &mut egui::Ui, theme: &Theme, text: &str) {
 pub struct Check<'a> {
     on: &'a mut bool,
     text: egui::WidgetText,
+    menu_row: bool,
 }
 
 impl<'a> Check<'a> {
     pub fn new(on: &'a mut bool, text: impl Into<egui::WidgetText>) -> Self {
-        Check { on, text: text.into() }
+        Check { on, text: text.into(), menu_row: false }
+    }
+
+    pub fn menu_row(mut self) -> Self {
+        self.menu_row = true;
+        self
     }
 }
 
@@ -284,7 +288,10 @@ impl egui::Widget for Check<'_> {
         const GAP: f32 = 8.0;
         let galley = self.text.into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button);
         let text_w = if galley.is_empty() { 0.0 } else { galley.size().x + GAP };
-        let size = egui::vec2(BOX + text_w, BOX.max(galley.size().y).max(ui.spacing().interact_size.y));
+        let inset = if self.menu_row { MENU_INSET } else { 0.0 };
+        let content_h = BOX.max(galley.size().y).max(ui.spacing().interact_size.y);
+        let content_w = BOX + text_w + 2.0 * inset;
+        let size = egui::vec2(if self.menu_row { ui.available_width().max(content_w) } else { content_w }, content_h + if self.menu_row { 2.0 * ui.spacing().button_padding.y } else { 0.0 });
         let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
         if response.clicked() {
             *self.on = !*self.on;
@@ -292,8 +299,11 @@ impl egui::Widget for Check<'_> {
         }
         if ui.is_rect_visible(rect) {
             let visuals = ui.style().interact(&response);
+            if self.menu_row && (response.hovered() || response.has_focus()) {
+                ui.painter().rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+            }
             let accent = ui.visuals().selection.stroke.color;
-            let square = egui::Rect::from_center_size(egui::pos2(rect.left() + BOX / 2.0, rect.center().y), egui::Vec2::splat(BOX));
+            let square = egui::Rect::from_center_size(egui::pos2(rect.left() + inset + BOX / 2.0, rect.center().y), egui::Vec2::splat(BOX));
             let (fill, stroke) = if *self.on {
                 let fill = if response.hovered() { accent.gamma_multiply(1.2).to_opaque() } else { accent };
                 (fill, Stroke::new(1.0, fill))
