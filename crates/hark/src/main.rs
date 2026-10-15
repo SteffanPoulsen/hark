@@ -353,7 +353,7 @@ impl App {
         let (start, end) = self.wave.selection.unwrap_or((0.0, cur.duration_secs));
         match pcm.sound_span(start, end) {
             Some(span) => self.wave.selection = Some(span),
-            None => self.set_status(format!("Silent below {} dBFS; nothing to trim to", hark_core::pcm::TRIM_THRESHOLD_DBFS), true),
+            None => self.set_status("Silent; nothing to trim to", true),
         }
     }
 
@@ -1464,7 +1464,7 @@ impl App {
             if icon_btn(ui, icons::MAGNIFYING_GLASS_PLUS, false).on_hover_text("Zoom to selection (Z)").clicked() {
                 self.wave.zoom_to_selection();
             }
-            if icon_btn(ui, icons::ARROWS_IN_LINE_HORIZONTAL, false).on_hover_text(format!("Trim the selection to the sound (T): below {} dBFS cut, {} ms kept", hark_core::pcm::TRIM_THRESHOLD_DBFS, hark_core::pcm::TRIM_PAD_SECS * 1000.0)).clicked() {
+            if icon_btn(ui, icons::ARROWS_IN_LINE_HORIZONTAL, false).on_hover_text(format!("Trim the selection to the sound (T): what sits {} dB under its peak goes, {} ms stays around it", hark_core::pcm::TRIM_BELOW_PEAK_DB, hark_core::pcm::TRIM_PAD_SECS * 1000.0)).clicked() {
                 self.trim_selection();
             }
             group(ui);

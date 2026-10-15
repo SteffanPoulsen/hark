@@ -185,18 +185,24 @@ impl Pcm {
         Pcm { sample_rate: self.sample_rate, channels: 1, samples: out }
     }
 
-    /// The span of sound inside `start..end` seconds: the first and last frame with a sample
-    /// above `TRIM_THRESHOLD_DBFS`, with `TRIM_PAD_SECS` kept on each side inside the span.
-    /// `None` when the span is silent.
+    /// The span of sound inside `start..end` seconds: the first and last frame within
+    /// `TRIM_BELOW_PEAK_DB` of the span's own peak, with `TRIM_PAD_SECS` kept on each side
+    /// inside the span. Relative to the peak, so a quiet recording trims like a loud one and
+    /// a tail goes where it stops showing. `None` when the span is silent.
     pub fn sound_span(&self, start_secs: f64, end_secs: f64) -> Option<(f64, f64)> {
         let c = self.channels as usize;
         let (from, to) = (self.frame_at(start_secs), self.frame_at(end_secs).min(self.frames()));
         if to <= from {
             return None;
         }
-        let threshold = db_to_gain(TRIM_THRESHOLD_DBFS);
+        let span = &self.samples[from * c..to * c];
+        let peak = span.iter().fold(0f32, |m, s| m.max(s.abs()));
+        if peak <= 0.0 {
+            return None;
+        }
+        let threshold = peak * db_to_gain(-TRIM_BELOW_PEAK_DB);
         let loud = |f: &[f32]| f.iter().any(|s| s.abs() > threshold);
-        let mut frames = self.samples[from * c..to * c].chunks(c);
+        let mut frames = span.chunks(c);
         let first = frames.clone().position(loud)?;
         let last = frames.rposition(loud)?;
         let rate = self.sample_rate as f64;
@@ -206,8 +212,8 @@ impl Pcm {
     }
 }
 
-/// A trim cuts what stays below this level, and keeps this much around the sound.
-pub const TRIM_THRESHOLD_DBFS: f64 = -60.0;
+/// A trim cuts what stays this far below the span's peak, and keeps this much around the sound.
+pub const TRIM_BELOW_PEAK_DB: f64 = 40.0;
 pub const TRIM_PAD_SECS: f64 = 0.01;
 
 pub fn db_to_gain(db: f64) -> f32 {

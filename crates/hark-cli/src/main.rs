@@ -317,7 +317,7 @@ struct ExportArgs {
     /// Selection end in seconds.
     #[arg(long = "out")]
     end: Option<f64>,
-    /// Shrink the selection, or the whole file, to its sound: below -60 dBFS cut, 10 ms kept.
+    /// Shrink the selection, or the whole file, to its sound: what sits 40 dB under its peak goes, 10 ms stays around it.
     #[arg(long)]
     trim: bool,
     #[arg(long, default_value_t = 0.0)]

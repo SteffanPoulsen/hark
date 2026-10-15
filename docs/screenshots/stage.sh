@@ -7,7 +7,7 @@
 #   stage.sh shot [name [title w h]]   float the running window at the capture size and write <name>.png here
 #   stage.sh all       library, config, then hero.png and presets.png
 #
-# Everything lives under $STAGE (default /tmp/hark-stage): a fake home whose paths read
+# A shot lands beside this script, or in $OUT. Everything else lives under $STAGE (default /tmp/hark-stage): a fake home whose paths read
 # like a real setup, and XDG config, data and cache folders so the user's own hark config
 # is never touched. The window is floated and captured through Hyprland and grim.
 set -euo pipefail
@@ -210,8 +210,8 @@ shot() {
   refocus "$prev"
   sleep 2
   geo=$(hyprctl clients -j | python3 -I -c "import json,sys; c=[x for x in json.load(sys.stdin) if x['address']=='$addr'][0]; print(f\"{c['at'][0]},{c['at'][1]} {c['size'][0]}x{c['size'][1]}\")")
-  grim -g "$geo" "$here/$name.png"
-  echo "shot: $here/$name.png ($geo)"
+  grim -g "$geo" "${OUT:-$here}/$name.png"
+  echo "shot: ${OUT:-$here}/$name.png ($geo)"
 }
 
 case ${1:-all} in

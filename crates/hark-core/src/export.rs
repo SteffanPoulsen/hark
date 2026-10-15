@@ -135,7 +135,7 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
     let mut req = req.clone();
     if req.trim {
         let (start, end) = req.selection.map(|s| (s.start_secs, s.end_secs)).unwrap_or((0.0, source.duration_secs()));
-        let (start_secs, end_secs) = source.sound_span(start, end).ok_or_else(|| anyhow!("silent at {} dBFS; nothing to trim to", crate::pcm::TRIM_THRESHOLD_DBFS))?;
+        let (start_secs, end_secs) = source.sound_span(start, end).ok_or_else(|| anyhow!("silent; nothing to trim to"))?;
         req.selection = Some(Selection { start_secs, end_secs });
     }
     let req = &req;
