@@ -9,7 +9,8 @@ use hark_core::pcm::FadeShape;
 use hark_core::peaks::sample_columns;
 use hark_core::{Pcm, Peaks};
 
-const LANE_H: f32 = 20.0;
+/// Height of the fade lane above the wave.
+pub const LANE_H: f32 = 20.0;
 const HANDLE_W: f32 = 14.0;
 const HANDLE_GRAB_PX: f32 = 16.0;
 const EDGE_GRAB_PX: f32 = 8.0;
@@ -135,6 +136,18 @@ fn hit(state: &WaveState, lane: Rect, p: Pos2, duration: f64, x_of: &dyn Fn(f64)
     }
 }
 
+/// A fade handle: a triangle in the lane pointing into the fade, and a dashed drop line down
+/// the wave.
+fn handle(lane: Rect, rect: Rect, x: f32, pointing_right: bool, fill: Color32) -> Vec<Shape> {
+    let dir = if pointing_right { 1.0 } else { -1.0 };
+    let top = lane.top() + 3.0;
+    let bottom = lane.bottom() - 3.0;
+    vec![
+        Shape::convex_polygon(vec![Pos2::new(x, top), Pos2::new(x + dir * HANDLE_W, top), Pos2::new(x, bottom)], fill, Stroke::NONE),
+        Shape::Vec(Shape::dashed_line(&[Pos2::new(x, lane.bottom()), Pos2::new(x, rect.bottom())], Stroke::new(1.0, fill.gamma_multiply(0.6)), 4.0, 4.0)),
+    ]
+}
+
 /// A filled band between two polylines sharing x positions, as one mesh.
 fn band(xs: &[f32], top: &[f32], bottom: &[f32], color: Color32) -> Shape {
     let mut mesh = Mesh::default();
@@ -227,8 +240,13 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
     let visuals = ui.visuals().clone();
     painter.rect_filled(full, 4.0, visuals.extreme_bg_color);
     painter.rect_filled(lane, 0.0, visuals.faint_bg_color);
+    painter.text(lane.center(), Align2::CENTER_CENTER, "Fades", FontId::proportional(10.0), visuals.weak_text_color());
 
     let Some(peaks) = peaks else {
+        let idle = visuals.weak_text_color();
+        for s in handle(lane, rect, rect.left(), true, idle).into_iter().chain(handle(lane, rect, rect.right(), false, idle)) {
+            painter.add(s);
+        }
         painter.text(rect.center(), Align2::CENTER_CENTER, "no file", FontId::proportional(14.0), visuals.weak_text_color());
         return WaveEvent::None;
     };
@@ -302,23 +320,13 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
     if state.fade_out > 0.0 {
         painter.add(curve(b - state.fade_out, b, false));
     }
-    let handle = |x: f32, pointing_right: bool, hot: bool| {
-        let dir = if pointing_right { 1.0 } else { -1.0 };
-        let top = lane.top() + 3.0;
-        let bottom = lane.bottom() - 3.0;
-        let fill = if hot { Color32::WHITE } else { colors.fade };
-        vec![
-            Shape::convex_polygon(vec![Pos2::new(x, top), Pos2::new(x + dir * HANDLE_W, top), Pos2::new(x, bottom)], fill, Stroke::NONE),
-            Shape::Vec(Shape::dashed_line(&[Pos2::new(x, lane.bottom()), Pos2::new(x, rect.bottom())], Stroke::new(1.0, fill.gamma_multiply(0.6)), 4.0, 4.0)),
-        ]
-    };
-    for s in handle(x_of(a + state.fade_in), true, active == Some(Drag::FadeIn)) {
+    let fill = |hot: bool| if hot { Color32::WHITE } else { colors.fade };
+    for s in handle(lane, rect, x_of(a + state.fade_in), true, fill(active == Some(Drag::FadeIn))) {
         painter.add(s);
     }
-    for s in handle(x_of(b - state.fade_out), false, active == Some(Drag::FadeOut)) {
+    for s in handle(lane, rect, x_of(b - state.fade_out), false, fill(active == Some(Drag::FadeOut))) {
         painter.add(s);
     }
-    painter.text(lane.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, "Fades", FontId::proportional(10.0), visuals.weak_text_color());
 
     // Playhead.
     if let Some(t) = playhead {

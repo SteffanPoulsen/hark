@@ -1290,10 +1290,13 @@ impl App {
             ui.allocate_ui_with_layout(egui::vec2(wave_w, wave_h), egui::Layout::top_down(egui::Align::Min), |ui| {
                 event = waveform::show(ui, &mut self.wave, peaks.as_deref(), samples.as_deref(), duration, playhead, wave_h, &colors);
             });
+            // The readout sits level with the fade lane and the rail with the wave itself.
             ui.allocate_ui_with_layout(egui::vec2(FADER_W, wave_h), egui::Layout::top_down(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.y = 4.0;
-                ui.spacing_mut().slider_width = wave_h - 24.0;
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let readout = ui.allocate_response(egui::vec2(FADER_W, waveform::LANE_H), egui::Sense::hover()).on_hover_text("dB");
+                ui.spacing_mut().slider_width = wave_h - waveform::LANE_H;
                 let fader = ui.add(egui::Slider::new(&mut self.gain_db, -36.0..=12.0).vertical().show_value(false).trailing_fill(false)).on_hover_text("Audition gain; double-click resets");
+                ui.painter().text(egui::pos2(fader.rect.center().x, readout.rect.center().y), egui::Align2::CENTER_CENTER, format!("{:+.0}", self.gain_db), FontId::proportional(11.0), self.theme.muted);
                 if fader.double_clicked() {
                     self.gain_db = 0.0;
                 }
@@ -1302,7 +1305,6 @@ impl App {
                         p.set_gain(hark_core::pcm::db_to_gain(self.gain_db as f64));
                     }
                 }
-                ui.label(RichText::new(format!("{:+.0}", self.gain_db)).size(11.0).color(self.theme.muted)).on_hover_text("dB");
             });
         });
         if let WaveEvent::Seek(t) = event {
