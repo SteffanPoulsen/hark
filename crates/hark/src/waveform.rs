@@ -319,7 +319,10 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
     // Left-button interaction.
     let mut event = WaveEvent::None;
     if resp.drag_started_by(PointerButton::Primary) {
-        if let Some(p) = resp.interact_pointer_pos() {
+        // The drag is reported a few pixels after the press; a fast flick would otherwise miss
+        // the handle it started on.
+        let origin = ui.input(|i| i.pointer.press_origin()).or_else(|| resp.interact_pointer_pos());
+        if let Some(p) = origin {
             let t = t_of(p.x).clamp(0.0, duration);
             state.drag = match hit(state, lane, p, &x_of) {
                 Some(d) => Some(d),
