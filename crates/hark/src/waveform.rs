@@ -58,12 +58,16 @@ impl WaveState {
         self.drag = None;
     }
 
-    pub fn clamp_fades(&mut self) {
-        if let Some((a, b)) = self.selection {
-            let len = (b - a).max(0.0);
-            self.fade_in = self.fade_in.clamp(0.0, len);
-            self.fade_out = self.fade_out.clamp(0.0, len - self.fade_in);
-        }
+    /// The span the fades hang off: the selection, or the whole file.
+    pub fn bounds(&self, duration: f64) -> (f64, f64) {
+        self.selection.unwrap_or((0.0, duration))
+    }
+
+    pub fn clamp_fades(&mut self, duration: f64) {
+        let (a, b) = self.bounds(duration);
+        let len = (b - a).max(0.0);
+        self.fade_in = self.fade_in.clamp(0.0, len);
+        self.fade_out = self.fade_out.clamp(0.0, len - self.fade_in);
     }
 
     pub fn zoom_to_selection(&mut self) {
@@ -93,8 +97,8 @@ impl WaveState {
 }
 
 /// What the pointer would grab at `p`, before any drag starts.
-fn hit(state: &WaveState, lane: Rect, p: Pos2, x_of: &dyn Fn(f64) -> f32) -> Option<Drag> {
-    let (a, b) = state.selection?;
+fn hit(state: &WaveState, lane: Rect, p: Pos2, duration: f64, x_of: &dyn Fn(f64) -> f32) -> Option<Drag> {
+    let (a, b) = state.bounds(duration);
     if lane.contains(p) {
         let din = (p.x - x_of(a + state.fade_in)).abs();
         let dout = (p.x - x_of(b - state.fade_out)).abs();
@@ -106,6 +110,7 @@ fn hit(state: &WaveState, lane: Rect, p: Pos2, x_of: &dyn Fn(f64) -> f32) -> Opt
             None
         };
     }
+    state.selection?;
     if (p.x - x_of(a)).abs() <= EDGE_GRAB_PX {
         Some(Drag::Start)
     } else if (p.x - x_of(b)).abs() <= EDGE_GRAB_PX {
@@ -238,7 +243,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
     }
 
     // Selection, fades, handles.
-    let hovered_hit = resp.hover_pos().and_then(|p| hit(state, lane, p, &x_of));
+    let hovered_hit = resp.hover_pos().and_then(|p| hit(state, lane, p, duration, &x_of));
     let active = state.drag.or(hovered_hit);
     if let Some((a, b)) = state.selection {
         let xa = x_of(a).clamp(rect.left(), rect.right());
@@ -248,42 +253,42 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
         let edge = |which: Drag| if active == Some(which) { Stroke::new(2.5, Color32::WHITE) } else { Stroke::new(1.0, colors.selection) };
         painter.vline(xa, rect.y_range(), edge(Drag::Start));
         painter.vline(xb, rect.y_range(), edge(Drag::End));
-
-        let curve = |from: f64, to: f64, rising: bool| {
-            let n = 32;
-            let pts: Vec<Pos2> = (0..=n)
-                .map(|i| {
-                    let t = i as f32 / n as f32;
-                    let g = state.fade_shape.gain(if rising { t } else { 1.0 - t });
-                    Pos2::new(x_of(from + (to - from) * t as f64), rect.bottom() - g * rect.height())
-                })
-                .collect();
-            Shape::line(pts, Stroke::new(1.5, colors.fade))
-        };
-        if state.fade_in > 0.0 {
-            painter.add(curve(a, a + state.fade_in, true));
-        }
-        if state.fade_out > 0.0 {
-            painter.add(curve(b - state.fade_out, b, false));
-        }
-        let handle = |x: f32, pointing_right: bool, hot: bool| {
-            let dir = if pointing_right { 1.0 } else { -1.0 };
-            let top = lane.top() + 3.0;
-            let bottom = lane.bottom() - 3.0;
-            let fill = if hot { Color32::WHITE } else { colors.fade };
-            vec![
-                Shape::convex_polygon(vec![Pos2::new(x, top), Pos2::new(x + dir * HANDLE_W, top), Pos2::new(x, bottom)], fill, Stroke::NONE),
-                Shape::Vec(Shape::dashed_line(&[Pos2::new(x, lane.bottom()), Pos2::new(x, rect.bottom())], Stroke::new(1.0, fill.gamma_multiply(0.6)), 4.0, 4.0)),
-            ]
-        };
-        for s in handle(x_of(a + state.fade_in), true, active == Some(Drag::FadeIn)) {
-            painter.add(s);
-        }
-        for s in handle(x_of(b - state.fade_out), false, active == Some(Drag::FadeOut)) {
-            painter.add(s);
-        }
-        painter.text(lane.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, "fades", FontId::proportional(10.0), visuals.weak_text_color());
     }
+    let (a, b) = state.bounds(duration);
+    let curve = |from: f64, to: f64, rising: bool| {
+        let n = 32;
+        let pts: Vec<Pos2> = (0..=n)
+            .map(|i| {
+                let t = i as f32 / n as f32;
+                let g = state.fade_shape.gain(if rising { t } else { 1.0 - t });
+                Pos2::new(x_of(from + (to - from) * t as f64), rect.bottom() - g * rect.height())
+            })
+            .collect();
+        Shape::line(pts, Stroke::new(1.5, colors.fade))
+    };
+    if state.fade_in > 0.0 {
+        painter.add(curve(a, a + state.fade_in, true));
+    }
+    if state.fade_out > 0.0 {
+        painter.add(curve(b - state.fade_out, b, false));
+    }
+    let handle = |x: f32, pointing_right: bool, hot: bool| {
+        let dir = if pointing_right { 1.0 } else { -1.0 };
+        let top = lane.top() + 3.0;
+        let bottom = lane.bottom() - 3.0;
+        let fill = if hot { Color32::WHITE } else { colors.fade };
+        vec![
+            Shape::convex_polygon(vec![Pos2::new(x, top), Pos2::new(x + dir * HANDLE_W, top), Pos2::new(x, bottom)], fill, Stroke::NONE),
+            Shape::Vec(Shape::dashed_line(&[Pos2::new(x, lane.bottom()), Pos2::new(x, rect.bottom())], Stroke::new(1.0, fill.gamma_multiply(0.6)), 4.0, 4.0)),
+        ]
+    };
+    for s in handle(x_of(a + state.fade_in), true, active == Some(Drag::FadeIn)) {
+        painter.add(s);
+    }
+    for s in handle(x_of(b - state.fade_out), false, active == Some(Drag::FadeOut)) {
+        painter.add(s);
+    }
+    painter.text(lane.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, "fades", FontId::proportional(10.0), visuals.weak_text_color());
 
     // Playhead.
     if let Some(t) = playhead {
@@ -324,7 +329,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
         let origin = ui.input(|i| i.pointer.press_origin()).or_else(|| resp.interact_pointer_pos());
         if let Some(p) = origin {
             let t = t_of(p.x).clamp(0.0, duration);
-            state.drag = match hit(state, lane, p, &x_of) {
+            state.drag = match hit(state, lane, p, duration, &x_of) {
                 Some(d) => Some(d),
                 None if lane.contains(p) => None,
                 None => match state.selection {
@@ -359,18 +364,10 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
                         state.selection = Some((na, na + len));
                     }
                 }
-                Drag::FadeIn => {
-                    if let Some((a, _)) = state.selection {
-                        state.fade_in = (t - a).max(0.0);
-                    }
-                }
-                Drag::FadeOut => {
-                    if let Some((_, b)) = state.selection {
-                        state.fade_out = (b - t).max(0.0);
-                    }
-                }
+                Drag::FadeIn => state.fade_in = (t - state.bounds(duration).0).max(0.0),
+                Drag::FadeOut => state.fade_out = (state.bounds(duration).1 - t).max(0.0),
             }
-            state.clamp_fades();
+            state.clamp_fades(duration);
         }
     }
     if resp.drag_stopped_by(PointerButton::Primary) {

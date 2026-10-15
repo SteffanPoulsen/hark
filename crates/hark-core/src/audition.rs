@@ -46,7 +46,8 @@ impl Clip {
 }
 
 enum Cmd {
-    Play(Clip),
+    /// A clip and the frame to start from.
+    Play(Clip, usize),
     Stop,
     Seek(usize),
 }
@@ -108,9 +109,9 @@ impl Mixer {
     fn fill(&mut self, out: &mut [f32]) {
         while let Ok(cmd) = self.rx.try_recv() {
             match cmd {
-                Cmd::Play(clip) => {
+                Cmd::Play(clip, from) => {
                     self.retire();
-                    let pos = clip.start;
+                    let pos = from.clamp(clip.start, clip.end);
                     self.voice = Some(Voice { clip, pos, age: 0 });
                     self.shared.playing.store(true, Ordering::Relaxed);
                 }
@@ -222,7 +223,13 @@ impl Player {
     }
 
     pub fn play(&self, clip: Clip) {
-        let _ = self.tx.send(Cmd::Play(clip));
+        let from = clip.start;
+        self.play_from(clip, from);
+    }
+
+    /// Plays `clip` from a frame inside it, with its fades where they would be from `start`.
+    pub fn play_from(&self, clip: Clip, from: usize) {
+        let _ = self.tx.send(Cmd::Play(clip, from));
     }
 
     pub fn stop(&self) {

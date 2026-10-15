@@ -16,8 +16,10 @@ pub struct Theme {
     pub line: Color32,
     pub muted: Color32,
     pub text: Color32,
+    /// The brand color: logo, focus, the export button, the waveform, stars.
     pub accent: Color32,
     pub accent_soft: Color32,
+    /// The cool counterpart for the selection and fades over the waveform.
     pub accent2: Color32,
     pub ok: Color32,
     pub warn: Color32,
@@ -59,11 +61,11 @@ impl Default for Theme {
             line: hex("#3a3a3a").unwrap(),
             muted: hex("#9a9a9a").unwrap(),
             text: hex("#dcddde").unwrap(),
-            accent: hex("#8a7cf0").unwrap(),
-            accent_soft: hex("#2e2a4a").unwrap(),
-            accent2: hex("#e0a04a").unwrap(),
+            accent: hex("#e3a447").unwrap(),
+            accent_soft: hex("#3d3119").unwrap(),
+            accent2: hex("#5aa9d6").unwrap(),
             ok: hex("#6fbf73").unwrap(),
-            warn: hex("#e7b643").unwrap(),
+            warn: hex("#e8c75c").unwrap(),
             err: hex("#f05a5a").unwrap(),
             tag_colors: Self::default_tag_colors(),
         }

@@ -410,28 +410,21 @@ impl App {
         let (Some(player), Some(cur)) = (&self.player, &self.current) else { return };
         let rate = cur.device.sample_rate as f64;
         let total = cur.device.frames();
+        let frames = |t: f64| ((t * rate) as usize).min(total);
+        // The fades belong to the selection, or to the whole file without one. A seek outside
+        // the selection auditions the file from there without them.
         let (start, end) = match self.wave.selection {
-            Some((a, b)) => ((a * rate) as usize, ((b * rate) as usize).min(total)),
+            Some((a, b)) => (frames(a), frames(b)),
             None => (0, total),
         };
-        let start = match from_secs {
-            Some(t) => ((t * rate) as usize).clamp(0, total),
-            None => start,
-        };
-        let outside = from_secs.is_some() && self.wave.selection.map(|(a, b)| start < (a * rate) as usize || start >= (b * rate) as usize).unwrap_or(true);
-        let end = if outside { total } else { end };
-        let in_selection = self.wave.selection.is_some() && !outside;
-        let sel_start = self.wave.selection.map(|(a, _)| (a * rate) as usize).unwrap_or(0);
-        let (fade_in, fade_out) = if in_selection { ((self.wave.fade_in * rate) as usize, (self.wave.fade_out * rate) as usize) } else { (0, 0) };
-        player.play(Clip {
-            pcm: cur.device.clone(),
-            start,
-            end: end.max(start),
-            looped: self.loop_on,
-            fade_in: if in_selection && start > sel_start { 0 } else { fade_in },
-            fade_out,
-            fade_shape: self.wave.fade_shape,
-        });
+        let from = from_secs.map(frames).unwrap_or(start);
+        let inside = from >= start && from < end;
+        let (start, end) = if inside { (start, end) } else { (from, total) };
+        let (fade_in, fade_out) = if inside { (frames(self.wave.fade_in), frames(self.wave.fade_out)) } else { (0, 0) };
+        player.play_from(
+            Clip { pcm: cur.device.clone(), start, end: end.max(start), looped: self.loop_on, fade_in, fade_out, fade_shape: self.wave.fade_shape },
+            from,
+        );
     }
 
     fn stop(&self) {
@@ -834,7 +827,7 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let selected = self.location == Some(Location::Favorites);
             let count = if self.fav_count > 0 { Some(self.fav_count.to_string()) } else { None };
-            let (row, _) = self.tree_row(ui, 0, None, (icons::STAR, theme::ICONS_FILL), self.theme.accent2, "Favorites", selected, count);
+            let (row, _) = self.tree_row(ui, 0, None, (icons::STAR, theme::ICONS_FILL), self.theme.accent, "Favorites", selected, count);
             if row.clicked() {
                 self.location = Some(Location::Favorites);
                 self.search.clear();
@@ -1003,8 +996,8 @@ impl App {
                     let (_, star) = row.col(|ui| {
                         let hot = ui.rect_contains_pointer(ui.max_rect());
                         let color = match (f.favorite, hot) {
-                            (true, true) => theme.accent2.gamma_multiply(1.4).to_opaque(),
-                            (true, false) | (false, true) => theme.accent2,
+                            (true, true) => theme.accent.gamma_multiply(1.4).to_opaque(),
+                            (true, false) | (false, true) => theme.accent,
                             (false, false) => theme.muted.gamma_multiply(0.7),
                         };
                         let icon = if f.favorite || hot { theme::icon_fill(icons::STAR) } else { theme::icon(icons::STAR) };
@@ -1285,7 +1278,7 @@ impl App {
                     ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::Linear, "linear");
                     ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::Logarithmic, "log");
                 });
-            self.wave.clamp_fades();
+            self.wave.clamp_fades(duration);
         });
     }
 
