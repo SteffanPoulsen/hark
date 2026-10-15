@@ -18,7 +18,7 @@ Auditioning a big library in a DAW means importing first, and in a file manager 
 - **Library, not import.** Folders stay where they are and are never modified. The list shows duration, channels, rate, bit depth, codec and loudness; search covers everything, and a filter narrows by favorites, tags, type and channels.
 - **Favorites and tags** from the keyboard. Tags are yours to define, with a colour each. Marks key on the file's content, so a renamed or moved file keeps them.
 - **Projects.** A `.hark` file beside the game holds its library folders, its output folder and its own favorites. Switch between games from the top bar.
-- **Waveform selection with fades.** Drag a region or trim it to the sound, set fade in and out, zoom, loop, seek by clicking, and scale the level with the fader beside the waveform.
+- **Waveform selection with fades.** Drag a region or trim it to the sound, step through the takes a recording holds with Left and Right, set fade in and out, zoom, loop, seek by clicking, and scale the level with the fader beside the waveform.
 - **Preset-driven export.** WAV or FLAC, bit depth with dither, resampling, mono downmix, peak or EBU R128 loudness normalisation under a true-peak ceiling, and a file name template. Override any of it for one export.
 - **An origin inside every export.** A `hark` RIFF chunk and a BWF `bext` description in WAV, an APPLICATION block and a Vorbis comment in FLAC: source path and hash, pack, selection, fades, preset and measured gain. `hark-cli reexport` runs that recipe again with changes.
 - **A CLI for all of it.** `hark-cli` exposes the same core with `--json` on every command, so a script or an agent can search, mark, analyse and export without a window.
@@ -42,6 +42,7 @@ Start `hark`, add a library folder with the button under the tree, pick a folder
 | Key | Action |
 |---|---|
 | Up / Down, PageUp / PageDown, Home / End | Move through the list, playing each file when autoplay is on |
+| Left / Right | Select the previous or next take in the file, the spans of sound parted by silence, playing it when autoplay is on |
 | Space | Play the selection or the whole file; stop when playing |
 | Enter | Play from the start |
 | Escape | Stop |
@@ -66,6 +67,7 @@ hark-cli search footstep gravel --tag sfx --tag foley --type wav --channels mono
 hark-cli tag "Footsteps/gravel_03.wav" +sfx +foley
 hark-cli fav "Footsteps/gravel_03.wav"
 hark-cli analyze "Footsteps/gravel_03.wav" --store
+hark-cli takes "Swords/sword_hits_take03.wav" --json
 hark-cli projects new ~/Projects/game/MyGame.hark --output ~/Projects/game/Assets/Audio
 hark-cli roots add ~/Audio/Libraries/Footsteps
 hark-cli tags add footstep --color '#79b86a'

@@ -208,10 +208,44 @@ impl Pcm {
         let rate = self.sample_rate as f64;
         Some(((from + first) as f64 / rate, (from + last + 1) as f64 / rate))
     }
+
+    /// The spans of sound in the file, in seconds: runs of frames within `TRIM_BELOW_PEAK_DB`
+    /// of the file's peak, where a silence of `TAKE_GAP_SECS` or more ends one, so a
+    /// recording of several takes with silence between them gives one span per take.
+    pub fn takes(&self) -> Vec<(f64, f64)> {
+        let c = self.channels as usize;
+        let peak = self.samples.iter().fold(0f32, |m, s| m.max(s.abs()));
+        if peak <= 0.0 {
+            return Vec::new();
+        }
+        let threshold = peak * db_to_gain(-TRIM_BELOW_PEAK_DB);
+        let rate = self.sample_rate as f64;
+        let gap = (TAKE_GAP_SECS * rate) as usize;
+        let mut out = Vec::new();
+        let mut start = None;
+        let mut last_loud = 0;
+        for (i, f) in self.samples.chunks(c).enumerate() {
+            if f.iter().any(|s| s.abs() > threshold) {
+                start.get_or_insert(i);
+                last_loud = i + 1;
+            } else if let Some(s) = start {
+                if i - last_loud >= gap {
+                    out.push((s, last_loud));
+                    start = None;
+                }
+            }
+        }
+        if let Some(s) = start {
+            out.push((s, last_loud));
+        }
+        out.into_iter().map(|(a, b)| (a as f64 / rate, b as f64 / rate)).collect()
+    }
 }
 
 /// A trim cuts what stays this far below the span's peak.
 pub const TRIM_BELOW_PEAK_DB: f64 = 40.0;
+/// A silence at least this long parts two takes.
+pub const TAKE_GAP_SECS: f64 = 0.1;
 
 pub fn db_to_gain(db: f64) -> f32 {
     10f64.powf(db / 20.0) as f32

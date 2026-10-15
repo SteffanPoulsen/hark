@@ -211,6 +211,8 @@ struct App {
     current: Option<Arc<Loaded>>,
     wave: WaveState,
     open_region: Option<(PathBuf, OpenRegion)>,
+    /// The takes of the file they were found in, kept for the arrow keys.
+    takes: Option<(PathBuf, Vec<(f64, f64)>)>,
 
     autoplay: bool,
     loop_on: bool,
@@ -297,6 +299,7 @@ impl App {
             current: None,
             wave: WaveState::default(),
             open_region: None,
+            takes: None,
             autoplay: true,
             loop_on: false,
             transport_h: 34.0,
@@ -343,6 +346,39 @@ impl App {
     }
 
     /// A message holds the footer for a while, then the key hints come back.
+    /// Selects the next or previous take in the file, the takes being its spans of sound
+    /// parted by silence, and plays it when autoplay is on: Up and Down browse the list, Left
+    /// and Right browse inside a file.
+    fn step_take(&mut self, dir: i32) {
+        let Some(cur) = &self.current else { return };
+        let Source::Whole(pcm) = &cur.source else {
+            self.set_status("Takes need the file decoded whole; this one streams", true);
+            return;
+        };
+        if self.takes.as_ref().map(|(p, _)| *p != cur.path).unwrap_or(true) {
+            self.takes = Some((cur.path.clone(), pcm.takes()));
+        }
+        let duration = cur.duration_secs;
+        let takes = &self.takes.as_ref().expect("just found").1;
+        let eps = 1e-3;
+        let next = match (self.wave.selection, dir > 0) {
+            (None, true) => takes.first().copied(),
+            (None, false) => takes.last().copied(),
+            (Some((a, _)), true) => takes.iter().find(|t| t.0 > a + eps).copied(),
+            (Some((a, _)), false) => takes.iter().rev().find(|t| t.0 < a - eps).copied(),
+        };
+        if takes.is_empty() {
+            self.set_status("Silent; no takes", true);
+            return;
+        }
+        let Some(take) = next else { return };
+        self.wave.selection = Some(take);
+        self.wave.reveal(take, duration);
+        if self.autoplay {
+            self.play(None);
+        }
+    }
+
     /// Shrinks the selection, or the whole file, to the sound in it.
     fn trim_selection(&mut self) {
         let Some(cur) = &self.current else { return };
@@ -713,6 +749,12 @@ impl App {
         }
         if pressed(Key::ArrowUp) && n > 0 {
             go(self, self.selected.map(|i| i.saturating_sub(1)).unwrap_or(0));
+        }
+        if pressed(Key::ArrowRight) {
+            self.step_take(1);
+        }
+        if pressed(Key::ArrowLeft) {
+            self.step_take(-1);
         }
         if pressed(Key::PageDown) && n > 0 {
             go(self, self.selected.map(|i| (i + 10).min(n - 1)).unwrap_or(0));
@@ -1824,7 +1866,7 @@ impl App {
     fn ui_status(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if self.status.is_empty() {
-                for (key, action) in [("Space", "Play"), ("↑ ↓", "Audition"), ("F", "Favorite"), ("1–9", "Tags"), ("[ ]", "Selection"), ("E", "Export")] {
+                for (key, action) in [("Space", "Play"), ("↑ ↓", "Audition"), ("← →", "Takes"), ("F", "Favorite"), ("1–9", "Tags"), ("[ ]", "Selection"), ("E", "Export")] {
                     self.key_hint(ui, key, action);
                 }
             } else {

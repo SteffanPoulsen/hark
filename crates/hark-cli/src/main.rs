@@ -62,6 +62,8 @@ enum Cmd {
     },
     /// Everything known about a file: probe, library record, and the origin it carries if hark exported it.
     Inspect { file: PathBuf },
+    /// The spans of sound in a file, parted by silence: the takes a recording holds
+    Takes { file: PathBuf },
     /// Measure loudness and peaks.
     Analyze {
         file: PathBuf,
@@ -608,6 +610,17 @@ fn run() -> Result<()> {
                 print_json(&l)?;
             } else {
                 println!("{:.2} LUFS{} · true peak {:.2} dBTP · sample peak {:.2} dBFS{}", l.integrated_lufs, if l.momentary { " (momentary max)" } else { "" }, l.true_peak_dbfs, l.sample_peak_dbfs, l.range_lu.map(|r| format!(" · range {r:.1} LU")).unwrap_or_default());
+            }
+        }
+        Cmd::Takes { file } => {
+            let file = abs(&file)?;
+            let takes = hark_core::decode(&file)?.takes();
+            if json {
+                print_json(&takes.iter().map(|(a, b)| serde_json::json!({ "start_secs": a, "end_secs": b })).collect::<Vec<_>>())?;
+            } else {
+                for (k, (a, b)) in takes.iter().enumerate() {
+                    println!("{:>3}  {a:.3} - {b:.3}  ({:.3} s)", k + 1, b - a);
+                }
             }
         }
         Cmd::Tag { file, changes } => {

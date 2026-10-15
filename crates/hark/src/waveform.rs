@@ -85,6 +85,23 @@ impl WaveState {
         self.fade_out = self.fade_out.clamp(0.0, len - self.fade_in);
     }
 
+    /// Pans the view, keeping its width, until the span is inside it; a span wider than the
+    /// view becomes the view.
+    pub fn reveal(&mut self, span: (f64, f64), duration: f64) {
+        let (v0, v1) = self.view;
+        let w = v1 - v0;
+        if span.0 >= v0 && span.1 <= v1 {
+            return;
+        }
+        if span.1 - span.0 >= w {
+            let pad = (span.1 - span.0) * 0.05;
+            self.view = (span.0 - pad, span.1 + pad);
+            return;
+        }
+        let start = (span.0 - w * 0.1).min(duration - w).max(0.0);
+        self.view = (start, start + w);
+    }
+
     pub fn zoom_to_selection(&mut self) {
         if let Some((a, b)) = self.selection {
             if b > a {
