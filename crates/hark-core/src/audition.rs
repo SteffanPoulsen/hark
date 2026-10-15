@@ -27,6 +27,8 @@ const STREAM_AHEAD_SECS: f64 = 4.0;
 const STREAM_PRIME_SECS: f64 = 2.0;
 const STREAM_POLL: Duration = Duration::from_millis(5);
 const RESAMPLE_CHUNK: usize = 1024;
+/// Source frames decoded on each side of a resampled span as filter context.
+const RESAMPLE_MARGIN: usize = 2048;
 
 #[derive(Clone)]
 pub enum Source {
@@ -536,12 +538,16 @@ impl StreamJob<'_> {
         loop {
             let src_from = src_of(from);
             let src_end = src_of(self.bounds.end).min(reader.frames.unwrap_or(u64::MAX));
-            let mut skip = src_from.saturating_sub(reader.seek(src_from)?) as usize;
-            let mut src_left = src_end.saturating_sub(src_from) as usize;
+            // The resampler sees audio on both sides of the span so the frames at a loop
+            // boundary are not filtered against silence; the margin's output is dropped.
+            let lead = if resampler.is_some() { (RESAMPLE_MARGIN as u64).min(src_from) } else { 0 };
+            let tail = if resampler.is_some() { RESAMPLE_MARGIN as u64 } else { 0 };
+            let mut skip = (src_from - lead).saturating_sub(reader.seek(src_from - lead)?) as usize;
+            let mut src_left = (src_end + tail).saturating_sub(src_from - lead) as usize;
             let mut pass = Pass { want: self.bounds.end.saturating_sub(from), delivered: 0, drop: 0 };
             if let Some(r) = &mut resampler {
                 r.reset();
-                pass.drop = r.output_delay();
+                pass.drop = r.output_delay() + (lead as f64 * self.device_rate as f64 / self.source_rate as f64).round() as usize;
             }
             pending.clear();
             while src_left > 0 {
@@ -788,7 +794,7 @@ mod tests {
         for k in 200..out.len() {
             assert!((out[k] - out[k - 1]).abs() < slope, "jump at frame {k}: {} -> {}", out[k - 1], out[k]);
             let want = expected(48_000, start + k % len);
-            assert!((out[k] - want).abs() < 0.05, "frame {k}: got {}, want {want}", out[k]);
+            assert!((out[k] - want).abs() < 0.01, "frame {k}: got {}, want {want}", out[k]);
         }
         assert_eq!(b.mixer.shared.underruns.load(Ordering::Relaxed), 0);
         std::fs::remove_file(&path).unwrap();
