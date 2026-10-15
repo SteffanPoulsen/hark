@@ -1,4 +1,4 @@
-# hark
+<img src="docs/brand/hark-logo.png" alt="hark" width="240">
 
 **Listen fast, export clean.** A local audio asset browser for game development.
 
