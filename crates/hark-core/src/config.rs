@@ -164,9 +164,13 @@ pub struct Config {
     pub presets: BTreeMap<String, ExportPreset>,
     #[serde(default = "default_preset_name")]
     pub default_preset: String,
-    /// Device sample rate the audition engine asks for; `None` takes the device default.
+    /// Sample rate the output device is opened at; `None` takes the device default.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "audition_sample_rate")]
+    pub output_sample_rate: Option<u32>,
+    /// The output device playback opens, by the id `audition::outputs` lists; `None` takes
+    /// the system default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audition_sample_rate: Option<u32>,
+    pub output_device: Option<String>,
     /// Files whose decoded audio is larger than this many megabytes stream from disk while
     /// they play instead of being decoded whole.
     #[serde(default = "default_stream_above_mb")]
@@ -250,7 +254,8 @@ impl Default for Config {
             tags: ["sfx", "ambient", "music", "voice", "ui", "foley"].map(tag).to_vec(),
             presets,
             default_preset: default_preset_name(),
-            audition_sample_rate: None,
+            output_sample_rate: None,
+            output_device: None,
             stream_above_mb: default_stream_above_mb(),
             ui_zoom: default_ui_zoom(),
             list_sort: Sort::default(),

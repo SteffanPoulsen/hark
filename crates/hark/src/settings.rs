@@ -82,6 +82,7 @@ fn heading(ui: &mut egui::Ui, theme: &Theme, text: &str, desc: &str) {
 impl App {
     pub fn ui_settings(&mut self, ctx: &egui::Context) {
         if !self.settings_open {
+            self.outputs = None;
             return;
         }
         // A real window of its own, so the compositor tiles it like any other.
@@ -155,13 +156,40 @@ impl App {
                     ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
                 }
             });
-            row(ui, &theme, false, "Audition sample rate", "The rate the output device is opened at; sources are resampled to it for playback.", |ui| {
-                let current = self.config.audition_sample_rate;
+            let device = match (&self.player, &self.audio_error) {
+                (Some(p), _) => format!("{}  ·  {} Hz  ·  {} ch. System default follows the desktop's choice.", p.device_name, p.sample_rate, p.channels),
+                (None, Some(e)) => format!("No audio: {e}"),
+                _ => "No audio".into(),
+            };
+            let outputs = self.outputs.get_or_insert_with(hark_core::audition::outputs).clone();
+            row(ui, &theme, false, "Audio output", &device, |ui| {
+                let current = self.config.output_device.clone();
+                let label = |id: Option<&str>| match id {
+                    None => "System default".to_string(),
+                    Some(id) => outputs.iter().find(|o| o.id == id).map(|o| o.name.clone()).unwrap_or_else(|| format!("{} (not found)", id.rsplit(':').next().unwrap_or(id))),
+                };
+                let r = egui::ComboBox::from_id_salt("output-device").width(220.0).truncate().selected_text(label(current.as_deref())).show_ui(ui, |ui| {
+                    let mut pick = |ui: &mut egui::Ui, id: Option<&str>| {
+                        if ui.selectable_label(current.as_deref() == id, label(id)).clicked() && current.as_deref() != id {
+                            self.config.output_device = id.map(str::to_string);
+                            save = true;
+                            reopen_audio = true;
+                        }
+                    };
+                    pick(ui, None);
+                    for o in &outputs {
+                        pick(ui, Some(&o.id));
+                    }
+                });
+                r.response.on_hover_text(label(current.as_deref()));
+            });
+            row(ui, &theme, false, "Sample rate", "The rate the output is opened at; sources are resampled to it for playback.", |ui| {
+                let current = self.config.output_sample_rate;
                 let label = |r: Option<u32>| r.map(|r| format!("{:.1} kHz", r as f64 / 1000.0)).unwrap_or_else(|| "Device default".into());
-                egui::ComboBox::from_id_salt("audition-rate").width(150.0).selected_text(label(current)).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("output-rate").width(150.0).selected_text(label(current)).show_ui(ui, |ui| {
                     let mut pick = |ui: &mut egui::Ui, r: Option<u32>| {
                         if ui.selectable_label(current == r, label(r)).clicked() && current != r {
-                            self.config.audition_sample_rate = r;
+                            self.config.output_sample_rate = r;
                             save = true;
                             reopen_audio = true;
                         }
@@ -176,12 +204,6 @@ impl App {
                 let r = ui.add(egui::DragValue::new(&mut self.config.stream_above_mb).speed(4.0).range(16.0..=16384.0).suffix(" MB").fixed_decimals(0));
                 save |= r.drag_stopped() || r.lost_focus();
             });
-            let device = match (&self.player, &self.audio_error) {
-                (Some(p), _) => format!("{}  ·  {} Hz  ·  {} ch", p.device_name, p.sample_rate, p.channels),
-                (None, Some(e)) => format!("No audio: {e}"),
-                _ => "No audio".into(),
-            };
-            row(ui, &theme, false, "Audio output", &device, |_| {});
             self.copy_rows(ui, &theme, &mut save);
             let palette = self.config.theme_file.as_ref().map(|p| p.display().to_string());
             row(ui, &theme, false, "Theme palette", "A palette file in the desktop theme format replaces the built-in colors.", |ui| {
@@ -315,7 +337,7 @@ impl App {
     fn reopen_audio(&mut self) {
         // Dropping the old player ends any stream it was playing at the old rate.
         let was_playing = self.is_playing();
-        match Player::open(self.config.audition_sample_rate) {
+        match Player::open(self.config.output_sample_rate, self.config.output_device.as_deref()) {
             Ok(p) => {
                 self.player = Some(p);
                 self.audio_error = None;

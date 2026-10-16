@@ -141,6 +141,37 @@ pub fn write(path: &Path, pcm: &Pcm, bits: u16, dither: bool, origin_json: &[u8]
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every bit depth reads back through symphonia with its samples, and the `hark` and
+    /// `bext` chunks come back intact; the origin is an odd length so the padding byte between
+    /// chunks is exercised.
+    #[test]
+    fn chunks_and_samples_round_trip() {
+        let samples: Vec<f32> = (0..2000).map(|i| ((i % 100) as f32 / 50.0 - 1.0) * 0.9).collect();
+        let pcm = Pcm { sample_rate: 44_100, channels: 2, samples };
+        let origin = br#"{"hark":"test","odd":1}"#;
+        assert_eq!(origin.len() % 2, 1);
+        let bext = Bext { description: "hark: pack:hit.wav [0.100s-0.200s]".into(), originator: "hark test".into(), ..Default::default() };
+        for bits in [16u16, 24, 32] {
+            let path = std::env::temp_dir().join(format!("hark-wav-{bits}-{}.wav", std::process::id()));
+            write(&path, &pcm, bits, false, origin, &bext).unwrap();
+            let back = crate::decode(&path);
+            let chunk = read_chunk(&path, HARK_CHUNK).unwrap();
+            let desc = read_bext_description(&path).unwrap();
+            let _ = std::fs::remove_file(&path);
+            let back = back.unwrap_or_else(|e| panic!("{bits} bit: {e:#}"));
+            assert_eq!((back.sample_rate, back.channels, back.samples.len()), (44_100, 2, pcm.samples.len()), "{bits} bit");
+            let worst = pcm.samples.iter().zip(&back.samples).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            assert!(worst <= 2.0 / (1u32 << (bits.min(24) - 1)) as f32, "{bits} bit drifts by {worst}");
+            assert_eq!(chunk.as_deref(), Some(&origin[..]), "{bits} bit");
+            assert_eq!(desc.as_deref(), Some(bext.description.as_str()), "{bits} bit");
+        }
+    }
+}
+
 fn fixed(dst: &mut Vec<u8>, s: &str, len: usize) {
     let mut bytes = s.as_bytes().to_vec();
     bytes.truncate(len);

@@ -143,9 +143,13 @@ enum Cmd {
         /// Window zoom on top of the display scale.
         #[arg(long)]
         ui_zoom: Option<f32>,
-        /// Sample rate the audition engine asks the device for; 0 takes the device default.
+        /// Sample rate the output device is opened at; 0 takes the device default.
         #[arg(long)]
-        audition_rate: Option<u32>,
+        output_rate: Option<u32>,
+        /// Output device playback opens, by the id `devices` lists; `default` takes the
+        /// system default.
+        #[arg(long)]
+        output_device: Option<String>,
         /// Files whose decoded audio is larger than this many megabytes stream from disk.
         #[arg(long)]
         stream_above_mb: Option<f64>,
@@ -153,7 +157,9 @@ enum Cmd {
         #[arg(long)]
         path: bool,
     },
-    /// Play a file through the audition engine and wait for it to finish. Files whose decoded
+    /// List the output devices playback can open, the system default aside.
+    Devices,
+    /// Play a file through the output device and wait for it to finish. Files whose decoded
     /// audio is larger than the config's `stream_above_mb` stream from disk while they play.
     Play {
         file: PathBuf,
@@ -991,7 +997,7 @@ fn run() -> Result<()> {
                 print_json(&results)?;
             }
         }
-        Cmd::Config { output_root, default_preset, ui_zoom, audition_rate, stream_above_mb, path } => {
+        Cmd::Config { output_root, default_preset, ui_zoom, output_rate, output_device, stream_above_mb, path } => {
             let mut config = load(&project)?;
             let mut changed = false;
             if let Some(o) = output_root {
@@ -1008,8 +1014,15 @@ fn run() -> Result<()> {
                 config.ui_zoom = z.clamp(0.5, 3.0);
                 changed = true;
             }
-            if let Some(r) = audition_rate {
-                config.audition_sample_rate = (r > 0).then_some(r);
+            if let Some(r) = output_rate {
+                config.output_sample_rate = (r > 0).then_some(r);
+                changed = true;
+            }
+            if let Some(d) = output_device {
+                if d != "default" && !hark_core::audition::outputs().iter().any(|o| o.id == d) {
+                    eprintln!("no output device {d} right now; the default plays until it appears");
+                }
+                config.output_device = (d != "default").then_some(d);
                 changed = true;
             }
             if let Some(mb) = stream_above_mb {
@@ -1025,10 +1038,20 @@ fn run() -> Result<()> {
                 print_json(&config)?;
             }
         }
+        Cmd::Devices => {
+            let outputs = hark_core::audition::outputs();
+            if json {
+                print_json(&outputs)?;
+            } else {
+                for o in &outputs {
+                    println!("{:<48} {}", o.id, o.name);
+                }
+            }
+        }
         Cmd::Play { file, start, end, from, looped, seconds, jump, stream_above } => {
             let file = abs(&file)?;
             let config = load(&project)?;
-            let player = hark_core::audition::Player::open(config.audition_sample_rate)?;
+            let player = hark_core::audition::Player::open(config.output_sample_rate, config.output_device.as_deref())?;
             let info = hark_core::probe(&file)?;
             let streamed = info.decoded_mb() > stream_above.unwrap_or(config.stream_above_mb);
             let source = if streamed {

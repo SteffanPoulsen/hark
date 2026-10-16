@@ -253,9 +253,18 @@ pub struct Player {
     _stream: cpal::Stream,
     tx: Sender<Cmd>,
     shared: Arc<Shared>,
+    /// Set before the stream drops: cpal's PipeWire host reports a stream pinned to a node
+    /// as "Device disconnected" when the stream itself closes.
+    closing: Arc<AtomicBool>,
     pub sample_rate: u32,
     pub channels: u16,
     pub device_name: String,
+}
+
+impl Drop for Player {
+    fn drop(&mut self) {
+        self.closing.store(true, Ordering::Relaxed);
+    }
 }
 
 struct Voice {
@@ -380,10 +389,46 @@ impl Mixer {
     }
 }
 
+/// An output device the audition stream can open: the id the config keeps and the name
+/// shown for it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Output {
+    pub id: String,
+    pub name: String,
+}
+
+/// The output devices on the host audition uses, the system default aside.
+pub fn outputs() -> Vec<Output> {
+    let (host, host_name) = open_host();
+    let default = host.default_output_device().and_then(|d| d.id().ok());
+    let Ok(devices) = host.output_devices() else { return Vec::new() };
+    devices
+        .filter_map(|d| {
+            let id = d.id().ok()?;
+            // The PipeWire host lists its follow-the-default aliases beside the real sinks,
+            // and other programs' playback streams as output-only devices; a sink is duplex.
+            if Some(&id) == default.as_ref() || matches!(id.id(), "sink_default" | "output_default") || (host_name == "pipewire" && !d.supports_input()) {
+                return None;
+            }
+            Some(Output { id: id.to_string(), name: device_name(&d) })
+        })
+        .collect()
+}
+
+fn device_name(device: &cpal::Device) -> String {
+    device.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "output".into())
+}
+
 impl Player {
-    pub fn open(preferred_rate: Option<u32>) -> Result<Player> {
-        let (device, host_name) = pick_device()?;
-        let device_name = device.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "output".into());
+    /// Opens `device` by the id `outputs` lists, or the system default when it is `None` or
+    /// not present, at `preferred_rate` when the device supports it.
+    pub fn open(preferred_rate: Option<u32>, device: Option<&str>) -> Result<Player> {
+        let (host, host_name) = open_host();
+        let device = device
+            .and_then(|want| host.output_devices().ok()?.find(|d| d.id().map(|id| id.to_string() == want).unwrap_or(false)))
+            .map(Ok)
+            .unwrap_or_else(|| default_device(&host))?;
+        let device_name = device_name(&device);
         let default = device.default_output_config()?;
         let mut config: cpal::StreamConfig = default.clone().into();
         if let Some(rate) = preferred_rate {
@@ -406,11 +451,12 @@ impl Player {
             channels: config.channels as usize,
             declick: (DECLICK_SECS * config.sample_rate as f64).round().max(1.0) as usize,
         };
+        let closing = Arc::new(AtomicBool::new(false));
         let stream = match default.sample_format() {
-            cpal::SampleFormat::F32 => build::<f32>(&device, &config, mixer)?,
-            cpal::SampleFormat::I16 => build::<i16>(&device, &config, mixer)?,
-            cpal::SampleFormat::I32 => build::<i32>(&device, &config, mixer)?,
-            cpal::SampleFormat::U16 => build::<u16>(&device, &config, mixer)?,
+            cpal::SampleFormat::F32 => build::<f32>(&device, &config, mixer, closing.clone())?,
+            cpal::SampleFormat::I16 => build::<i16>(&device, &config, mixer, closing.clone())?,
+            cpal::SampleFormat::I32 => build::<i32>(&device, &config, mixer, closing.clone())?,
+            cpal::SampleFormat::U16 => build::<u16>(&device, &config, mixer, closing.clone())?,
             f => return Err(anyhow!("unsupported output sample format {f}")),
         };
         stream.play()?;
@@ -418,6 +464,7 @@ impl Player {
             _stream: stream,
             tx,
             shared,
+            closing,
             sample_rate: config.sample_rate,
             channels: config.channels,
             device_name: format!("{device_name} ({host_name})"),
@@ -642,7 +689,7 @@ struct Pass {
     drop: usize,
 }
 
-fn build<T>(device: &cpal::Device, config: &cpal::StreamConfig, mut mixer: Mixer) -> Result<cpal::Stream>
+fn build<T>(device: &cpal::Device, config: &cpal::StreamConfig, mut mixer: Mixer, closing: Arc<AtomicBool>) -> Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32>,
 {
@@ -656,7 +703,11 @@ where
                 *o = T::from_sample(*s);
             }
         },
-        |err| eprintln!("audio stream error: {err}"),
+        move |err| {
+            if !closing.load(Ordering::Relaxed) {
+                eprintln!("audio stream error: {err}");
+            }
+        },
         None,
     )?;
     Ok(stream)
@@ -818,24 +869,29 @@ mod tests {
     }
 }
 
-fn pick_device() -> Result<(cpal::Device, &'static str)> {
+fn open_host() -> (cpal::Host, &'static str) {
     #[cfg(all(target_os = "linux", feature = "pipewire"))]
     {
         if let Ok(host) = cpal::host_from_id(cpal::HostId::PipeWire) {
-            if let Some(d) = host.default_output_device() {
-                return Ok((d, "pipewire"));
+            if host.default_output_device().is_some() {
+                return (host, "pipewire");
             }
         }
     }
     let host = cpal::default_host();
+    let name = host.id().name();
+    (host, name)
+}
+
+fn default_device(host: &cpal::Host) -> Result<cpal::Device> {
     #[cfg(target_os = "linux")]
     {
         let named = |want: &str| {
             host.output_devices().ok().and_then(|mut it| it.find(|d| d.description().map(|desc| desc.name() == want).unwrap_or(false)))
         };
         if let Some(d) = named("pipewire").or_else(|| named("pulse")) {
-            return Ok((d, "alsa"));
+            return Ok(d);
         }
     }
-    host.default_output_device().map(|d| (d, "default")).ok_or_else(|| anyhow!("no audio output device"))
+    host.default_output_device().ok_or_else(|| anyhow!("no audio output device"))
 }

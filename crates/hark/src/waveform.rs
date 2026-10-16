@@ -42,7 +42,7 @@ pub struct WaveState {
     pub fade_in: f64,
     pub fade_out: f64,
     pub fade_shape: FadeShape,
-    /// Linear gain the drawing is scaled by, so the picture follows the audition gain.
+    /// Linear gain the drawing is scaled by, so the picture follows the playback volume.
     pub gain: f32,
     drag: Option<Drag>,
     /// A span lit up for a moment, from when: the part just exported.

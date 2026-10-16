@@ -31,6 +31,7 @@ use worker::{Done, Job, Loaded, ScanPhase, Worker};
 const CACHE_BYTES: usize = 48_000 * 60 * 20 * 2 * 4;
 const PRELOAD: usize = 3;
 const EXPORT_CARD_W: f32 = 380.0;
+const TREE_W: f32 = 320.0;
 /// The bottom panel never grows past leaving the list this much: its heading, header and a
 /// handful of rows.
 const LIST_MIN_H: f32 = 200.0;
@@ -287,6 +288,8 @@ struct App {
     scanning: Option<ScanPhase>,
     settings_open: bool,
     settings_page: settings::Page,
+    /// The output devices the General page offers, listed once per opening of the window.
+    outputs: Option<Vec<hark_core::audition::Output>>,
     /// The clear-copies confirmation is up.
     copies_clear: bool,
     /// The mark beside the wordmark, white on transparent, tinted at draw time.
@@ -319,7 +322,7 @@ impl App {
         cc.egui_ctx.set_zoom_factor(config.ui_zoom.clamp(0.5, 3.0));
         let mut db = Db::open().expect("library database");
         db.set_project(config.project_id());
-        let (player, audio_error) = match Player::open(config.audition_sample_rate) {
+        let (player, audio_error) = match Player::open(config.output_sample_rate, config.output_device.as_deref()) {
             Ok(p) => (Some(p), None),
             Err(e) => (None, Some(format!("{e:#}"))),
         };
@@ -380,6 +383,7 @@ impl App {
             scanning,
             file_count: 0,
             settings_open: false,
+            outputs: None,
             mark,
             settings_page: settings::Page::General,
             copies_clear: false,
@@ -630,7 +634,7 @@ impl App {
         let total = cur.source.frames(player.sample_rate);
         let frames = |t: f64| ((t * rate) as usize).min(total);
         // The fades belong to the selection, or to the whole file without one. A seek outside
-        // the selection auditions the file from there without them.
+        // the selection plays the file from there without them.
         let (start, end) = match self.wave.selection {
             Some((a, b)) => (frames(a), frames(b)),
             None => (0, total),
@@ -1779,7 +1783,7 @@ impl App {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let readout = ui.allocate_response(egui::vec2(FADER_W, waveform::LANE_H), egui::Sense::hover()).on_hover_text("dB");
                 let (rail, fader) = ui.allocate_exact_size(egui::vec2(FADER_W, wave_h - waveform::LANE_H), Sense::click_and_drag());
-                let fader = fader.on_hover_text("Audition gain; right-click or double-click resets");
+                let fader = fader.on_hover_text("Volume; right-click or double-click resets");
                 const MIN_DB: f32 = -36.0;
                 const MAX_DB: f32 = 12.0;
                 let (top, bottom) = (rail.top() + 10.0, rail.bottom() - 10.0);
@@ -2335,7 +2339,7 @@ impl App {
                 let pair = |a: Action, b: Action| format!("{} {}", self.key_of(a), self.key_of(b));
                 let hints = [
                     (self.key_of(Action::Play), "Play"),
-                    ("↑ ↓".to_string(), "Audition"),
+                    ("↑ ↓".to_string(), "Browse"),
                     (pair(Action::PreviousTake, Action::NextTake), "Takes"),
                     (self.key_of(Action::Favorite), "Favorite"),
                     ("1–9".to_string(), "Tags"),
@@ -2565,7 +2569,7 @@ impl eframe::App for App {
             self.ui_bottom(ui);
         });
         let tree_max = (ui.available_width() * 0.5).max(160.0);
-        egui::Panel::left("tree").resizable(true).default_size(250.0).size_range(160.0..=tree_max).frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin { left: 4, right: 4, top: 8, bottom: 8 })).show(ui, |ui| {
+        egui::Panel::left("tree").resizable(true).default_size(TREE_W).size_range(160.0..=tree_max).frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin { left: 4, right: 4, top: 8, bottom: 8 })).show(ui, |ui| {
             self.ui_tree(ui);
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 8 })).show(ui, |ui| {

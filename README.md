@@ -106,13 +106,13 @@ The same record is in the file as JSON, readable by anything that walks RIFF chu
 
 ## Configuration
 
-`~/.config/hark/config.json` (or the platform equivalent) holds the default state's folders and output folder, the known project files and the open one, the tags, the export presets, the default preset, the keys that differ from the defaults, the window zoom, the audition sample rate and the streaming threshold (`stream_above_mb`, 256 MB of decoded audio by default, about ten minutes of 48 kHz stereo). The defaults define `clean`, `sfx`, `ambient`, `music` and `voice` presets and a matching set of tags. Edit the file, use the settings window, or `hark-cli config`. A project file is JSON too: an id (favorites key on it), its folders, the output folder and the last export folder; `hark-cli --project <file or name>` acts in one without opening it.
+`~/.config/hark/config.json` (or the platform equivalent) holds the default state's folders and output folder, the known project files and the open one, the tags, the export presets, the default preset, the keys that differ from the defaults, the window zoom, the output device and sample rate and the streaming threshold (`stream_above_mb`, 256 MB of decoded audio by default, about ten minutes of 48 kHz stereo). The defaults define `clean`, `sfx`, `ambient`, `music` and `voice` presets and a matching set of tags. Edit the file, use the settings window, or `hark-cli config`. A project file is JSON too: an id (favorites key on it), its folders, the output folder and the last export folder; `hark-cli --project <file or name>` acts in one without opening it.
 
 The library database lives in the data directory and only indexes what the files already carry; deleting it loses nothing but the marks, which `hark-cli` can re-apply. Waveform peaks are cached in the cache directory.
 
 ## Layout
 
-- `crates/hark-core`: decoding (symphonia), peaks, loudness (ebur128), resampling (rubato), WAV and FLAC writing with embedded origin, the export pipeline, the library database (SQLite), config, and the audition engine (cpal).
+- `crates/hark-core`: decoding (symphonia), peaks, loudness (ebur128), resampling (rubato), WAV and FLAC writing with embedded origin, the export pipeline, the library database (SQLite), config, and playback (cpal).
 - `crates/hark-cli`: the command line, a thin layer over the core.
 - `crates/hark`: the window (egui), a thin layer over the core.
 - `docs/screenshots/stage.sh`: synthesizes a sample library, stages a project over it and captures the screenshots above, so they can be retaken after a change.
