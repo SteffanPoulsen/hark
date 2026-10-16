@@ -19,7 +19,7 @@ Auditioning a big library in a DAW means importing first, and in a file manager 
 - **Favorites and tags** from the keyboard. Tags are yours to define, with a colour each. Marks key on the file's content, so a renamed or moved file keeps them.
 - **Projects.** A `.hark` file beside the game, the edit or the show holds its library folders, its output folder and its own favorites. Switch between projects from the top bar.
 - **Waveform selection with fades.** Drag a region or trim it to the sound, step through the takes a recording holds with Left and Right, set fade in and out, zoom, loop, seek by clicking, and scale the level with the fader beside the waveform.
-- **Copy and drag into a DAW.** Ctrl-drag the waveform into Reaper, Pro Tools, a folder or a chat, or press Ctrl+C and paste: the selection as heard, with its fades and gain, lands as a WAV at the source's rate and channels. Copies stay in hark's own folder until you clear it, since a DAW may reference them in place.
+- **Copy and drag into a DAW.** Ctrl-drag the waveform into Reaper, Pro Tools, a folder or a chat, or press Ctrl+C and paste: the selection lands exactly as the export card would write it, the same format, rate, channels and loudness, with its fades and gain. Copies stay in hark's own folder until you clear it, since a DAW may reference them in place.
 - **Preset-driven export.** WAV or FLAC, bit depth with dither, resampling, mono downmix, peak or EBU R128 loudness normalisation under a true-peak ceiling, and a file name template. Override any of it for one export.
 - **An origin inside every export.** A `hark` RIFF chunk and a BWF `bext` description in WAV, an APPLICATION block and a Vorbis comment in FLAC: source path and hash, pack, selection, fades, preset and measured gain. `hark-cli reexport` runs that recipe again with changes.
 - **Keys you can change.** Every action has a key, and all but the list's arrows and the tag digits can be rebound on the settings window's Keys page or with the CLI.
@@ -63,7 +63,7 @@ Every key but the list's arrows, the tag digits and Ctrl+C can be changed on the
 
 On the waveform: drag to select, drag a selection edge to adjust it, shift-drag inside to move it, Ctrl-drag to carry the selection out of the window into another program, drag the triangles in the strip above to set fades, click to play from there, wheel to zoom, shift-wheel or middle-drag to pan, double-click to zoom out. A row dragged out of the list carries the original file. The window scale is in settings; Ctrl+= and Ctrl+- change it too.
 
-A copied or dragged selection is written first, as heard, into the copy folder: `~/.local/share/hark/copies` unless settings or the project point elsewhere. Nothing in it is ever removed by hark, because Pro Tools and Reaper at factory settings reference a dropped file where it is; the settings window shows the folder with a clear button for when you know your sessions are consolidated. Dragging out needs Wayland on Linux; on X11, copy and paste.
+A copied or dragged selection is written first, through the export card's current settings, into the copy folder: `~/.local/share/hark/copies` unless settings or the project point elsewhere. Nothing in it is ever removed by hark, because Pro Tools and Reaper at factory settings reference a dropped file where it is; the settings window shows the folder with a clear button for when you know your sessions are consolidated. Dragging out needs Wayland on Linux; on X11, copy and paste.
 
 In the list, a column header sorts by that column and a second click reverses it; the name, folder and tag columns resize by the dividers in the header row. The folder tree, the bottom panel and the export card resize by their separators. A double-click on a divider or a separator puts that one back. The sizes are remembered between runs; the layout row in settings resets them all.
 
@@ -83,7 +83,7 @@ hark-cli tags add footstep --color '#79b86a'
 hark-cli presets add sfx-quiet --from sfx
 hark-cli presets set sfx-quiet --normalize lufs --target=-20 --ceiling=-1 --rate 48000
 hark-cli export "Footsteps/gravel_03.wav" --preset sfx --into sfx/footsteps --in 0.2 --out 1.4 --fade-out 0.1
-hark-cli copy "Footsteps/gravel_03.wav" --in 0.2 --out 1.4 --fade-out 0.1
+hark-cli copy "Footsteps/gravel_03.wav" --preset sfx --in 0.2 --out 1.4 --fade-out 0.1
 hark-cli copies
 hark-cli inspect ~/Projects/game/Assets/Audio/sfx/gravel_03.wav
 hark-cli reexport ~/Projects/game/Assets/Audio/sfx/*.wav --preset sfx

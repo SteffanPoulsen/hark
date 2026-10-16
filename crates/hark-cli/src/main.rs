@@ -118,9 +118,9 @@ enum Cmd {
     },
     /// Export a file, or a selection of it, through a preset.
     Export(ExportArgs),
-    /// Write a file, or a selection of it, as heard into the copy folder for another
-    /// program to take: WAV at the source's rate and channels, fades and gain applied, no
-    /// preset.
+    /// Write a file, or a selection of it, into the copy folder for another program to
+    /// take: through a preset like an export, fades and gain applied, under a name made
+    /// from the source and the selection.
     Copy(CopyArgs),
     /// The copy folder: what it holds, where it is, and clearing it.
     Copies {
@@ -409,6 +409,8 @@ struct ExportArgs {
 #[derive(Args)]
 struct CopyArgs {
     file: PathBuf,
+    #[arg(long)]
+    preset: Option<String>,
     /// Selection start in seconds.
     #[arg(long = "in")]
     start: Option<f64>,
@@ -419,10 +421,10 @@ struct CopyArgs {
     fade_in: f64,
     #[arg(long, default_value_t = 0.0)]
     fade_out: f64,
-    /// linear, equal_power or logarithmic.
-    #[arg(long, default_value = "equal_power")]
-    fade: hark_core::pcm::FadeShape,
-    /// Level in dB (--gain=-6 for a cut).
+    /// linear, equal_power or logarithmic; the preset's unless given.
+    #[arg(long)]
+    fade: Option<hark_core::pcm::FadeShape>,
+    /// Level in dB, applied unless the preset normalises (--gain=-6 for a cut).
     #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
     gain: f64,
     /// Write into this folder instead of the copy folder, for this run only.
@@ -950,7 +952,11 @@ fn run() -> Result<()> {
             let db = open_db(&project)?;
             let record = db.get(&file)?;
             let (tags, favorite) = record.map(|r| (r.tags, r.favorite)).unwrap_or_default();
-            let mut req = hark_core::copies::CopyRequest::from_config(&config, &file, tags, favorite);
+            let preset = match &a.preset {
+                Some(n) => config.preset(n).ok_or_else(|| anyhow!("unknown preset {n}"))?.clone(),
+                None => config.default_preset().1.clone(),
+            };
+            let mut req = hark_core::copies::CopyRequest::from_config(&config, &file, preset, tags, favorite);
             req.source_hash = db.ensure_hash(&file).ok();
             req.selection = match (a.start, a.end) {
                 (None, None) => None,
@@ -958,7 +964,9 @@ fn run() -> Result<()> {
             };
             req.fade_in_secs = a.fade_in;
             req.fade_out_secs = a.fade_out;
-            req.fade_shape = a.fade;
+            if let Some(f) = a.fade {
+                req.preset.fade_shape = f;
+            }
             req.gain_db = a.gain;
             if let Some(f) = &a.folder {
                 req.folder = abs_dir(f)?;

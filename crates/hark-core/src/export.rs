@@ -106,10 +106,7 @@ impl ExportRequest {
             Some("wav") | Some("wave") => preset.format = OutputFormat::Wav,
             _ => {}
         }
-        if preset.format == OutputFormat::Flac && preset.bits > 24 {
-            preset.bits = 24;
-        }
-        preset
+        preset.effective()
     }
 }
 

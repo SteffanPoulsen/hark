@@ -753,12 +753,12 @@ impl App {
     /// The selection as heard, bound for the copy folder.
     fn copy_request(&self) -> Option<CopyRequest> {
         let f = &self.files[self.selected?];
-        let mut req = CopyRequest::from_config(&self.config, &f.path, f.tags.clone(), f.favorite);
+        let mut req = CopyRequest::from_config(&self.config, &f.path, self.preset.clone(), f.tags.clone(), f.favorite);
         req.source_hash = f.hash.clone();
         req.selection = self.wave.selection.map(|(a, b)| Selection { start_secs: a, end_secs: b });
         req.fade_in_secs = self.wave.fade_in;
         req.fade_out_secs = self.wave.fade_out;
-        req.fade_shape = self.wave.fade_shape;
+        req.preset.fade_shape = self.wave.fade_shape;
         req.gain_db = self.gain_db as f64;
         Some(req)
     }

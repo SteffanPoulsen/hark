@@ -95,6 +95,16 @@ fn default_template() -> String {
     "{name}".to_string()
 }
 
+impl ExportPreset {
+    /// The values as the writer applies them: FLAC stops at 24 bit.
+    pub fn effective(mut self) -> ExportPreset {
+        if self.format == OutputFormat::Flac && self.bits > 24 {
+            self.bits = 24;
+        }
+        self
+    }
+}
+
 impl Default for ExportPreset {
     fn default() -> Self {
         ExportPreset {

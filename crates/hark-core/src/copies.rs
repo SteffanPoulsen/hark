@@ -1,7 +1,8 @@
-//! A copy: the selection as heard, written as a file for another program to take by drag
-//! or paste. It runs the export pipeline with a fixed preset, since the export card's preset
-//! masters a deliverable and a copy is the sound itself: WAV, 24 bit, the source's rate
-//! and channels, no normalisation, the fades and gain applied, origin embedded.
+//! A copy: the selection as it would export, written as a file for another program to take
+//! by drag or paste. It runs the export pipeline with the preset the caller hands it, the
+//! export card's values in the window, so what lands in a session is what an export would
+//! have been: format, rate, channels and loudness as set, the fades and gain applied, origin
+//! embedded. Only the folder and the name differ from an export.
 //!
 //! Every copy stays until the user clears the folder. The receiving program may reference
 //! the file in place (Pro Tools, Reaper and Ableton at factory settings) or copy it after the
@@ -14,7 +15,6 @@ use serde::Serialize;
 
 use crate::config::{Config, ExportPreset, Root};
 use crate::export::{ExportRequest, ExportResult, Selection};
-use crate::pcm::FadeShape;
 
 #[derive(Clone, Debug)]
 pub struct CopyRequest {
@@ -23,7 +23,8 @@ pub struct CopyRequest {
     pub selection: Option<Selection>,
     pub fade_in_secs: f64,
     pub fade_out_secs: f64,
-    pub fade_shape: FadeShape,
+    /// What the copy is written through; the path template is not used.
+    pub preset: ExportPreset,
     pub gain_db: f64,
     pub tags: Vec<String>,
     pub favorite: bool,
@@ -33,15 +34,15 @@ pub struct CopyRequest {
 }
 
 impl CopyRequest {
-    /// The whole file, as is, into the folder the config resolves.
-    pub fn from_config(config: &Config, source: &Path, tags: Vec<String>, favorite: bool) -> CopyRequest {
+    /// The whole file through `preset`, into the folder the config resolves.
+    pub fn from_config(config: &Config, source: &Path, preset: ExportPreset, tags: Vec<String>, favorite: bool) -> CopyRequest {
         CopyRequest {
             source: source.to_path_buf(),
             root: config.root_of(source).cloned(),
             selection: None,
             fade_in_secs: 0.0,
             fade_out_secs: 0.0,
-            fade_shape: FadeShape::default(),
+            preset,
             gain_db: 0.0,
             tags,
             favorite,
@@ -50,8 +51,8 @@ impl CopyRequest {
         }
     }
 
-    fn preset(&self) -> ExportPreset {
-        ExportPreset { fade_shape: self.fade_shape, ..ExportPreset::default() }
+    fn extension(&self) -> &'static str {
+        self.preset.format.extension()
     }
 
     /// A copy already in the folder made from this very recipe: same source, selection, fades
@@ -59,12 +60,12 @@ impl CopyRequest {
     /// when one is known, else by path and size.
     pub fn existing(&self) -> Option<PathBuf> {
         let stem = self.file_name();
-        let stem = stem.trim_end_matches(".wav");
+        let stem = stem.trim_end_matches(self.extension());
         let size = std::fs::metadata(&self.source).map(|m| m.len()).ok();
         let (_, files) = list(&self.folder);
         files.into_iter().find(|f| {
             let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            if !name.starts_with(stem) || !name.ends_with(".wav") {
+            if !name.starts_with(stem) || !name.ends_with(self.extension()) {
                 return false;
             }
             let Ok(Some(o)) = crate::origin::read(f) else { return false };
@@ -77,17 +78,18 @@ impl CopyRequest {
                 && o.fade_in_secs == self.fade_in_secs
                 && o.fade_out_secs == self.fade_out_secs
                 && o.gain_db == self.gain_db
-                && o.preset == self.preset()
+                && o.preset == self.preset.clone().effective()
         })
     }
 
-    /// `<stem> <in>-<out>.wav`, or `<stem>.wav` for the whole file; times in seconds, since a
-    /// colon is not a file name character everywhere.
+    /// `<stem> <in>-<out>.<ext>`, or `<stem>.<ext>` for the whole file; times in seconds,
+    /// since a colon is not a file name character everywhere.
     pub fn file_name(&self) -> String {
         let stem = self.source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "copy".into());
+        let ext = self.extension();
         match self.selection {
-            Some(s) => format!("{stem} {:.3}-{:.3}.wav", s.start_secs, s.end_secs),
-            None => format!("{stem}.wav"),
+            Some(s) => format!("{stem} {:.3}-{:.3}.{ext}", s.start_secs, s.end_secs),
+            None => format!("{stem}.{ext}"),
         }
     }
 
@@ -105,7 +107,7 @@ impl CopyRequest {
         let mut output = self.folder.join(&name);
         let mut n = 2;
         while output.exists() || part_of(&output).exists() {
-            output = self.folder.join(format!("{} {n}.wav", name.trim_end_matches(".wav")));
+            output = self.folder.join(format!("{} {n}.{}", name.trim_end_matches(self.extension()).trim_end_matches('.'), self.extension()));
             n += 1;
         }
         let export = ExportRequest {
@@ -117,7 +119,7 @@ impl CopyRequest {
             fade_out_secs: self.fade_out_secs,
             gain_db: self.gain_db,
             preset_name: None,
-            preset: self.preset(),
+            preset: self.preset.clone(),
             output_root: self.folder.clone(),
             subfolder: None,
             output_path: Some(part_of(&output)),
