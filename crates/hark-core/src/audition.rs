@@ -102,7 +102,7 @@ impl Bounds {
 
     fn envelope(&self, pos: usize) -> f32 {
         let mut g = 1.0;
-        if self.fade_in > 0 && pos < self.start + self.fade_in {
+        if self.fade_in > 0 && pos >= self.start && pos < self.start + self.fade_in {
             g *= self.fade_shape.gain((pos - self.start) as f32 / self.fade_in as f32);
         }
         if self.fade_out > 0 && pos + self.fade_out > self.end {
@@ -239,6 +239,8 @@ enum Cmd {
     Play(Feed, Bounds, usize),
     Stop,
     Seek(usize),
+    /// New bounds for the playing voice, whole sources only.
+    Bounds(Bounds),
 }
 
 struct Shared {
@@ -325,6 +327,15 @@ impl Mixer {
                         if let Feed::Whole(_) = v.feed {
                             v.pos = frame.clamp(v.bounds.start, v.bounds.end);
                             v.age = 0;
+                        }
+                    }
+                }
+                // The position stays where it is: a voice below a moved start runs on to the
+                // end and loops from the new start, and one past a moved end wraps at once.
+                Cmd::Bounds(bounds) => {
+                    if let Some(v) = &mut self.voice {
+                        if let Feed::Whole(_) = v.feed {
+                            v.bounds = bounds;
                         }
                     }
                 }
@@ -485,10 +496,20 @@ impl Player {
             Source::Whole(pcm) => Feed::Whole(pcm),
             Source::File { path, source_rate, channels, .. } => Feed::Stream(start_stream(path, source_rate, channels, self.sample_rate, bounds, from)),
         };
+        // Playing from the moment the command is sent, so a reader on this thread sees the
+        // state it asked for before the callback has drained the channel.
+        self.shared.playing.store(true, Ordering::Relaxed);
         let _ = self.tx.send(Cmd::Play(feed, bounds, from));
     }
 
+    /// Gives the playing voice the clip's bounds and fades where it is, when its source is a
+    /// whole `Pcm`. A streamed voice's bounds are fixed in its decoder: play it again instead.
+    pub fn set_bounds(&self, clip: &Clip) {
+        let _ = self.tx.send(Cmd::Bounds(Bounds::of(clip)));
+    }
+
     pub fn stop(&self) {
+        self.shared.playing.store(false, Ordering::Relaxed);
         let _ = self.tx.send(Cmd::Stop);
     }
 

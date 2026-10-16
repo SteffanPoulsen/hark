@@ -161,6 +161,12 @@ fn main() -> eframe::Result {
     )
 }
 
+type ClipKey = (usize, usize, bool, usize, usize, hark_core::pcm::FadeShape);
+
+fn clip_key(c: &Clip) -> ClipKey {
+    (c.start, c.end, c.looped, c.fade_in, c.fade_out, c.fade_shape)
+}
+
 /// A selection and fades asked for on the command line, applied once the opened file loads.
 #[derive(Default, Clone, Copy)]
 struct OpenRegion {
@@ -300,6 +306,9 @@ struct App {
     tag_edit: Option<(usize, String)>,
     /// The action whose key the settings window is waiting for.
     key_capture: Option<Action>,
+    /// The bounds the voice was given when it was last played from the selection, which it
+    /// follows while it plays; `None` after a play outside the selection.
+    synced: Option<ClipKey>,
     /// Playback was running when the device was reopened; resume once the file reloads.
     play_on_load: bool,
     /// Output file name for the next export; empty takes the preset's template.
@@ -365,6 +374,7 @@ impl App {
             current: None,
             wave: WaveState::default(),
             open_region: None,
+            synced: None,
             takes: None,
             autoplay: true,
             loop_on: false,
@@ -628,25 +638,53 @@ impl App {
         self.current = Some(l);
     }
 
-    fn play(&mut self, from_secs: Option<f64>) {
-        let (Some(player), Some(cur)) = (&self.player, &self.current) else { return };
+    /// The selection with its fades as a clip, or the whole file without one.
+    fn selection_clip(&self) -> Option<Clip> {
+        let (Some(player), Some(cur)) = (&self.player, &self.current) else { return None };
         let rate = player.sample_rate as f64;
         let total = cur.source.frames(player.sample_rate);
         let frames = |t: f64| ((t * rate) as usize).min(total);
-        // The fades belong to the selection, or to the whole file without one. A seek outside
-        // the selection plays the file from there without them.
         let (start, end) = match self.wave.selection {
             Some((a, b)) => (frames(a), frames(b)),
             None => (0, total),
         };
-        let from = from_secs.map(frames).unwrap_or(start);
-        let inside = from >= start && from < end;
-        let (start, end) = if inside { (start, end) } else { (from, total) };
-        let (fade_in, fade_out) = if inside { (frames(self.wave.fade_in), frames(self.wave.fade_out)) } else { (0, 0) };
-        player.play_from(
-            Clip { source: cur.source.clone(), start, end: end.max(start), looped: self.loop_on, fade_in, fade_out, fade_shape: self.wave.fade_shape },
-            from,
-        );
+        Some(Clip { source: cur.source.clone(), start, end: end.max(start), looped: self.loop_on, fade_in: frames(self.wave.fade_in), fade_out: frames(self.wave.fade_out), fade_shape: self.wave.fade_shape })
+    }
+
+    fn play(&mut self, from_secs: Option<f64>) {
+        let (Some(player), Some(clip)) = (&self.player, self.selection_clip()) else { return };
+        let total = clip.source.frames(player.sample_rate);
+        let from = from_secs.map(|t| ((t * player.sample_rate as f64) as usize).min(total)).unwrap_or(clip.start);
+        // The fades belong to the selection, or to the whole file without one. A seek outside
+        // the selection plays the file from there without them.
+        let inside = from >= clip.start && from < clip.end;
+        let clip = if inside { clip } else { Clip { start: from, end: total, fade_in: 0, fade_out: 0, ..clip } };
+        self.synced = inside.then(|| clip_key(&clip));
+        player.play_from(clip, from);
+    }
+
+    /// A playing selection follows its edits: new bounds, fades and loop state reach the
+    /// voice as they are made. A streamed voice starts again where it is instead, once the
+    /// drag that moved it ends.
+    fn sync_clip(&mut self) {
+        let Some(key) = self.synced else { return };
+        if !self.is_playing() {
+            return;
+        }
+        let (Some(player), Some(clip)) = (&self.player, self.selection_clip()) else { return };
+        let new = clip_key(&clip);
+        if new == key {
+            return;
+        }
+        if clip.source.is_streamed() {
+            if self.wave.dragging() {
+                return;
+            }
+            player.play_from(clip, player.position());
+        } else {
+            player.set_bounds(&clip);
+        }
+        self.synced = Some(new);
     }
 
     fn stop(&self) {
@@ -2542,6 +2580,7 @@ impl eframe::App for App {
             self.refresh_list();
         }
         self.handle_keys(&ctx);
+        self.sync_clip();
 
         // A panel forgets its dragged size when its state goes, and the list its column widths.
         if std::mem::take(&mut self.reset_layout) {

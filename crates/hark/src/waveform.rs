@@ -78,6 +78,12 @@ pub struct WaveColors {
     pub flash: Color32,
 }
 
+impl WaveState {
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+}
+
 impl Default for WaveState {
     fn default() -> Self {
         WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), gain: 1.0, drag: None, flash: None, last_edge: None, last_fade: None }
