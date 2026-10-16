@@ -5,7 +5,8 @@
 #   stage.sh config    a scratch config, project, tags, marks and exports over that library
 #   stage.sh run [settings]   launch the window on the staged project, or with the presets page open
 #   stage.sh shot [name [title w h]]   float the running window at the capture size and write <name>.png here
-#   stage.sh all       library, config, then hero.png and presets.png
+#   stage.sh social    shot the running window at two to one and compose docs/brand/social-preview.png over it
+#   stage.sh all       library, config, then hero.png, the social preview and presets.png
 #
 # A shot lands beside this script, or in $OUT. Everything else lives under $STAGE (default /tmp/hark-stage): a fake home whose paths read
 # like a real setup, and XDG config, data and cache folders so the user's own hark config
@@ -214,11 +215,46 @@ shot() {
   echo "shot: ${OUT:-$here}/$name.png ($geo)"
 }
 
+# The repository's social card: the window at two to one, faded into the background
+# along a diagonal from the top left corner, with the logo and tagline on the fade.
+# The layout is in pixels of a 2000 wide shot and scales with the shot.
+social() {
+  OUT=$STAGE shot social hark 1600 800 >/dev/null
+  python3 -I - "$STAGE/social.png" "$repo" <<'EOF'
+import sys, tomllib
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+shot, repo = sys.argv[1:]
+img = Image.open(shot).convert('RGB'); W, H = img.size; k = W / 2000
+ys, xs = np.mgrid[0:H, 0:W]
+a = np.clip((1.25 - (xs / W + ys / H)) / (1.25 - 0.62), 0, 1); a = a * a * (3 - 2 * a)
+rgb = np.asarray(img, dtype=np.float32)
+card = Image.fromarray((rgb * (1 - a[..., None]) + np.float32([22, 22, 22]) * a[..., None]).astype(np.uint8)).convert('RGBA')
+logo = Image.open(f'{repo}/docs/brand/hark-logo.png').convert('RGBA')
+lh = round(120 * k); logo = logo.resize((round(logo.width * lh / logo.height), lh), Image.LANCZOS)
+card.alpha_composite(logo, (round(84 * k), round(80 * k)))
+fonts = f'{repo}/crates/hark/assets/fonts/'
+head = ImageFont.truetype(fonts + 'Inter-SemiBold.ttf', round(60 * k))
+sub = ImageFont.truetype(fonts + 'Inter-Regular.ttf', round(31 * k))
+d = ImageDraw.Draw(card)
+d.text((round(90 * k), round(240 * k)), 'Listen fast, export clean.', font=head, fill=(232, 230, 226))
+d.text((round(90 * k), round(326 * k)), 'A local audio asset browser for anyone who works', font=sub, fill=(165, 165, 165))
+d.text((round(90 * k), round(368 * k)), 'from a library of sounds. Free software, GPL.', font=sub, fill=(165, 165, 165))
+# Until 1.0 the card announces the version, on the wordmark's baseline (the logo pads its ink by 24 of 262).
+version = tomllib.load(open(f'{repo}/Cargo.toml', 'rb'))['workspace']['package']['version']
+if version.startswith('0.'):
+    d.text((round(84 * k) + logo.width + round(28 * k), round(80 * k + lh * (1 - 24 / 262))), f'v{version}', font=ImageFont.truetype(fonts + 'Inter-Regular.ttf', round(36 * k)), fill=(165, 165, 165), anchor='ls')
+card.convert('RGB').save(f'{repo}/docs/brand/social-preview.png', optimize=True)
+print(f'social: {repo}/docs/brand/social-preview.png ({W}x{H})')
+EOF
+}
+
 case ${1:-all} in
   library) library ;;
   config) config ;;
   run) run "${2:-}" ;;
   shot) shot "${2:-hero}" "${3:-hark}" "${4:-1500}" "${5:-900}" ;;
-  all) library; config; run; shot hero; run settings; shot presets "hark settings" 960 820 ;;
+  social) social ;;
+  all) library; config; run; shot hero; social; run settings; shot presets "hark settings" 960 820 ;;
   *) sed -n 2,12p "$0" ;;
 esac
