@@ -25,7 +25,7 @@ A Cargo workspace with one core and two thin frontends. The frontends never reim
 - **A project is the target**: a `.hark` file beside the game, edit or show holding an id, its library folders, and its output folder; favorites key on its id and its name is the file's stem. No project open is the default state: the config's own folders and output folder, favorites under `default`. The database is global and keyed by path, so projects that share a folder share its rows. Presets and tags are not per project; move them only when a real case demands it.
 - **The audio callback allocates nothing and locks nothing.** Short clips arrive pre-decoded at the device rate through a channel; large files (decoded size over `stream_above_mb`) arrive as a lock-free ring that a decoder thread keeps a few seconds ahead at the device rate, and the callback plays counted silence if it ever runs dry. The callback never frees a stream either: the decoder thread outlives the callback's reference and releases the ring. The GUI reads the playhead and the underrun count from atomics.
 - **hark never removes a copy.** The copy folder's files may be referenced in place by a DAW session, and the drag protocol does not say which program took a drop, so only the user clears the folder.
-- **The CLI and the window are peers over the core.** A feature that exists only in the window is a bug; add the command.
+- **The CLI and the window are peers over the core.** A feature that exists only in the window is a bug; add the command. The one exception is a copy: it is a mouse gesture whose file is an export into the copy folder, which `hark-cli export --to` writes; the CLI keeps `copies` for the folder.
 
 ## Working here
 

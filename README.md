@@ -83,7 +83,6 @@ hark-cli tags add footstep --color '#79b86a'
 hark-cli presets add sfx-quiet --from sfx
 hark-cli presets set sfx-quiet --normalize lufs --target=-20 --ceiling=-1 --rate 48000
 hark-cli export "Footsteps/gravel_03.wav" --preset sfx --into sfx/footsteps --in 0.2 --out 1.4 --fade-out 0.1
-hark-cli copy "Footsteps/gravel_03.wav" --preset sfx --in 0.2 --out 1.4 --fade-out 0.1
 hark-cli copies
 hark-cli inspect ~/Projects/game/Assets/Audio/sfx/gravel_03.wav
 hark-cli reexport ~/Projects/game/Assets/Audio/sfx/*.wav --preset sfx
