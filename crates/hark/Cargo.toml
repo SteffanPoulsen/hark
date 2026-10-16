@@ -20,3 +20,13 @@ egui-phosphor.workspace = true
 rfd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+raw-window-handle = "0.6"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# "system" shares libwayland with winit, so the drag source runs on the window's own connection.
+wayland-client = { version = "0.31", features = ["system"] }
+wl-clipboard-rs = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+drag = "2"
+clipboard-win = "5"

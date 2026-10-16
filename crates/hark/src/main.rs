@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod dnd;
 mod preset_ui;
 mod settings;
 mod theme;
@@ -17,6 +18,7 @@ use egui_phosphor::regular as icons;
 use hark_core::audition::{Clip, Player, Source};
 use hark_core::export::{ExportRequest, Selection};
 use hark_core::library::{ChannelClass, Query, Sort, SortKey};
+use hark_core::copies::CopyRequest;
 use hark_core::{Config, Db, ExportPreset, FileRecord, Loudness};
 
 use theme::Theme;
@@ -229,6 +231,7 @@ struct App {
     player: Option<Player>,
     audio_error: Option<String>,
     worker: Worker,
+    drag: dnd::DragOut,
 
     expanded: HashSet<PathBuf>,
     dir_children: HashMap<PathBuf, Vec<PathBuf>>,
@@ -241,6 +244,8 @@ struct App {
     selected: Option<usize>,
     list_dirty: bool,
     scroll_to_selected: bool,
+    /// Where the list was on the last frame; Ctrl+C over it copies the original file.
+    list_rect: egui::Rect,
 
     cache: HashMap<PathBuf, Arc<Loaded>>,
     cache_order: VecDeque<PathBuf>,
@@ -273,6 +278,8 @@ struct App {
     scanning: Option<ScanPhase>,
     settings_open: bool,
     settings_page: settings::Page,
+    /// The clear-copies confirmation is up.
+    copies_clear: bool,
     /// The mark beside the wordmark, white on transparent, tinted at draw time.
     mark: egui::TextureHandle,
     /// Centre line of the project switcher on the last frame; the brand sits on it, since
@@ -325,6 +332,7 @@ impl App {
             player,
             audio_error,
             worker,
+            drag: dnd::DragOut::new(cc),
             expanded,
             dir_children: HashMap::new(),
             location: None,
@@ -335,6 +343,7 @@ impl App {
             selected: None,
             list_dirty: true,
             scroll_to_selected: false,
+            list_rect: egui::Rect::NOTHING,
             cache: HashMap::new(),
             cache_order: VecDeque::new(),
             pending: HashSet::new(),
@@ -360,6 +369,7 @@ impl App {
             settings_open: false,
             mark,
             settings_page: settings::Page::General,
+            copies_clear: false,
             search_id: egui::Id::new("search"),
             tag_edit: None,
             play_on_load: false,
@@ -714,6 +724,85 @@ impl App {
         }
     }
 
+    /// The selection as heard, bound for the copy folder.
+    fn copy_request(&self) -> Option<CopyRequest> {
+        let f = &self.files[self.selected?];
+        let mut req = CopyRequest::from_config(&self.config, &f.path, f.tags.clone(), f.favorite);
+        req.source_hash = f.hash.clone();
+        req.selection = self.wave.selection.map(|(a, b)| Selection { start_secs: a, end_secs: b });
+        req.fade_in_secs = self.wave.fade_in;
+        req.fade_out_secs = self.wave.fade_out;
+        req.fade_shape = self.wave.fade_shape;
+        req.gain_db = self.gain_db as f64;
+        Some(req)
+    }
+
+    /// Puts the selection on the clipboard as a file: at once when a copy from this recipe is
+    /// there, else once the worker has written it.
+    fn copy_selection(&mut self) {
+        let Some(req) = self.copy_request() else { return };
+        match req.plan() {
+            Ok(plan) if plan.pending.is_none() => self.copy_out(vec![plan.output]),
+            Ok(plan) => {
+                self.set_status(format!("Copying {}", tilde(&plan.output)), false);
+                self.worker.send(Job::Copy { plan, ready: None });
+            }
+            Err(e) => self.set_status(format!("Copy: {e:#}"), true),
+        }
+    }
+
+    /// Starts dragging the selection out at once, the path decided; the file follows from the
+    /// worker, and the drop waits for it.
+    fn drag_selection(&mut self, image: Option<dnd::Image>) {
+        let Some(req) = self.copy_request() else { return };
+        let plan = match req.plan() {
+            Ok(p) => p,
+            Err(e) => return self.set_status(format!("Copy: {e:#}"), true),
+        };
+        let ready = plan.pending.as_ref().map(|_| dnd::Ready::new());
+        let what = tilde(&plan.output);
+        self.drag_out(vec![plan.output.clone()], image, ready.clone(), &what);
+        if plan.pending.is_some() {
+            self.worker.send(Job::Copy { plan, ready });
+        }
+    }
+
+    /// Hands `paths` to the drop target of the drag the pointer is in the middle of.
+    fn drag_out(&mut self, paths: Vec<PathBuf>, image: Option<dnd::Image>, ready: Option<dnd::Ready>, what: &str) {
+        match self.drag.start(paths, image, ready) {
+            Ok(()) => self.set_status(format!("Dragging {what}"), false),
+            Err(e) => self.set_status(format!("Drag: {e}; the file lands at {what}"), true),
+        }
+    }
+
+    /// The picture under the pointer while a span of a file is dragged out: its envelope on a
+    /// translucent card, at the display's scale.
+    fn ghost(&self, ctx: &egui::Context, peaks: &hark_core::Peaks, span: (f64, f64), gain: f32) -> dnd::Image {
+        let scale = ctx.pixels_per_point().round().max(1.0) as i32;
+        let colors = waveform::GhostColors { card: self.theme.bg_deep, peak: self.theme.accent.gamma_multiply(0.7), rms: self.theme.accent };
+        waveform::ghost(peaks, span, gain, &colors, scale)
+    }
+
+    fn copy_out(&mut self, paths: Vec<PathBuf>) {
+        let shown = paths.iter().map(|p| tilde(p)).collect::<Vec<_>>().join(", ");
+        match dnd::copy_files(&paths) {
+            Ok(()) => self.set_status(format!("Copied {shown}"), false),
+            Err(e) => self.set_status(format!("Copy: {e}"), true),
+        }
+    }
+
+    /// Ctrl+C: over the list, the original file; elsewhere, the selection as a copy.
+    fn copy_shortcut(&mut self, ctx: &egui::Context) {
+        let over_list = ctx.pointer_latest_pos().is_some_and(|p| self.list_rect.contains(p));
+        let Some(i) = self.selected else { return };
+        if over_list {
+            let path = self.files[i].path.clone();
+            self.copy_out(vec![path]);
+        } else {
+            self.copy_selection();
+        }
+    }
+
     fn record_loudness(&mut self, path: &Path, loudness: Option<Loudness>) {
         let Some(ld) = loudness else { return };
         let _ = self.db.set_loudness(path, ld.integrated_lufs, ld.true_peak_dbfs);
@@ -757,6 +846,11 @@ impl App {
                         }
                     }
                 }
+                Done::Copied { result, dragged } => match result {
+                    Ok(_) if dragged => {}
+                    Ok(r) => self.copy_out(vec![r.output]),
+                    Err(e) => self.set_status(format!("Copy failed: {e}"), true),
+                },
                 Done::Exported(result) => match result {
                     Ok(r) => {
                         let mut gain = format!("{:+.2} dB", r.origin.measured.applied_gain_db);
@@ -801,6 +895,11 @@ impl App {
         let n = self.files.len();
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
         let shift = ctx.input(|i| i.modifiers.shift);
+        // egui-winit turns Ctrl+C into its own event in place of the key press.
+        if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))) {
+            self.copy_shortcut(ctx);
+            return;
+        }
         let go = |app: &mut App, i: usize| app.select(i, app.autoplay);
         if pressed(Key::ArrowDown) && n > 0 {
             go(self, self.selected.map(|i| (i + 1).min(n - 1)).unwrap_or(0));
@@ -1223,7 +1322,9 @@ impl App {
         let mut clicked: Option<usize> = None;
         let mut double: Option<usize> = None;
         let mut context: Option<usize> = None;
+        let mut dragged: Option<usize> = None;
         let mut fav_toggle: Option<usize> = None;
+        self.list_rect = ui.max_rect();
         let mut action: Option<(usize, FileAction)> = None;
         let defs = self.config.tags.clone();
         let shown_folder = match &self.location {
@@ -1263,7 +1364,7 @@ impl App {
         let table_rect = egui::Rect::from_min_max(band.min, egui::pos2(band.right(), ui.max_rect().bottom()));
         let mut builder = TableBuilder::new(ui)
             .striped(true)
-            .sense(Sense::click())
+            .sense(Sense::click_and_drag())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::exact(STAR_W))
             .column(Column::exact(name_w).clip(true))
@@ -1400,6 +1501,8 @@ impl App {
                     row.col(|_| {});
                     let resp = row.response();
                     if fav_toggle == Some(i) {
+                    } else if resp.drag_started() {
+                        dragged = Some(i);
                     } else if resp.double_clicked() {
                         double = Some(i);
                     } else if resp.clicked() {
@@ -1474,7 +1577,12 @@ impl App {
         if let Some(i) = fav_toggle {
             self.toggle_favorite_of(i);
         }
-        if let Some(i) = double {
+        if let Some(i) = dragged {
+            let path = self.files[i].path.clone();
+            let what = self.files[i].name.clone();
+            let image = self.cache.get(&path).and_then(|l| l.peaks.clone()).map(|p| self.ghost(ui.ctx(), &p, (0.0, p.duration_secs()), 1.0));
+            self.drag_out(vec![path], image, None, &what);
+        } else if let Some(i) = double {
             self.select(i, true);
         } else if let Some(i) = clicked {
             self.select(i, self.autoplay);
@@ -1606,11 +1714,14 @@ impl App {
         const FADER_W: f32 = 36.0;
         self.wave.gain = hark_core::pcm::db_to_gain(self.gain_db as f64) as f32;
         let mut event = WaveEvent::None;
+        let mut wave_resp = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             let wave_w = ui.available_width() - FADER_W - 8.0;
             ui.allocate_ui_with_layout(egui::vec2(wave_w, wave_h), egui::Layout::top_down(egui::Align::Min), |ui| {
-                event = waveform::show(ui, &mut self.wave, peaks.as_deref(), samples.as_deref(), duration, playhead, wave_h, &colors);
+                let (ev, resp) = waveform::show(ui, &mut self.wave, peaks.as_deref(), samples.as_deref(), duration, playhead, wave_h, &colors);
+                event = ev;
+                wave_resp = Some(resp);
             });
             // The readout sits level with the ruler and the rail with the wave itself.
             ui.allocate_ui_with_layout(egui::vec2(FADER_W, wave_h), egui::Layout::top_down(egui::Align::Center), |ui| {
@@ -1646,8 +1757,46 @@ impl App {
                 }
             });
         });
-        if let WaveEvent::Seek(t) = event {
-            self.play(Some(t));
+        // The selection's menu, on a right-click anywhere on the wave.
+        if let Some(resp) = wave_resp.filter(|_| self.current.is_some()) {
+            let mut action: Option<WaveAction> = None;
+            egui::Popup::context_menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClick).show(|ui| {
+                theme::menu_items(ui);
+                let has_selection = self.wave.selection.is_some();
+                let item = |ui: &mut egui::Ui, icon: &str, label: &str, key: &str, enabled: bool| ui.add_enabled(enabled, egui::Button::new(theme::icon_text(icon, label, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER))).on_hover_text(key).clicked();
+                if item(ui, icons::COPY, "Copy", "Ctrl+C; Ctrl-drag the wave to drag it out", true) {
+                    action = Some(WaveAction::Copy);
+                }
+                ui.separator();
+                if item(ui, icons::ARROWS_IN_LINE_HORIZONTAL, "Trim to the sound", "T", true) {
+                    action = Some(WaveAction::Trim);
+                }
+                if item(ui, icons::MAGNIFYING_GLASS_PLUS, "Zoom to selection", "Z", has_selection) {
+                    action = Some(WaveAction::Zoom);
+                }
+                if item(ui, icons::X, "Clear selection", "Del", has_selection) {
+                    action = Some(WaveAction::Clear);
+                }
+            });
+            match action {
+                Some(WaveAction::Copy) => self.copy_selection(),
+                Some(WaveAction::Trim) => self.trim_selection(),
+                Some(WaveAction::Zoom) => self.wave.zoom_to_selection(),
+                Some(WaveAction::Clear) => {
+                    self.wave.selection = None;
+                    self.wave.fade_in = 0.0;
+                    self.wave.fade_out = 0.0;
+                }
+                None => {}
+            }
+        }
+        match event {
+            WaveEvent::Seek(t) => self.play(Some(t)),
+            WaveEvent::DragOut => {
+                let image = peaks.as_ref().map(|p| self.ghost(ui.ctx(), p, self.wave.bounds(duration), self.wave.gain));
+                self.drag_selection(image);
+            }
+            WaveEvent::None => {}
         }
         let row = ui.scope(|ui| self.ui_transport(ui, playing, playhead, duration)).response.rect.height();
         if (row - self.transport_h).abs() > 0.5 {
@@ -2107,7 +2256,7 @@ impl App {
     fn ui_status(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if self.status.is_empty() {
-                for (key, action) in [("Space", "Play"), ("↑ ↓", "Audition"), ("← →", "Takes"), ("F", "Favorite"), ("1–9", "Tags"), ("[ ]", "Selection"), ("E", "Export")] {
+                for (key, action) in [("Space", "Play"), ("↑ ↓", "Audition"), ("← →", "Takes"), ("F", "Favorite"), ("1–9", "Tags"), ("[ ]", "Selection"), ("E", "Export"), ("Ctrl+C", "Copy")] {
                     self.key_hint(ui, key, action);
                 }
             } else {
@@ -2143,6 +2292,14 @@ impl App {
 
 fn secs_field(v: &mut f64, max: f64) -> egui::DragValue<'_> {
     egui::DragValue::new(v).speed(0.01).range(0.0..=max).fixed_decimals(3)
+}
+
+/// The wave's right-click menu.
+enum WaveAction {
+    Copy,
+    Trim,
+    Zoom,
+    Clear,
 }
 
 enum FileAction {
@@ -2230,22 +2387,31 @@ fn subfolders(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Opens the file's folder in the desktop's file manager, selecting the file where that is
-/// supported.
+/// Opens a folder in the desktop's file manager, or a file's folder with the file selected
+/// where that is supported.
 fn reveal(path: &Path) -> std::io::Result<()> {
     use std::process::Command;
+    let dir = path.is_dir();
     #[cfg(target_os = "windows")]
     {
-        Command::new("explorer").arg(format!("/select,{}", path.display())).spawn()?;
+        if dir {
+            Command::new("explorer").arg(path).spawn()?;
+        } else {
+            Command::new("explorer").arg(format!("/select,{}", path.display())).spawn()?;
+        }
     }
     #[cfg(target_os = "macos")]
     {
-        Command::new("open").arg("-R").arg(path).spawn()?;
+        if dir {
+            Command::new("open").arg(path).spawn()?;
+        } else {
+            Command::new("open").arg("-R").arg(path).spawn()?;
+        }
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let dir = path.parent().unwrap_or(path);
-        Command::new("xdg-open").arg(dir).spawn()?;
+        let folder = if dir { path } else { path.parent().unwrap_or(path) };
+        Command::new("xdg-open").arg(folder).spawn()?;
     }
     Ok(())
 }

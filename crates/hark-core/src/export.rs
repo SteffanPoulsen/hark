@@ -38,6 +38,11 @@ pub struct ExportRequest {
     pub tags: Vec<String>,
     pub favorite: bool,
     pub overwrite: bool,
+    /// The source's blake3 when the caller already knows it, so the file is not hashed again.
+    pub source_hash: Option<String>,
+    /// Measure the result's loudness for the origin and the BWF chunk. An export does; a copy
+    /// skips it, since on a long selection the measurement costs more than the rest together.
+    pub measure_output: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -73,6 +78,8 @@ impl ExportRequest {
             tags,
             favorite,
             overwrite: false,
+            source_hash: None,
+            measure_output: true,
         })
     }
 
@@ -130,17 +137,24 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
         return Err(anyhow!("{} exists (use overwrite)", output.display()));
     }
     let source_meta = std::fs::metadata(&req.source).with_context(|| format!("stat {}", req.source.display()))?;
-    let source = crate::decode::decode(&req.source)?;
+    let info = crate::decode::probe(&req.source)?;
     let preset = req.effective_preset();
     let mut req = req.clone();
+    // Only the selection is decoded, so a short span of a long file costs what the span does.
+    let mut source = match req.selection {
+        Some(s) if s.end_secs <= s.start_secs => return Err(anyhow!("empty selection")),
+        Some(s) => crate::decode::decode_span(&req.source, s.start_secs, s.end_secs)?,
+        None => crate::decode::decode(&req.source)?,
+    };
     if req.trim {
-        let (start, end) = req.selection.map(|s| (s.start_secs, s.end_secs)).unwrap_or((0.0, source.duration_secs()));
-        let (start_secs, end_secs) = source.sound_span(start, end).ok_or_else(|| anyhow!("silent; nothing to trim to"))?;
-        req.selection = Some(Selection { start_secs, end_secs });
+        let (a, b) = source.sound_span(0.0, source.duration_secs()).ok_or_else(|| anyhow!("silent; nothing to trim to"))?;
+        let base = req.selection.map(|s| s.start_secs).unwrap_or(0.0);
+        req.selection = Some(Selection { start_secs: base + a, end_secs: base + b });
+        source = source.slice_frames(source.frame_at(a), source.frame_at(b));
     }
     let req = &req;
-    let (pcm, warnings, measured) = process(&source, req, &preset)?;
-    let output_loudness = loudness::measure(&pcm).ok();
+    let (pcm, warnings, measured) = process(source, req, &preset)?;
+    let output_loudness = if req.measure_output { loudness::measure(&pcm).ok() } else { None };
     let measured = Measured {
         output_lufs: output_loudness.map(|l| l.integrated_lufs),
         output_true_peak_dbfs: output_loudness.map(|l| l.true_peak_dbfs),
@@ -156,10 +170,13 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
             root_path: req.root.as_ref().map(|r| r.path.clone()),
             file_name: req.source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             size: source_meta.len(),
-            blake3: crate::library::hash_file(&req.source)?,
-            sample_rate: source.sample_rate,
-            channels: source.channels,
-            duration_secs: source.duration_secs(),
+            blake3: match &req.source_hash {
+                Some(h) => h.clone(),
+                None => crate::library::hash_file(&req.source)?,
+            },
+            sample_rate: info.sample_rate,
+            channels: info.channels,
+            duration_secs: info.duration_secs,
         },
         selection: req.selection.map(|s| SelectionRef { start_secs: s.start_secs, end_secs: s.end_secs }),
         fade_in_secs: req.fade_in_secs,
@@ -200,19 +217,10 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
     Ok(ExportResult { output, origin, warnings })
 }
 
-fn process(source: &Pcm, req: &ExportRequest, preset: &ExportPreset) -> Result<(Pcm, Vec<String>, Measured)> {
+/// Shapes the selection, already cut from the source, into the output.
+fn process(mut pcm: Pcm, req: &ExportRequest, preset: &ExportPreset) -> Result<(Pcm, Vec<String>, Measured)> {
     let mut warnings = Vec::new();
     let mut measured = Measured::default();
-
-    let mut pcm = match req.selection {
-        Some(s) => {
-            if s.end_secs <= s.start_secs {
-                return Err(anyhow!("empty selection"));
-            }
-            source.slice_frames(source.frame_at(s.start_secs), source.frame_at(s.end_secs))
-        }
-        None => source.clone(),
-    };
 
     if req.fade_in_secs > 0.0 {
         pcm.fade_in((req.fade_in_secs * pcm.sample_rate as f64).round() as usize, preset.fade_shape);
@@ -299,5 +307,7 @@ pub fn request_from_origin(origin: &Origin, output_root: &Path, output_path: Opt
         tags: origin.tags.clone(),
         favorite: origin.favorite,
         overwrite: true,
+        source_hash: None,
+        measure_output: true,
     }
 }

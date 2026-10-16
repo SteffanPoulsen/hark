@@ -99,6 +99,49 @@ pub fn decode(path: &Path) -> Result<Pcm> {
     Ok(pcm)
 }
 
+/// Decodes `start_secs..end_secs` alone, seeking to it, so a short span of a long file costs
+/// what the span does. The end is clamped to the file.
+///
+/// The seek lands a second early and each chunk is placed by its own timestamp: a lossy
+/// decoder gives silence for its first packets after a seek while it rebuilds its state, and
+/// a seek is only packet-accurate, so neither counting from the landing point nor trusting
+/// the first chunks would cut the right frames.
+pub fn decode_span(path: &Path, start_secs: f64, end_secs: f64) -> Result<Pcm> {
+    let mut reader = Reader::open(path)?;
+    if reader.sample_rate == 0 || reader.channels == 0 {
+        let whole = decode(path)?;
+        return Ok(whole.slice_frames(whole.frame_at(start_secs), whole.frame_at(end_secs)));
+    }
+    let rate = reader.sample_rate as f64;
+    let start = (start_secs.max(0.0) * rate).round() as u64;
+    let end = (end_secs.max(0.0) * rate).round() as u64;
+    let preroll = reader.sample_rate as u64;
+    let mut counted = reader.seek(start.saturating_sub(preroll))?;
+    let mut pcm = Pcm::new(reader.sample_rate, reader.channels);
+    let mut chunk = Vec::new();
+    loop {
+        if !reader.next_chunk(&mut chunk)? {
+            break;
+        }
+        let ch = reader.channels as usize;
+        let frames = (chunk.len() / ch) as u64;
+        let pos = reader.chunk_start.unwrap_or(counted);
+        if pos >= end {
+            break;
+        }
+        let from = start.saturating_sub(pos).min(frames) as usize;
+        let to = (end - pos).min(frames) as usize;
+        if from < to {
+            pcm.samples.extend_from_slice(&chunk[from * ch..to * ch]);
+        }
+        counted = pos + frames;
+        chunk.clear();
+    }
+    pcm.sample_rate = reader.sample_rate;
+    pcm.channels = reader.channels;
+    Ok(pcm)
+}
+
 /// A file decoded one packet at a time, seekable by frame.
 pub struct Reader {
     opened: Opened,
@@ -109,6 +152,8 @@ pub struct Reader {
     pub channels: u16,
     /// Length in frames when the container states it.
     pub frames: Option<u64>,
+    /// Where the last chunk starts, in frames, when the container timestamps its packets.
+    pub chunk_start: Option<u64>,
 }
 
 impl Reader {
@@ -122,6 +167,7 @@ impl Reader {
             opened,
             decoder,
             chunk: Vec::new(),
+            chunk_start: None,
         })
     }
 
@@ -139,6 +185,10 @@ impl Reader {
             };
             self.sample_rate = buf.spec().rate();
             self.channels = buf.spec().channels().count() as u16;
+            self.chunk_start = match self.opened.time_base {
+                Some(tb) => tb.calc_time(packet.pts).map(|t| (t.as_secs_f64() * self.sample_rate as f64).round() as u64),
+                None => Some(packet.pts.get().max(0) as u64),
+            };
             buf.copy_to_vec_interleaved(&mut self.chunk);
             out.extend_from_slice(&self.chunk);
             return Ok(true);

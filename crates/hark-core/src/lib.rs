@@ -11,6 +11,7 @@ pub mod pcm;
 pub mod peaks;
 pub mod project;
 pub mod resample;
+pub mod copies;
 pub mod wav;
 
 pub use config::{Config, ExportPreset, Root, TagDef};

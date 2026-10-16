@@ -26,7 +26,7 @@ impl From<SortArgs> for Sort {
 }
 
 #[derive(Parser)]
-#[command(name = "hark-cli", version, about = "hark without the window: library, marks, analysis and export")]
+#[command(name = "hark-cli", version, about = "hark without the window: library, marks, analysis, export and copy")]
 struct Cli {
     /// Machine-readable output.
     #[arg(long, global = true)]
@@ -113,6 +113,15 @@ enum Cmd {
     },
     /// Export a file, or a selection of it, through a preset.
     Export(ExportArgs),
+    /// Write a file, or a selection of it, as heard into the copy folder for another
+    /// program to take: WAV at the source's rate and channels, fades and gain applied, no
+    /// preset.
+    Copy(CopyArgs),
+    /// The copy folder: what it holds, where it is, and clearing it.
+    Copies {
+        #[command(subcommand)]
+        cmd: Option<CopiesCmd>,
+    },
     /// Run an exported file's own recipe again, with changes.
     Reexport {
         files: Vec<PathBuf>,
@@ -199,6 +208,25 @@ enum ProjectsCmd {
     Forget { project: String },
     /// Set the output folder of the open project, or the default one.
     Output { dir: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum CopiesCmd {
+    /// The folder, its files newest first, and their total size.
+    List,
+    /// Remove every file in the folder. A DAW that references a copy in place loses it.
+    Clear,
+    /// Show or set the folder: the open project's own, or the default with no project open
+    /// or with --default.
+    Folder {
+        dir: Option<PathBuf>,
+        /// Set the default folder even while a project is open.
+        #[arg(long)]
+        default: bool,
+        /// Back to the fallback: the default folder for a project, hark's own for the default.
+        #[arg(long)]
+        unset: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -361,6 +389,30 @@ struct ExportArgs {
     output_root: Option<PathBuf>,
     #[arg(long)]
     overwrite: bool,
+}
+
+#[derive(Args)]
+struct CopyArgs {
+    file: PathBuf,
+    /// Selection start in seconds.
+    #[arg(long = "in")]
+    start: Option<f64>,
+    /// Selection end in seconds.
+    #[arg(long = "out")]
+    end: Option<f64>,
+    #[arg(long, default_value_t = 0.0)]
+    fade_in: f64,
+    #[arg(long, default_value_t = 0.0)]
+    fade_out: f64,
+    /// linear, equal_power or logarithmic.
+    #[arg(long, default_value = "equal_power")]
+    fade: hark_core::pcm::FadeShape,
+    /// Level in dB (--gain=-6 for a cut).
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+    gain: f64,
+    /// Write into this folder instead of the copy folder, for this run only.
+    #[arg(long)]
+    folder: Option<PathBuf>,
 }
 
 fn main() {
@@ -842,6 +894,78 @@ fn run() -> Result<()> {
             req.overwrite = a.overwrite;
             let result = hark_core::export::run(&req)?;
             report_export(&result, json)?;
+        }
+        Cmd::Copy(a) => {
+            let config = load(&project)?;
+            let file = abs(&a.file)?;
+            let db = open_db(&project)?;
+            let record = db.get(&file)?;
+            let (tags, favorite) = record.map(|r| (r.tags, r.favorite)).unwrap_or_default();
+            let mut req = hark_core::copies::CopyRequest::from_config(&config, &file, tags, favorite);
+            req.source_hash = db.ensure_hash(&file).ok();
+            req.selection = match (a.start, a.end) {
+                (None, None) => None,
+                (s, e) => Some(Selection { start_secs: s.unwrap_or(0.0), end_secs: match e { Some(e) => e, None => hark_core::probe(&file)?.duration_secs } }),
+            };
+            req.fade_in_secs = a.fade_in;
+            req.fade_out_secs = a.fade_out;
+            req.fade_shape = a.fade;
+            req.gain_db = a.gain;
+            if let Some(f) = &a.folder {
+                req.folder = abs_dir(f)?;
+            }
+            let result = hark_core::copies::write(&req)?;
+            report_export(&result, json)?;
+        }
+        Cmd::Copies { cmd } => {
+            let mut config = load(&project)?;
+            match cmd.unwrap_or(CopiesCmd::List) {
+                CopiesCmd::List => {
+                    let (summary, files) = hark_core::copies::list(&config.copy_folder());
+                    if json {
+                        print_json(&serde_json::json!({ "folder": summary.folder, "files": summary.files, "bytes": summary.bytes, "paths": files }))?;
+                    } else {
+                        println!("{}  ·  {} files  ·  {:.1} MB", summary.folder.display(), summary.files, summary.bytes as f64 / 1e6);
+                        for f in &files {
+                            println!("  {}", f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                        }
+                    }
+                }
+                CopiesCmd::Clear => {
+                    let folder = config.copy_folder();
+                    let n = hark_core::copies::clear(&folder)?;
+                    if json {
+                        print_json(&serde_json::json!({ "folder": folder, "removed": n }))?;
+                    } else {
+                        println!("removed {n} files from {}", folder.display());
+                    }
+                }
+                CopiesCmd::Folder { dir, default, unset } => {
+                    let value = match (&dir, unset) {
+                        (Some(d), _) => Some(Some(abs_dir(d)?)),
+                        (None, true) => Some(None),
+                        (None, false) => None,
+                    };
+                    if let Some(value) = value {
+                        match config.active.as_mut().filter(|_| !default) {
+                            Some(active) => {
+                                active.project.copy_folder = value;
+                                active.project.save(&active.path)?;
+                            }
+                            None => {
+                                config.copy_folder = value;
+                                config.save()?;
+                            }
+                        }
+                    }
+                    let project_folder = config.active.as_ref().and_then(|a| a.project.copy_folder.clone());
+                    if json {
+                        print_json(&serde_json::json!({ "folder": config.copy_folder(), "project": project_folder, "default": config.copy_folder, "fallback": hark_core::paths::copies_dir() }))?;
+                    } else {
+                        println!("{}", config.copy_folder().display());
+                    }
+                }
+            }
         }
         Cmd::Reexport { files, preset, output_root, in_place } => {
             let config = load(&project)?;

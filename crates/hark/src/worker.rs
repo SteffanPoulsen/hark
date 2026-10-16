@@ -7,9 +7,12 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use hark_core::audition::Source;
 use hark_core::config::Root;
+use hark_core::copies::Plan;
 use hark_core::export::{ExportRequest, ExportResult};
 use hark_core::library::ScanReport;
 use hark_core::{Loudness, Peaks};
+
+use crate::dnd::Ready;
 
 pub struct Loaded {
     pub path: PathBuf,
@@ -39,6 +42,8 @@ impl Loaded {
 pub enum Job {
     Load { path: PathBuf, device_rate: u32, stream_above_mb: f64 },
     Export(ExportRequest),
+    /// Writes a planned copy; `ready` tells a drag in flight when the file is there.
+    Copy { plan: Plan, ready: Option<Ready> },
     Scan(Vec<Root>),
 }
 
@@ -55,6 +60,9 @@ pub enum Done {
     /// The analysis pass of a streamed file.
     Analyzed(PathBuf, Result<(Arc<Peaks>, Option<Loudness>), String>),
     Exported(Result<ExportResult, String>),
+    /// `dragged` when the copy was for a drag, which is handed over by itself; otherwise the
+    /// clipboard still wants it.
+    Copied { result: Result<ExportResult, String>, dragged: bool },
     /// One result per root, by name; a root that could not be scanned carries the reason.
     Scanned(Vec<(String, Result<ScanReport, String>)>),
 }
@@ -90,6 +98,13 @@ impl Worker {
                 let done = match job {
                     Job::Load { path, device_rate, stream_above_mb } => Done::Loaded(path.clone(), load(&path, device_rate, stream_above_mb).map(Arc::new).map_err(|e| format!("{e:#}"))),
                     Job::Export(req) => Done::Exported(hark_core::export::run(&req).map_err(|e| format!("{e:#}"))),
+                    Job::Copy { plan, ready } => {
+                        let result = hark_core::copies::finish(&plan).map_err(|e| format!("{e:#}"));
+                        if let Some(r) = &ready {
+                            r.set(result.is_ok());
+                        }
+                        Done::Copied { result, dragged: ready.is_some() }
+                    }
                     Job::Scan(roots) => Done::Scanned(scan(&roots, |phase| {
                         let _ = done_tx.send(Done::Scanning(phase));
                         ctx.request_repaint();

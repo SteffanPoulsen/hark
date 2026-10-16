@@ -176,6 +176,7 @@ impl App {
                 _ => "No audio".into(),
             };
             row(ui, &theme, false, "Audio output", &device, |_| {});
+            self.copy_rows(ui, &theme, &mut save);
             let palette = self.config.theme_file.as_ref().map(|p| p.display().to_string());
             row(ui, &theme, false, "Theme palette", "A palette file in the desktop theme format replaces the built-in colors.", |ui| {
                 if palette.is_some() && theme::tool_button(ui, icons::X, "").on_hover_text("Use the built-in palette").clicked() {
@@ -207,6 +208,101 @@ impl App {
         if retheme {
             self.theme = self.config.theme_file.as_ref().and_then(|p| Theme::from_file(p)).unwrap_or_default();
             self.theme.apply(ui.ctx());
+        }
+    }
+
+    /// The copy folder: where it is and what it holds, with a way to move, open and
+    /// clear it; and the open project's own folder, when there is a project.
+    fn copy_rows(&mut self, ui: &mut egui::Ui, theme: &Theme, save: &mut bool) {
+        let folder = self.config.copy_folder();
+        let (summary, _) = hark_core::copies::list(&folder);
+        let own = self.config.copy_folder.is_some();
+        let desc = format!(
+            "Where a dragged or copied selection is written: {}  ·  {} file{}, {:.1} MB. A DAW may reference a copy in place, so nothing is removed until you clear the folder.",
+            crate::tilde(&folder),
+            summary.files,
+            if summary.files == 1 { "" } else { "s" },
+            summary.bytes as f64 / 1e6
+        );
+        let project_folder = self.config.active.as_ref().and_then(|a| a.project.copy_folder.clone());
+        let title = if project_folder.is_some() { "Default copy folder" } else { "Copy folder" };
+        let mut clear = false;
+        row(ui, theme, false, title, &desc, |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let b = egui::Button::new(theme::icon_text(icons::TRASH, "Clear", 14.0, egui::FontFamily::Proportional, theme.err)).min_size(egui::vec2(0.0, 28.0));
+            if ui.add_enabled(summary.files > 0, b).on_hover_text("Remove every copy").clicked() {
+                clear = true;
+            }
+            if theme::tool_button(ui, icons::FOLDER_OPEN, "").on_hover_text("Show the folder").clicked() {
+                let _ = std::fs::create_dir_all(&folder);
+                if let Err(e) = crate::reveal(&folder) {
+                    self.set_status(format!("Show in folder: {e}"), true);
+                }
+            }
+            if own && theme::tool_button(ui, icons::X, "").on_hover_text("Back to hark's own folder").clicked() {
+                self.config.copy_folder = None;
+                *save = true;
+            }
+            if theme::tool_button(ui, icons::FOLDER, "Choose…").clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.config.copy_folder = Some(path);
+                    *save = true;
+                }
+            }
+        });
+        if clear {
+            self.copies_clear = true;
+        }
+        if self.copies_clear {
+            let modal = egui::Modal::new(egui::Id::new("copies-clear")).show(ui.ctx(), |ui| {
+                ui.set_width(360.0);
+                ui.label(theme::semibold("Clear the copy folder?"));
+                ui.add_space(6.0);
+                ui.label(RichText::new(format!("{} files in {} go. A DAW session that references one of them in place loses it.", summary.files, crate::tilde(&folder))).size(13.0));
+                ui.add_space(12.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("Clear").color(theme.err)).clicked() {
+                        match hark_core::copies::clear(&folder) {
+                            Ok(n) => self.set_status(format!("Removed {n} copies"), false),
+                            Err(e) => self.set_status(format!("Clear copies: {e:#}"), true),
+                        }
+                        self.copies_clear = false;
+                    }
+                    if ui.button("Keep").clicked() {
+                        self.copies_clear = false;
+                    }
+                });
+            });
+            if modal.should_close() {
+                self.copies_clear = false;
+            }
+        }
+        if let Some(active) = &self.config.active {
+            let name = hark_core::project::name_of_path(&active.path);
+            let desc = match &project_folder {
+                Some(p) => format!("{}'s copies go to {} instead of the default folder.", name, crate::tilde(p)),
+                None => format!("{name} uses the default folder. A project at a DAW session can send its copies to the session's audio folder instead."),
+            };
+            let mut set: Option<Option<std::path::PathBuf>> = None;
+            row(ui, theme, false, "Project copy folder", &desc, |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if project_folder.is_some() && theme::tool_button(ui, icons::X, "").on_hover_text("Use the default folder").clicked() {
+                    set = Some(None);
+                }
+                if theme::tool_button(ui, icons::FOLDER, "Choose…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        set = Some(Some(path));
+                    }
+                }
+            });
+            if let Some(value) = set {
+                if let Some(active) = self.config.active.as_mut() {
+                    active.project.copy_folder = value;
+                }
+                if let Err(e) = self.config.save_project() {
+                    self.set_status(format!("Project: {e:#}"), true);
+                }
+            }
         }
     }
 

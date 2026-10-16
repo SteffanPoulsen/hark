@@ -19,6 +19,11 @@ pub fn db_file() -> PathBuf {
     dirs().data_dir().join("library.sqlite")
 }
 
+/// Where copies go unless the config or the project says otherwise.
+pub fn copies_dir() -> PathBuf {
+    dirs().data_dir().join("copies")
+}
+
 pub fn peaks_cache_dir() -> PathBuf {
     dirs().cache_dir().join("peaks")
 }

@@ -46,6 +46,8 @@ pub struct WaveState {
 pub enum WaveEvent {
     None,
     Seek(f64),
+    /// A Ctrl-drag began on the wave: the selection is being dragged out of the window.
+    DragOut,
 }
 
 pub struct WaveColors {
@@ -276,7 +278,9 @@ fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64
     draw_lane_dividers(painter, rect, channels, colors);
 }
 
-pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: Option<&Pcm>, duration: f64, playhead: Option<f64>, height: f32, colors: &WaveColors) -> WaveEvent {
+/// Draws the wave and handles its input; the response comes back so the caller can hang a
+/// menu on it.
+pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: Option<&Pcm>, duration: f64, playhead: Option<f64>, height: f32, colors: &WaveColors) -> (WaveEvent, egui::Response) {
     let width = ui.available_width();
     let (resp, painter) = ui.allocate_painter(Vec2::new(width, height), Sense::click_and_drag());
     let full = resp.rect;
@@ -292,7 +296,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
             painter.add(s);
         }
         painter.text(rect.center(), Align2::CENTER_CENTER, "no file", FontId::proportional(14.0), visuals.weak_text_color());
-        return WaveEvent::None;
+        return (WaveEvent::None, resp);
     };
     let duration = duration.max(1e-6);
     if state.view.1 <= state.view.0 {
@@ -388,8 +392,11 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
         }
     }
 
-    // Cursor.
+    // Cursor. Ctrl over the wave means a drag would carry the selection out, as in a file
+    // manager.
+    let ctrl = ui.input(|i| i.modifiers.ctrl);
     match active {
+        _ if ctrl && resp.hovered() => ui.ctx().set_cursor_icon(CursorIcon::Grab),
         Some(Drag::Start) | Some(Drag::End) | Some(Drag::FadeIn) | Some(Drag::FadeOut) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
         Some(Drag::Move { .. }) => ui.ctx().set_cursor_icon(CursorIcon::Grabbing),
         _ if resp.hovered() && lane.contains(resp.hover_pos().unwrap_or(Pos2::ZERO)) => {}
@@ -399,6 +406,10 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
 
     // Left-button interaction.
     let mut event = WaveEvent::None;
+    if resp.drag_started_by(PointerButton::Primary) && ctrl {
+        state.drag = None;
+        return (WaveEvent::DragOut, resp);
+    }
     if resp.drag_started_by(PointerButton::Primary) {
         // The drag is reported a few pixels after the press; a fast flick would otherwise miss
         // the handle it started on.
@@ -470,7 +481,61 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
     if resp.double_clicked_by(PointerButton::Primary) {
         state.view = (0.0, duration);
     }
-    event
+    (event, resp)
+}
+
+pub struct GhostColors {
+    pub card: Color32,
+    pub peak: Color32,
+    pub rms: Color32,
+}
+
+/// The drag picture: the span's envelope, all channels folded into one, on a rounded
+/// translucent card of 200 by 56 logical pixels, drawn at `scale` buffer pixels per logical.
+pub fn ghost(peaks: &Peaks, span: (f64, f64), gain: f32, colors: &GhostColors, scale: i32) -> crate::dnd::Image {
+    let (w, h) = (200 * scale as usize, 56 * scale as usize);
+    let radius = 6.0 * scale as f32;
+    let mut rgba = vec![0u8; w * h * 4];
+    let mut put = |x: usize, y: usize, c: Color32| {
+        let i = (y * w + x) * 4;
+        rgba[i..i + 4].copy_from_slice(&[c.r(), c.g(), c.b(), c.a()]);
+    };
+    let card = Color32::from_rgba_unmultiplied(colors.card.r(), colors.card.g(), colors.card.b(), 200);
+    for y in 0..h {
+        for x in 0..w {
+            let (cx, cy) = ((x as f32 + 0.5 - radius).min(0.0).max(x as f32 + 0.5 - (w as f32 - radius)), (y as f32 + 0.5 - radius).min(0.0).max(y as f32 + 0.5 - (h as f32 - radius)));
+            if cx * cx + cy * cy <= radius * radius {
+                put(x, y, card);
+            }
+        }
+    }
+    let inset = 4 * scale as usize;
+    let cols = w - 2 * inset;
+    let mut merged = vec![hark_core::peaks::Bin { min: 0.0, max: 0.0, rms: 0.0 }; cols];
+    for ch in 0..peaks.channels as usize {
+        for (m, b) in merged.iter_mut().zip(peaks.columns(ch, span.0, span.1, cols)) {
+            m.min = m.min.min(b.min);
+            m.max = m.max.max(b.max);
+            m.rms = m.rms.max(b.rms);
+        }
+    }
+    let mid = h as f32 * 0.5;
+    let half = mid - inset as f32;
+    let peak = Color32::from_rgba_unmultiplied(colors.peak.r(), colors.peak.g(), colors.peak.b(), 230);
+    let rms = Color32::from_rgba_unmultiplied(colors.rms.r(), colors.rms.g(), colors.rms.b(), 240);
+    for (k, b) in merged.iter().enumerate() {
+        let x = inset + k;
+        let y_of = |v: f32| (mid - (v * gain).clamp(-1.0, 1.0) * half).round() as usize;
+        let (top, bottom) = (y_of(b.max).min(y_of(b.min)), y_of(b.min).max(y_of(b.max)));
+        for y in top..=bottom.min(h - 1) {
+            put(x, y, peak);
+        }
+        let (rt, rb) = (y_of(b.rms).min(y_of(-b.rms)), y_of(-b.rms).max(y_of(b.rms)));
+        for y in rt..=rb.min(h - 1) {
+            put(x, y, rms);
+        }
+    }
+    crate::dnd::Image { width: w as u32, height: h as u32, rgba, scale }
 }
 
 pub fn fmt_time(s: f64) -> String {

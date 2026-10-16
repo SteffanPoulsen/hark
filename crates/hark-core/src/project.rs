@@ -1,7 +1,8 @@
 //! A project file: the target of the work, kept beside the game it serves. `<name>.hark` holds
-//! JSON: the library folders this project browses, where its exports go, and an id its
-//! favorites key on. The output folder is stored relative to the file when it sits below it,
-//! so the pair moves together. The project's name is the file's stem.
+//! JSON: the library folders this project browses, where its exports go, where its copies
+//! go when it has a place for them, and an id its favorites key on. The output and copy
+//! folders are stored relative to the file when they sit below it, so the set moves together.
+//! The project's name is the file's stem.
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +25,9 @@ pub struct Project {
     /// The folder under the output root the last export went to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_folder: Option<PathBuf>,
+    /// Where this project's copies go; `None` leaves them to the config's folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_folder: Option<PathBuf>,
     /// From before folders belonged to projects: a narrowing of the then-global library, turned
     /// into `roots` by `Config::adopt`.
     #[serde(default, rename = "scope", skip_serializing)]
@@ -36,10 +40,10 @@ pub struct Project {
 
 impl Project {
     pub fn new() -> Project {
-        Project { id: fresh_id(), roots: Vec::new(), output_root: None, export_folder: None, legacy_scope: Vec::new(), legacy_whole_library: false }
+        Project { id: fresh_id(), roots: Vec::new(), output_root: None, export_folder: None, copy_folder: None, legacy_scope: Vec::new(), legacy_whole_library: false }
     }
 
-    /// Reads a project file; the output folder comes back absolute.
+    /// Reads a project file; its folders come back absolute.
     pub fn load(path: &Path) -> Result<Project> {
         let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
         let value: serde_json::Value = serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
@@ -50,9 +54,11 @@ impl Project {
         }
         p.legacy_scope = p.legacy_scope.iter().filter(|_| !had_roots).cloned().collect();
         p.legacy_whole_library = !had_roots && p.legacy_scope.is_empty();
-        if let (Some(out), Some(dir)) = (&p.output_root, path.parent()) {
-            if out.is_relative() {
-                p.output_root = Some(dir.join(out));
+        if let Some(dir) = path.parent() {
+            for folder in [&mut p.output_root, &mut p.copy_folder].into_iter().flatten() {
+                if folder.is_relative() {
+                    *folder = dir.join(&*folder);
+                }
             }
         }
         Ok(p)
@@ -60,9 +66,11 @@ impl Project {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         let mut on_disk = self.clone();
-        if let (Some(out), Some(dir)) = (&self.output_root, path.parent()) {
-            if let Ok(rel) = out.strip_prefix(dir) {
-                on_disk.output_root = Some(rel.to_path_buf());
+        if let Some(dir) = path.parent() {
+            for folder in [&mut on_disk.output_root, &mut on_disk.copy_folder].into_iter().flatten() {
+                if let Ok(rel) = folder.strip_prefix(dir) {
+                    *folder = rel.to_path_buf();
+                }
             }
         }
         crate::paths::ensure_parent(path)?;

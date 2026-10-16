@@ -1,0 +1,184 @@
+//! Handing files to other programs: a drag out of the window, and a file copy to the system
+//! clipboard. winit 0.30 has neither, so each desktop gets its own piece behind the same two
+//! calls; X11 has no drag source at all, and the status line says so.
+
+use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex};
+
+#[cfg(all(unix, not(target_os = "macos")))]
+mod wayland;
+
+/// The picture under the pointer during a drag: straight-alpha RGBA, `scale` buffer pixels
+/// per logical one. Windows sizes the picture itself.
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    #[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+    pub scale: i32,
+}
+
+/// Whether a dragged file has been written yet. The drag starts the moment the pointer moves,
+/// with the path known; the file lands on a worker thread, and the drop target is answered
+/// only once it has.
+#[derive(Clone, Default)]
+pub struct Ready(Arc<(Mutex<Option<bool>>, Condvar)>);
+
+impl Ready {
+    pub fn new() -> Ready {
+        Ready::default()
+    }
+
+    pub fn set(&self, ok: bool) {
+        *self.0 .0.lock().unwrap() = Some(ok);
+        self.0 .1.notify_all();
+    }
+
+    /// Blocks until the file is there, or gives up after a couple of minutes.
+    pub fn wait(&self) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let mut state = self.0 .0.lock().unwrap();
+        while state.is_none() {
+            let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else { return false };
+            state = self.0 .1.wait_timeout(state, left).unwrap().0;
+        }
+        *state == Some(true)
+    }
+}
+
+/// The window's drag source, if the desktop has one.
+pub struct DragOut {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    wayland: Option<wayland::Dragger>,
+    #[cfg(windows)]
+    win32: Option<raw_window_handle::Win32WindowHandle>,
+}
+
+impl DragOut {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> DragOut {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let window = cc.window_handle().map(|h| h.as_raw());
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
+            let display = cc.display_handle().map(|h| h.as_raw());
+            let wayland = match (display, window) {
+                (Ok(RawDisplayHandle::Wayland(d)), Ok(RawWindowHandle::Wayland(w))) => {
+                    // SAFETY: winit's live wl_display and the window's wl_surface; both outlive
+                    // the app, which is created once for the process.
+                    match unsafe { wayland::Dragger::new(d.display.as_ptr(), w.surface.as_ptr()) } {
+                        Ok(d) => Some(d),
+                        Err(e) => {
+                            eprintln!("drag source: {e}");
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            DragOut { wayland }
+        }
+        #[cfg(windows)]
+        {
+            let win32 = match window {
+                Ok(RawWindowHandle::Win32(h)) => Some(h),
+                _ => None,
+            };
+            DragOut { win32 }
+        }
+        #[cfg(not(any(all(unix, not(target_os = "macos")), windows)))]
+        {
+            let _ = window;
+            DragOut {}
+        }
+    }
+
+    /// Starts dragging `paths` from the window, with `image` under the pointer, and with the
+    /// drop answered only once `ready` says the file is written. The pointer button must still
+    /// be down.
+    pub fn start(&self, paths: Vec<PathBuf>, image: Option<Image>, ready: Option<Ready>) -> Result<(), String> {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            match &self.wayland {
+                Some(d) => d.drag(paths, image, ready),
+                None => Err("dragging out of the window needs Wayland; on X11, use copy".into()),
+            }
+        }
+        #[cfg(windows)]
+        {
+            let Some(handle) = self.win32 else { return Err("no window handle for the drag".into()) };
+            // OLE runs the drag on this thread anyway, so the write is waited for here.
+            if ready.is_some_and(|r| !r.wait()) {
+                return Err("the file was not written".into());
+            }
+            struct Win(raw_window_handle::Win32WindowHandle);
+            impl raw_window_handle::HasWindowHandle for Win {
+                fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+                    // SAFETY: the handle is the live window's, held for the app's lifetime.
+                    Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Win32(self.0)) })
+                }
+            }
+            let png = image.and_then(|im| {
+                let mut png = std::io::Cursor::new(Vec::new());
+                image::write_buffer_with_format(&mut png, &im.rgba, im.width, im.height, image::ColorType::Rgba8, image::ImageFormat::Png).ok()?;
+                Some(png.into_inner())
+            });
+            drag::start_drag(&Win(handle), drag::DragItem::Files(paths), drag::Image::Raw(png.unwrap_or_default()), |_, _| {}, drag::Options::default()).map_err(|e| e.to_string())
+        }
+        #[cfg(not(any(all(unix, not(target_os = "macos")), windows)))]
+        {
+            let _ = (paths, image, ready);
+            Err("dragging out of the window is not available here; use copy".into())
+        }
+    }
+}
+
+/// Puts `paths` on the clipboard as files, the way a file manager's copy does.
+pub fn copy_files(paths: &[PathBuf]) -> Result<(), String> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
+        let uris = uri_list(paths);
+        let gnome = format!("copy\n{}", uris.trim_end_matches('\n').replace("\r\n", "\n"));
+        let sources = vec![
+            MimeSource { source: Source::Bytes(uris.clone().into_bytes().into()), mime_type: MimeType::Specific("text/uri-list".into()) },
+            MimeSource { source: Source::Bytes(gnome.into_bytes().into()), mime_type: MimeType::Specific("x-special/gnome-copied-files".into()) },
+            MimeSource { source: Source::Bytes(uris.into_bytes().into()), mime_type: MimeType::Text },
+        ];
+        Options::new().copy_multi(sources).map_err(|e| e.to_string())
+    }
+    #[cfg(windows)]
+    {
+        let list: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        let _open = clipboard_win::Clipboard::new_attempts(10).map_err(|e| e.to_string())?;
+        clipboard_win::Setter::write_clipboard(&clipboard_win::formats::FileList, &list[..]).map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(all(unix, not(target_os = "macos")), windows)))]
+    {
+        let _ = paths;
+        Err("copying files to the clipboard is not available here".into())
+    }
+}
+
+/// `text/uri-list`: one `file://` URI per line, CRLF-terminated, with the path percent-encoded.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn uri_list(paths: &[PathBuf]) -> String {
+    paths.iter().map(|p| format!("{}\r\n", file_uri(p))).collect()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn file_uri(path: &std::path::Path) -> String {
+    let mut out = String::from("file://");
+    let s = path.to_string_lossy();
+    let s = s.replace('\\', "/");
+    if !s.starts_with('/') {
+        out.push('/');
+    }
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}

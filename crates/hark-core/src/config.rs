@@ -130,6 +130,10 @@ pub struct Config {
     /// The folder under the output root the last export went to, with no project open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_folder: Option<PathBuf>,
+    /// Where copies go unless the open project has its own folder; `None` takes
+    /// `paths::copies_dir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_folder: Option<PathBuf>,
     /// Project files hark knows: the switcher lists them.
     #[serde(default)]
     pub project_files: Vec<PathBuf>,
@@ -223,6 +227,7 @@ impl Default for Config {
             roots: Vec::new(),
             output_root: None,
             export_folder: None,
+            copy_folder: None,
             project_files: Vec::new(),
             project: None,
             legacy_projects: Vec::new(),
@@ -299,7 +304,7 @@ impl Config {
                 continue;
             }
             let file = dir.join(format!("{name}.{}", crate::project::EXTENSION));
-            let project = Project { id: name.clone(), roots: self.roots_from_paths(&scope), output_root, export_folder: None, legacy_scope: Vec::new(), legacy_whole_library: scope.is_empty() };
+            let project = Project { id: name.clone(), roots: self.roots_from_paths(&scope), output_root, export_folder: None, copy_folder: None, legacy_scope: Vec::new(), legacy_whole_library: scope.is_empty() };
             let project = { let mut p = project; if p.legacy_whole_library { p.roots = self.roots.clone(); } p };
             if let Err(e) = project.save(&file) {
                 eprintln!("project {name}: {e:#}");
@@ -348,6 +353,11 @@ impl Config {
                 self.save()
             }
         }
+    }
+
+    /// Where a copy goes: the open project's folder, else the config's, else hark's own.
+    pub fn copy_folder(&self) -> PathBuf {
+        self.active.as_ref().and_then(|a| a.project.copy_folder.clone()).or_else(|| self.copy_folder.clone()).unwrap_or_else(crate::paths::copies_dir)
     }
 
     /// The favorites key: the open project's id, or the default's.
