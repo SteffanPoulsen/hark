@@ -268,6 +268,8 @@ struct App {
     transport_h: f32,
     /// Height the export card's content took on the last frame; the bottom panel is sized to it.
     export_card_h: f32,
+    /// What the export button reports: the write under way, or how the last one went.
+    export_state: ExportState,
     /// Panel sizes and column widths go back to their defaults on the next frame.
     reset_layout: bool,
     /// The scale slider's value while it is being dragged; applied when the drag ends.
@@ -365,6 +367,7 @@ impl App {
             loop_on: false,
             transport_h: 34.0,
             export_card_h: 380.0,
+            export_state: ExportState::Idle,
             reset_layout: false,
             zoom_pending: None,
             gain_db: 0.0,
@@ -731,8 +734,14 @@ impl App {
     }
 
     fn export(&mut self) {
+        if matches!(self.export_state, ExportState::Writing { .. }) {
+            return;
+        }
         match self.export_request() {
             Some(Ok(req)) => {
+                let duration = self.current.as_ref().map(|c| c.duration_secs).unwrap_or(0.0);
+                let span = req.selection.map(|s| (s.start_secs, s.end_secs)).unwrap_or((0.0, duration));
+                self.export_state = ExportState::Writing { span };
                 self.set_status(format!("Exporting {}", req.output_path().display()), false);
                 self.worker.send(Job::Export(req));
             }
@@ -871,18 +880,31 @@ impl App {
                     Ok(r) => self.copy_out(vec![r.output]),
                     Err(e) => self.set_status(format!("Copy failed: {e}"), true),
                 },
-                Done::Exported(result) => match result {
-                    Ok(r) => {
-                        let mut gain = format!("{:+.2} dB", r.origin.measured.applied_gain_db);
-                        for w in &r.warnings {
-                            gain.push_str("  ·  ");
-                            gain.push_str(w);
+                Done::Exported(result) => {
+                    let span = match std::mem::replace(&mut self.export_state, ExportState::Idle) {
+                        ExportState::Writing { span } => Some(span),
+                        _ => None,
+                    };
+                    match result {
+                        Ok(r) => {
+                            let mut gain = format!("{:+.2} dB", r.origin.measured.applied_gain_db);
+                            for w in &r.warnings {
+                                gain.push_str("  ·  ");
+                                gain.push_str(w);
+                            }
+                            let shown = self.config.output_root().and_then(|root| r.output.strip_prefix(root).ok()).unwrap_or(&r.output);
+                            self.set_status(format!("Exported {}  ·  {gain}", shown.display()), false);
+                            self.export_state = ExportState::Done { at: Instant::now() };
+                            if let Some(span) = span {
+                                self.wave.flash(span);
+                            }
                         }
-                        let shown = self.config.output_root().and_then(|root| r.output.strip_prefix(root).ok()).unwrap_or(&r.output);
-                        self.set_status(format!("Exported {}  ·  {gain}", shown.display()), false);
+                        Err(e) => {
+                            self.set_status(format!("Export failed: {e}"), true);
+                            self.export_state = ExportState::Failed { at: Instant::now() };
+                        }
                     }
-                    Err(e) => self.set_status(format!("Export failed: {e}"), true),
-                },
+                }
                 Done::Scanning(phase) => {
                     if self.scanning.is_some() {
                         self.scanning = Some(phase);
@@ -1736,6 +1758,7 @@ impl App {
             fade: self.theme.accent2.gamma_multiply(1.3).to_opaque(),
             playhead: self.theme.err,
             axis: self.theme.line,
+            flash: self.theme.ok,
         };
         // The gain fader stands beside the waveform and scales it, so what you hear is what
         // you see.
@@ -2106,22 +2129,42 @@ impl App {
             self.export_card_h = natural;
             ui.ctx().request_repaint();
         }
+        // The button reports its own outcome by colour: ok for a moment after a write, the
+        // error colour after a failure, then back to the accent; the footer has the words.
         let can = matches!(req, Some(Ok(_)));
+        // How far back toward the accent the fill is, or `None` once the outcome is over.
+        let settled = |at: &Instant, secs: f32| {
+            let t = at.elapsed().as_secs_f32() / secs;
+            (t < 1.0).then(|| 1.0 - waveform::flash_left(t))
+        };
+        let expired = match &self.export_state {
+            ExportState::Done { at, .. } => settled(at, EXPORT_DONE_SECS).is_none(),
+            ExportState::Failed { at } => settled(at, EXPORT_FAILED_SECS).is_none(),
+            _ => false,
+        };
+        if expired {
+            self.export_state = ExportState::Idle;
+        }
+        let (fill, text, enabled) = match &self.export_state {
+            ExportState::Writing { .. } => (theme.overlay, theme.muted, false),
+            ExportState::Done { at, .. } if let Some(back) = settled(at, EXPORT_DONE_SECS) => (theme.ok.lerp_to_gamma(theme.accent, back), theme.on_accent(), can),
+            ExportState::Failed { at } if let Some(back) = settled(at, EXPORT_FAILED_SECS) => (theme.err.lerp_to_gamma(theme.accent, back), theme.on_accent(), can),
+            _ => (if can { theme.accent } else { theme.overlay }, if can { theme.on_accent() } else { theme.muted }, can),
+        };
+        if !matches!(self.export_state, ExportState::Idle) {
+            ui.ctx().request_repaint();
+        }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
             let avail = ui.available_rect_before_wrap();
             let rect = egui::Rect::from_min_max(egui::pos2(avail.left(), avail.bottom() - BUTTON_H), avail.right_bottom());
-            let hot = can && ui.rect_contains_pointer(rect);
-            let fill = match (can, hot) {
-                (true, true) => theme.accent.gamma_multiply(1.15).to_opaque(),
-                (true, false) => theme.accent,
-                (false, _) => theme.overlay,
-            };
-            let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 15.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), if can { theme.on_accent() } else { theme.muted }))
+            let hot = enabled && ui.rect_contains_pointer(rect);
+            let fill = if hot { fill.gamma_multiply(1.15).to_opaque() } else { fill };
+            let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 15.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), text))
                 .fill(fill)
                 .stroke(Stroke::NONE)
                 .corner_radius(CornerRadius::same(6))
                 .min_size(rect.size());
-            if ui.add_enabled(can, button).on_hover_text(self.key_of(Action::Export)).clicked() {
+            if ui.add_enabled(enabled, button).on_hover_text(self.key_of(Action::Export)).clicked() {
                 self.export();
             }
         });
@@ -2337,6 +2380,18 @@ impl App {
 fn secs_field(v: &mut f64, max: f64) -> egui::DragValue<'_> {
     egui::DragValue::new(v).speed(0.01).range(0.0..=max).fixed_decimals(3)
 }
+
+enum ExportState {
+    Idle,
+    Writing { span: (f64, f64) },
+    Done { at: Instant },
+    Failed { at: Instant },
+}
+
+/// How long the export button shows its outcome: a write as long as the wave's flash, a
+/// failure twice that.
+const EXPORT_DONE_SECS: f32 = waveform::FLASH_SECS;
+const EXPORT_FAILED_SECS: f32 = 2.0 * waveform::FLASH_SECS;
 
 /// The wave's right-click menu.
 enum WaveAction {

@@ -14,6 +14,13 @@ pub const LANE_H: f32 = 20.0;
 const HANDLE_W: f32 = 14.0;
 const HANDLE_GRAB_PX: f32 = 16.0;
 const EDGE_GRAB_PX: f32 = 8.0;
+/// How long a flash lasts, and how much of it is left at `t` of that: bright almost to the
+/// end, then off. The export button follows the same curve.
+pub const FLASH_SECS: f32 = 0.3;
+pub fn flash_left(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - t * t * t
+}
 /// Below this many frames per pixel the real samples are drawn instead of the envelope.
 const SAMPLE_VIEW_FRAMES_PER_PX: f64 = 3.0;
 
@@ -38,6 +45,8 @@ pub struct WaveState {
     /// Linear gain the drawing is scaled by, so the picture follows the audition gain.
     pub gain: f32,
     drag: Option<Drag>,
+    /// A span lit up for a moment, from when: the part just exported.
+    flash: Option<((f64, f64), std::time::Instant)>,
     /// The edge moved last. When both edges sit on one spot, it is the one a grab takes, so
     /// dragging back reopens the selection the way it was just closed.
     last_edge: Option<Drag>,
@@ -66,11 +75,12 @@ pub struct WaveColors {
     pub fade: Color32,
     pub playhead: Color32,
     pub axis: Color32,
+    pub flash: Color32,
 }
 
 impl Default for WaveState {
     fn default() -> Self {
-        WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), gain: 1.0, drag: None, last_edge: None, last_fade: None }
+        WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), gain: 1.0, drag: None, flash: None, last_edge: None, last_fade: None }
     }
 }
 
@@ -88,6 +98,11 @@ impl WaveState {
     /// The span the fades hang off: the selection, or the whole file.
     pub fn bounds(&self, duration: f64) -> (f64, f64) {
         self.selection.unwrap_or((0.0, duration))
+    }
+
+    /// Lights the span up for `FLASH_SECS`.
+    pub fn flash(&mut self, span: (f64, f64)) {
+        self.flash = Some((span, std::time::Instant::now()));
     }
 
     /// Marks a fade as the one set last, so clamping keeps it and shortens the other.
@@ -384,6 +399,17 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
             let at = Pos2::new((xa + xb) * 0.5 - length.size().x * 0.5, lane.center().y - length.size().y * 0.5);
             painter.rect_filled(Rect::from_min_size(at, length.size()).expand2(Vec2::new(4.0, 1.0)), 2.0, visuals.faint_bg_color);
             painter.galley(at, length, colors.fade);
+        }
+    }
+    if let Some((span, since)) = state.flash {
+        let t = since.elapsed().as_secs_f32() / FLASH_SECS;
+        if t >= 1.0 {
+            state.flash = None;
+        } else {
+            let xa = x_of(span.0).clamp(rect.left(), rect.right());
+            let xb = x_of(span.1).clamp(rect.left(), rect.right());
+            painter.rect_filled(Rect::from_min_max(Pos2::new(xa, rect.top()), Pos2::new(xb, rect.bottom())), 0.0, colors.flash.gamma_multiply(0.45 * flash_left(t)));
+            ui.ctx().request_repaint();
         }
     }
     let (a, b) = state.bounds(duration);
