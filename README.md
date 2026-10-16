@@ -58,6 +58,8 @@ Start `hark`, add a library folder with the button under the tree, pick a folder
 
 On the waveform: drag to select, drag a selection edge to adjust it, shift-drag inside to move it, drag the triangles in the strip above to set fades, click to play from there, wheel to zoom, shift-wheel or middle-drag to pan, double-click to zoom out. The window scale is in settings; Ctrl+= and Ctrl+- change it too.
 
+In the list, a column header sorts by that column and a second click reverses it; the name, folder and tag columns resize by the dividers in the header row. The folder tree, the bottom panel and the export card resize by their separators. A double-click on a divider or a separator puts that one back. The sizes are remembered between runs; the layout row in settings resets them all.
+
 ### CLI
 
 ```

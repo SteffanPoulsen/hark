@@ -73,6 +73,81 @@ impl std::str::FromStr for ChannelClass {
     }
 }
 
+/// A column a listing is ordered by. Files missing the value sort last either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortKey {
+    #[default]
+    Name,
+    Folder,
+    Length,
+    Channels,
+    Rate,
+    Bits,
+    Codec,
+    Loudness,
+    Size,
+}
+
+impl SortKey {
+    pub const ALL: [SortKey; 9] = [SortKey::Name, SortKey::Folder, SortKey::Length, SortKey::Channels, SortKey::Rate, SortKey::Bits, SortKey::Codec, SortKey::Loudness, SortKey::Size];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SortKey::Name => "name",
+            SortKey::Folder => "folder",
+            SortKey::Length => "length",
+            SortKey::Channels => "channels",
+            SortKey::Rate => "rate",
+            SortKey::Bits => "bits",
+            SortKey::Codec => "codec",
+            SortKey::Loudness => "loudness",
+            SortKey::Size => "size",
+        }
+    }
+
+    fn column(self) -> &'static str {
+        match self {
+            SortKey::Name => "f.name COLLATE NOCASE",
+            SortKey::Folder => "f.dir COLLATE NOCASE",
+            SortKey::Length => "f.duration",
+            SortKey::Channels => "f.channels",
+            SortKey::Rate => "f.sample_rate",
+            SortKey::Bits => "f.bits",
+            SortKey::Codec => "f.codec",
+            SortKey::Loudness => "f.lufs",
+            SortKey::Size => "f.size",
+        }
+    }
+}
+
+impl std::str::FromStr for SortKey {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        SortKey::ALL.into_iter().find(|k| k.name() == s).ok_or_else(|| format!("{s}: expected one of {}", SortKey::ALL.map(SortKey::name).join(", ")))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sort {
+    pub key: SortKey,
+    #[serde(default)]
+    pub descending: bool,
+}
+
+impl Sort {
+    /// Ties and files without the value fall back to the name, so the order is stable.
+    fn clause(self) -> String {
+        let dir = if self.descending { "DESC" } else { "ASC" };
+        let col = self.key.column();
+        match self.key {
+            SortKey::Name => format!(" ORDER BY {col} {dir}, f.path"),
+            _ => format!(" ORDER BY {col} IS NULL, {col} {dir}, f.name COLLATE NOCASE"),
+        }
+    }
+}
+
 /// Every field narrows the result; an empty list or `None` leaves its axis open.
 #[derive(Clone, Debug, Default)]
 pub struct Query {
@@ -90,6 +165,7 @@ pub struct Query {
     /// Lowercase extensions without the dot.
     pub extensions: Vec<String>,
     pub channels: Vec<ChannelClass>,
+    pub sort: Sort,
     pub limit: usize,
 }
 
@@ -217,8 +293,8 @@ impl Db {
     }
 
     /// Files directly inside `dir`, by name.
-    pub fn list_dir(&self, dir: &Path) -> Result<Vec<FileRecord>> {
-        self.search(&Query { dir: Some(dir.to_path_buf()), ..Query::default() })
+    pub fn list_dir(&self, dir: &Path, sort: Sort) -> Result<Vec<FileRecord>> {
+        self.search(&Query { dir: Some(dir.to_path_buf()), sort, ..Query::default() })
     }
 
     pub fn search(&self, q: &Query) -> Result<Vec<FileRecord>> {
@@ -278,7 +354,7 @@ impl Db {
             let ors: Vec<String> = q.scope.iter().map(|s| within(&mut names, &mut values, s)).collect();
             sql.push_str(&format!(" AND ({})", ors.join(" OR ")));
         }
-        sql.push_str(" ORDER BY f.name COLLATE NOCASE");
+        sql.push_str(&q.sort.clause());
         if q.limit > 0 {
             sql.push_str(&format!(" LIMIT {}", q.limit));
         }

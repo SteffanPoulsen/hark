@@ -127,12 +127,27 @@ impl App {
         card(ui, &theme, |ui| {
             row(ui, &theme, true, "Window scale", "Ctrl+= and Ctrl+- change it too.", |ui| {
                 ui.allocate_ui_with_layout(egui::vec2(200.0, 28.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    let zoom = ui.add(egui::Slider::new(&mut self.config.ui_zoom, 0.8..=2.0).step_by(0.05).fixed_decimals(2));
+                    // The new scale applies once the drag ends; applying it live would rescale
+                    // the slider under the pointer.
+                    let mut z = self.zoom_pending.unwrap_or(self.config.ui_zoom);
+                    let zoom = ui.add(egui::Slider::new(&mut z, 0.5..=3.0).step_by(0.05).fixed_decimals(2));
                     if zoom.changed() {
-                        ui.ctx().set_zoom_factor(self.config.ui_zoom);
+                        self.zoom_pending = Some(z);
                     }
-                    save |= zoom.drag_stopped() || zoom.lost_focus();
+                    if zoom.drag_stopped() || zoom.clicked() || zoom.lost_focus() {
+                        if let Some(z) = self.zoom_pending.take() {
+                            self.config.ui_zoom = z;
+                            ui.ctx().set_zoom_factor(z);
+                            save = true;
+                        }
+                    }
                 });
+            });
+            row(ui, &theme, false, "Layout", "The panel sizes and list columns you dragged. A double-click on a separator resets that one.", |ui| {
+                if ui.add(egui::Button::new(theme::icon_text(icons::ARROW_COUNTER_CLOCKWISE, "Reset", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(0.0, 28.0))).clicked() {
+                    self.reset_layout = true;
+                    ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+                }
             });
             row(ui, &theme, false, "Audition sample rate", "The rate the output device is opened at; sources are resampled to it for playback.", |ui| {
                 let current = self.config.audition_sample_rate;

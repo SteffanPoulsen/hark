@@ -334,6 +334,15 @@ pub fn tool_button(ui: &mut egui::Ui, icon: &str, label: &str) -> egui::Response
 }
 
 /// An icon followed by text in one label. `Color32::PLACEHOLDER` takes the widget's text color.
+/// Text with an icon after it.
+pub fn text_icon(text: &str, icon: &str, size: f32, color: Color32) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let mut job = LayoutJob::default();
+    job.append(text, 0.0, TextFormat { font_id: FontId::new(size, FontFamily::Proportional), color, valign: egui::Align::Center, ..Default::default() });
+    job.append(icon, size * 0.3, TextFormat { font_id: FontId::new(size, FontFamily::Name(ICONS.into())), color, valign: egui::Align::Center, ..Default::default() });
+    job
+}
+
 pub fn icon_text(icon: &str, text: &str, size: f32, family: FontFamily, color: Color32) -> egui::text::LayoutJob {
     use egui::text::{LayoutJob, TextFormat};
     let mut job = LayoutJob::default();

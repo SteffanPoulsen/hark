@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::library::Sort;
 use crate::pcm::{DownmixMode, FadeShape};
 use crate::project::Project;
 
@@ -158,6 +159,9 @@ pub struct Config {
     /// Window zoom on top of the display scale; Ctrl+= and Ctrl+- change it in the app.
     #[serde(default = "default_ui_zoom")]
     pub ui_zoom: f32,
+    /// The order the window lists files in; the column headers change it.
+    #[serde(default)]
+    pub list_sort: Sort,
     /// A palette file (`{"bg": "#14121B", "accent": "#1AD1D1", ...}`) that overrides the built-in theme.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme_file: Option<PathBuf>,
@@ -168,7 +172,7 @@ fn default_stream_above_mb() -> f64 {
 }
 
 fn default_ui_zoom() -> f32 {
-    1.2
+    1.0
 }
 
 fn default_preset_name() -> String {
@@ -230,6 +234,7 @@ impl Default for Config {
             audition_sample_rate: None,
             stream_above_mb: default_stream_above_mb(),
             ui_zoom: default_ui_zoom(),
+            list_sort: Sort::default(),
             theme_file: None,
         }
     }

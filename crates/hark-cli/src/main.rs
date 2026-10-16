@@ -6,8 +6,24 @@ use clap::{Args, Parser, Subcommand};
 use hark_core::audition::{Clip, Source};
 use hark_core::config::Root;
 use hark_core::export::{ExportRequest, Selection};
-use hark_core::library::{ChannelClass, Query};
+use hark_core::library::{ChannelClass, Query, Sort, SortKey};
 use hark_core::{Config, Db};
+
+#[derive(Args)]
+struct SortArgs {
+    /// Order: name, folder, length, channels, rate, bits, codec, loudness or size.
+    #[arg(long, default_value = "name")]
+    sort: SortKey,
+    /// Reverse the order.
+    #[arg(long)]
+    desc: bool,
+}
+
+impl From<SortArgs> for Sort {
+    fn from(a: SortArgs) -> Sort {
+        Sort { key: a.sort, descending: a.desc }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "hark-cli", version, about = "hark without the window: library, marks, analysis and export")]
@@ -40,7 +56,11 @@ enum Cmd {
         root: Option<String>,
     },
     /// Files directly inside a folder.
-    Ls { dir: PathBuf },
+    Ls {
+        dir: PathBuf,
+        #[command(flatten)]
+        sort: SortArgs,
+    },
     /// Search the library by path words, tags, favorite, file type and channels.
     Search {
         words: Vec<String>,
@@ -59,6 +79,8 @@ enum Cmd {
         under: Option<PathBuf>,
         #[arg(long, default_value_t = 200)]
         limit: usize,
+        #[command(flatten)]
+        sort: SortArgs,
     },
     /// Everything known about a file: probe, library record, and the origin it carries if hark exported it.
     Inspect { file: PathBuf },
@@ -561,11 +583,11 @@ fn run() -> Result<()> {
                 println!("{hashed} files hashed so that moved files keep their marks");
             }
         }
-        Cmd::Ls { dir } => {
-            let records = open_db(&project)?.list_dir(&abs(&dir)?)?;
+        Cmd::Ls { dir, sort } => {
+            let records = open_db(&project)?.list_dir(&abs(&dir)?, sort.into())?;
             print_records(&records, json)?;
         }
-        Cmd::Search { words, tag, fav, extension, channels, under, limit } => {
+        Cmd::Search { words, tag, fav, extension, channels, under, limit, sort } => {
             let config = load(&project)?;
             let q = Query {
                 text: words.join(" "),
@@ -576,6 +598,7 @@ fn run() -> Result<()> {
                 tags: tag,
                 extensions: extension,
                 channels,
+                sort: sort.into(),
                 limit,
             };
             let records = open_db(&project)?.search(&q)?;

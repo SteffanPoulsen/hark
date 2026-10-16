@@ -16,7 +16,7 @@ use egui_extras::{Column, TableBuilder};
 use egui_phosphor::regular as icons;
 use hark_core::audition::{Clip, Player, Source};
 use hark_core::export::{ExportRequest, Selection};
-use hark_core::library::{ChannelClass, Query};
+use hark_core::library::{ChannelClass, Query, Sort, SortKey};
 use hark_core::{Config, Db, ExportPreset, FileRecord, Loudness};
 
 use theme::Theme;
@@ -27,6 +27,43 @@ use worker::{Done, Job, Loaded, ScanPhase, Worker};
 const CACHE_BYTES: usize = 48_000 * 60 * 20 * 2 * 4;
 const PRELOAD: usize = 3;
 const EXPORT_CARD_W: f32 = 380.0;
+/// The bottom panel never grows past leaving the list this much: its heading, header and a
+/// handful of rows.
+const LIST_MIN_H: f32 = 200.0;
+/// The panels whose size the user drags; a layout reset forgets them.
+const PANELS: [&str; 3] = ["tree", "bottom", "export"];
+/// Where the list's column widths live in egui's memory.
+const COLUMNS_ID: &str = "columns";
+const STAR_W: f32 = 26.0;
+/// Length, channels, rate, bits, codec, LUFS.
+const NUMERIC_W: [f32; 6] = [74.0, 30.0, 56.0, 36.0, 80.0, 60.0];
+
+/// The widths the user gave the folder and tag columns; the name column takes what the
+/// window leaves, so the list fits any width and scale.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct ColumnWidths {
+    folder: f32,
+    tags: f32,
+}
+
+impl ColumnWidths {
+    const NAME_MIN: f32 = 120.0;
+    const MIN: f32 = 60.0;
+}
+
+impl Default for ColumnWidths {
+    fn default() -> Self {
+        ColumnWidths { folder: 140.0, tags: 150.0 }
+    }
+}
+
+/// A draggable divider, named by the column on its left.
+#[derive(Clone, Copy)]
+enum Divider {
+    Name,
+    Folder,
+    Tags,
+}
 /// Height of the top bar's row of controls; the bar is this plus its margins.
 const TOP_BAR_H: f32 = 32.0;
 /// Height of every control in the top bar and the transport row, so each reads as one line.
@@ -219,6 +256,10 @@ struct App {
     transport_h: f32,
     /// Height the export card's content took on the last frame; the bottom panel is sized to it.
     export_card_h: f32,
+    /// Panel sizes and column widths go back to their defaults on the next frame.
+    reset_layout: bool,
+    /// The scale slider's value while it is being dragged; applied when the drag ends.
+    zoom_pending: Option<f32>,
     gain_db: f32,
     /// The preset the card's values came from; `None` once they were edited.
     preset_name: Option<String>,
@@ -305,6 +346,8 @@ impl App {
             loop_on: false,
             transport_h: 34.0,
             export_card_h: 380.0,
+            reset_layout: false,
+            zoom_pending: None,
             gain_db: 0.0,
             preset_name: Some(preset_name.clone()),
             preset,
@@ -431,6 +474,7 @@ impl App {
             tags: self.filter.tags.clone(),
             extensions: self.filter.extensions(),
             channels: self.filter.channels.clone(),
+            sort: self.config.list_sort,
             ..Query::default()
         };
         if !self.search.trim().is_empty() {
@@ -1021,7 +1065,8 @@ impl App {
     }
 
     fn ui_tree(&mut self, ui: &mut egui::Ui) {
-        let bar = egui::Frame::new().inner_margin(Margin { left: 8, right: 8, top: 8, bottom: 6 });
+        // With the panel's own 4 at the sides and 8 at the bottom, the buttons get 12 all round.
+        let bar = egui::Frame::new().inner_margin(Margin { left: 8, right: 8, top: 12, bottom: 4 });
         egui::Panel::bottom("library-actions").resizable(false).frame(bar).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -1186,20 +1231,48 @@ impl App {
             _ => None,
         };
         let nested = shown_folder.as_deref().map(|base| self.files.iter().any(|f| f.path.parent() != Some(base))).unwrap_or(true);
+        // The folder and tag columns resize by the dividers in the header, which this code
+        // owns; the name column takes what the window leaves, and the numeric columns fit
+        // their widest value.
+        let header_h = 24.0;
+        // The gap between columns; a divider sits in its middle, so half of it pads the text.
+        ui.spacing_mut().item_spacing.x = 12.0;
+        let spacing = ui.spacing().item_spacing.x;
+        let widths_id = egui::Id::new(COLUMNS_ID);
+        let mut widths: ColumnWidths = ui.data_mut(|d| d.get_persisted(widths_id)).unwrap_or_default();
+        let fixed_w: f32 = STAR_W + NUMERIC_W.iter().sum::<f32>() + spacing * (10 + nested as usize) as f32;
+        // The name takes what is left after the fixed columns, the folder and the tags. When
+        // that falls under its floor, the tags give way, then the folder, each down to its
+        // floor; only past that does the right edge clip.
+        let mut shown = ColumnWidths { folder: if nested { widths.folder } else { 0.0 }, tags: widths.tags };
+        let mut name_w = ui.available_width() - fixed_w - shown.folder - shown.tags;
+        if name_w < ColumnWidths::NAME_MIN {
+            let mut over = ColumnWidths::NAME_MIN - name_w;
+            let give = (shown.tags - ColumnWidths::MIN).clamp(0.0, over);
+            shown.tags -= give;
+            over -= give;
+            if nested {
+                shown.folder -= (shown.folder - ColumnWidths::MIN).clamp(0.0, over);
+            }
+            name_w = ColumnWidths::NAME_MIN;
+        }
+        // The dividers' lines span the header row's rect grown the way the table grows a row's
+        // stripe, half the spacing each way, so they line up with the rows.
+        let header_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), header_h));
+        let band = egui::emath::GuiRounding::round_ui(header_rect.expand2(0.5 * ui.spacing().item_spacing));
+        let table_rect = egui::Rect::from_min_max(band.min, egui::pos2(band.right(), ui.max_rect().bottom()));
         let mut builder = TableBuilder::new(ui)
             .striped(true)
             .sense(Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(26.0))
-            .column(Column::remainder().at_least(220.0).clip(true))
-            .columns(Column::initial(180.0).at_least(60.0).clip(true), nested as usize)
-            .column(Column::initial(200.0).at_least(60.0).clip(true))
-            .column(Column::exact(74.0))
-            .column(Column::exact(30.0))
-            .column(Column::exact(56.0))
-            .column(Column::exact(36.0))
-            .column(Column::exact(80.0))
-            .column(Column::exact(60.0));
+            .column(Column::exact(STAR_W))
+            .column(Column::exact(name_w).clip(true))
+            .columns(Column::exact(shown.folder).clip(true), nested as usize)
+            .column(Column::exact(shown.tags).clip(true));
+        for w in NUMERIC_W {
+            builder = builder.column(Column::exact(w));
+        }
+        builder = builder.column(Column::remainder());
         if self.scroll_to_selected {
             if let Some(i) = self.selected {
                 builder = builder.scroll_to_row(i, None);
@@ -1227,11 +1300,43 @@ impl App {
             ui.painter().rect_filled(rect, CornerRadius::same(9), color.gamma_multiply(0.28));
             ui.painter().galley(rect.min + pad, galley, color.gamma_multiply(1.5).to_opaque());
         };
+        let sort = self.config.list_sort;
+        let mut sort_by: Option<SortKey> = None;
+        let headers: [(&str, Option<SortKey>); 11] = [
+            ("", None),
+            ("Name", Some(SortKey::Name)),
+            ("Folder", Some(SortKey::Folder)),
+            ("Tags", None),
+            ("Length", Some(SortKey::Length)),
+            ("Ch", Some(SortKey::Channels)),
+            ("Rate", Some(SortKey::Rate)),
+            ("Bits", Some(SortKey::Bits)),
+            ("Codec", Some(SortKey::Codec)),
+            ("LUFS", Some(SortKey::Loudness)),
+            ("", None),
+        ];
         builder
-            .header(24.0, |mut h| {
-                for title in ["", "Name", "Folder", "Tags", "Length", "Ch", "Rate", "Bits", "Codec", "LUFS"].into_iter().filter(|t| nested || *t != "Folder") {
+            .header(header_h, |mut h| {
+                for (title, key) in headers.into_iter().filter(|(t, _)| nested || *t != "Folder") {
                     h.col(|ui| {
-                        ui.label(RichText::new(title).color(theme.muted).size(12.0));
+                        let Some(key) = key else {
+                            ui.label(RichText::new(title).color(theme.muted).size(12.0));
+                            return;
+                        };
+                        let r = ui.interact(ui.max_rect(), ui.id().with("sort"), Sense::click()).on_hover_text(format!("Sort by {}", key.name()));
+                        if r.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        let color = if r.hovered() || sort.key == key { theme.text } else { theme.muted };
+                        let text: egui::WidgetText = if sort.key == key {
+                            theme::text_icon(title, if sort.descending { icons::CARET_DOWN } else { icons::CARET_UP }, 12.0, color).into()
+                        } else {
+                            RichText::new(title).color(color).size(12.0).into()
+                        };
+                        ui.add(egui::Label::new(text).selectable(false));
+                        if r.clicked() {
+                            sort_by = Some(key);
+                        }
                     });
                 }
             })
@@ -1248,7 +1353,9 @@ impl App {
                             (false, false) => theme.muted.gamma_multiply(0.7),
                         };
                         let icon = if f.favorite || hot { theme::icon_fill(icons::STAR) } else { theme::icon(icons::STAR) };
-                        ui.label(icon.color(color).size(15.0));
+                        ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                            ui.label(icon.color(color).size(15.0));
+                        });
                     });
                     if star.clicked() {
                         fav_toggle = Some(i);
@@ -1290,6 +1397,7 @@ impl App {
                     row.col(|ui| {
                         ui.label(weak(f.lufs.map(|l| format!("{l:.1}")).unwrap_or_default()));
                     });
+                    row.col(|_| {});
                     let resp = row.response();
                     if fav_toggle == Some(i) {
                     } else if resp.double_clicked() {
@@ -1306,6 +1414,63 @@ impl App {
                     });
                 });
             });
+        // The dividers, after the table so they sit above its rows: a tick in the header at
+        // every column edge, and a grab on the three that resize, which shows its line down
+        // the whole table while hovered or dragged. A drag trades width between the columns
+        // on either side of the divider, so nothing else moves; as the name column holds the
+        // window's slack, the one after the tags trades with it.
+        let mut column_ws: Vec<(f32, Option<Divider>)> = vec![(STAR_W, None), (name_w, Some(Divider::Name))];
+        if nested {
+            column_ws.push((shown.folder, Some(Divider::Folder)));
+        }
+        column_ws.push((shown.tags, Some(Divider::Tags)));
+        column_ws.extend(NUMERIC_W.map(|w| (w, None)));
+        let painter = ui.painter().with_clip_rect(table_rect);
+        let mut x = header_rect.left();
+        let inner = column_ws.len() - 1;
+        for (n, (w, resize)) in column_ws.into_iter().enumerate() {
+            x += w;
+            let divider = painter.round_to_pixel_center(x + spacing * 0.5);
+            x += spacing;
+            let Some(col) = resize else {
+                if n > 0 && n < inner {
+                    painter.vline(divider, header_rect.y_range().shrink(7.0), Stroke::new(1.0, theme.line));
+                }
+                continue;
+            };
+            let grab = egui::Rect::from_center_size(egui::pos2(divider, header_rect.center().y), egui::vec2(10.0, header_h));
+            let r = ui.interact(grab, widths_id.with(n), Sense::click_and_drag());
+            let active = r.hovered() || r.dragged();
+            if active {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                painter.vline(divider, table_rect.y_range(), Stroke::new(1.0, theme.text));
+            } else {
+                painter.vline(divider, header_rect.y_range().shrink(3.0), Stroke::new(1.0, theme.muted));
+            }
+            let floor = ColumnWidths::MIN;
+            let defaults = ColumnWidths::default();
+            if r.double_clicked() {
+                match col {
+                    Divider::Name if nested => widths.folder = defaults.folder,
+                    Divider::Name | Divider::Tags => widths.tags = defaults.tags,
+                    Divider::Folder => widths = defaults,
+                }
+                ui.data_mut(|d| d.insert_persisted(widths_id, widths));
+            } else if r.dragged() {
+                let dx = r.drag_delta().x;
+                match col {
+                    Divider::Name if nested => widths.folder = shown.folder - dx.clamp(ColumnWidths::NAME_MIN - name_w, shown.folder - floor),
+                    Divider::Name => widths.tags = shown.tags - dx.clamp(ColumnWidths::NAME_MIN - name_w, shown.tags - floor),
+                    Divider::Folder => {
+                        let dx = dx.clamp(floor - shown.folder, shown.tags - floor);
+                        widths.folder = shown.folder + dx;
+                        widths.tags = shown.tags - dx;
+                    }
+                    Divider::Tags => widths.tags = shown.tags + dx.clamp(floor - shown.tags, name_w - ColumnWidths::NAME_MIN),
+                }
+                ui.data_mut(|d| d.insert_persisted(widths_id, widths));
+            }
+        }
         if let Some(i) = fav_toggle {
             self.toggle_favorite_of(i);
         }
@@ -1320,6 +1485,13 @@ impl App {
         }
         if let Some((i, a)) = action {
             self.apply_file_action(i, a);
+        }
+        if let Some(key) = sort_by {
+            let descending = sort.key == key && !sort.descending;
+            self.config.list_sort = Sort { key, descending };
+            let _ = self.config.save();
+            self.list_dirty = true;
+            self.scroll_to_selected = true;
         }
     }
 
@@ -1343,13 +1515,16 @@ impl App {
     /// Two cards side by side: the file with its waveform and transport, and the export.
     fn ui_bottom(&mut self, ui: &mut egui::Ui) {
         let card = egui::Frame::new().fill(self.theme.surface).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(theme::CARD_PAD));
-        egui::Panel::right("export").resizable(false).exact_size(EXPORT_CARD_W).show_separator_line(false).frame(egui::Frame::new().inner_margin(Margin { left: theme::PAD, right: 0, top: 0, bottom: 0 })).show(ui, |ui| {
+        // The gap between the cards is split between the two panels, so the resize handle on
+        // the export panel's edge sits in the middle of it.
+        let export_max = (ui.available_width() - 420.0).max(EXPORT_CARD_W);
+        egui::Panel::right("export").resizable(true).default_size(EXPORT_CARD_W).size_range(320.0..=export_max).show_separator_line(false).frame(egui::Frame::new().inner_margin(Margin { left: theme::PAD / 2, right: 0, top: 0, bottom: 0 })).show(ui, |ui| {
             card.show(ui, |ui| {
                 ui.set_min_height(ui.available_height());
                 self.ui_export_card(ui);
             });
         });
-        egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(Margin::ZERO)).show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(Margin { left: 0, right: theme::PAD / 2, top: 0, bottom: 0 })).show(ui, |ui| {
             card.show(ui, |ui| {
                 ui.set_min_height(ui.available_height());
                 self.ui_wave_column(ui);
@@ -1437,17 +1612,34 @@ impl App {
             ui.allocate_ui_with_layout(egui::vec2(wave_w, wave_h), egui::Layout::top_down(egui::Align::Min), |ui| {
                 event = waveform::show(ui, &mut self.wave, peaks.as_deref(), samples.as_deref(), duration, playhead, wave_h, &colors);
             });
-            // The readout sits level with the fade lane and the rail with the wave itself.
+            // The readout sits level with the ruler and the rail with the wave itself.
             ui.allocate_ui_with_layout(egui::vec2(FADER_W, wave_h), egui::Layout::top_down(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let readout = ui.allocate_response(egui::vec2(FADER_W, waveform::LANE_H), egui::Sense::hover()).on_hover_text("dB");
-                ui.spacing_mut().slider_width = wave_h - waveform::LANE_H;
-                let fader = ui.add(egui::Slider::new(&mut self.gain_db, -36.0..=12.0).vertical().show_value(false).trailing_fill(false)).on_hover_text("Audition gain; double-click resets");
-                ui.painter().text(egui::pos2(fader.rect.center().x, readout.rect.center().y), egui::Align2::CENTER_CENTER, format!("{:+.0}", self.gain_db), FontId::proportional(11.0), self.theme.muted);
-                if fader.double_clicked() {
+                let (rail, fader) = ui.allocate_exact_size(egui::vec2(FADER_W, wave_h - waveform::LANE_H), Sense::click_and_drag());
+                let fader = fader.on_hover_text("Audition gain; right-click or double-click resets");
+                const MIN_DB: f32 = -36.0;
+                const MAX_DB: f32 = 12.0;
+                let (top, bottom) = (rail.top() + 10.0, rail.bottom() - 10.0);
+                let y_of = |db: f32| bottom - (db - MIN_DB) / (MAX_DB - MIN_DB) * (bottom - top);
+                let mut changed = fader.double_clicked() || fader.secondary_clicked();
+                if changed {
                     self.gain_db = 0.0;
+                } else if let Some(p) = fader.interact_pointer_pos().filter(|_| fader.dragged() || fader.clicked()) {
+                    self.gain_db = ((MIN_DB + (bottom - p.y) / (bottom - top) * (MAX_DB - MIN_DB)).clamp(MIN_DB, MAX_DB) * 2.0).round() / 2.0;
+                    changed = true;
                 }
-                if fader.changed() || fader.double_clicked() {
+                let hot = fader.hovered() || fader.dragged();
+                if hot {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                }
+                let x = rail.center().x;
+                let p = ui.painter();
+                p.vline(x, top..=bottom, Stroke::new(2.0, self.theme.line));
+                p.hline((x - 6.0)..=(x + 6.0), y_of(0.0), Stroke::new(1.0, self.theme.muted));
+                p.rect_filled(egui::Rect::from_center_size(egui::pos2(x, y_of(self.gain_db)), egui::vec2(14.0, 6.0)), 2.0, if hot { self.theme.text } else { self.theme.muted });
+                p.text(egui::pos2(x, readout.rect.center().y), egui::Align2::CENTER_CENTER, format!("{:+.0}", self.gain_db), FontId::proportional(11.0), self.theme.muted);
+                if changed {
                     if let Some(p) = &self.player {
                         p.set_gain(hark_core::pcm::db_to_gain(self.gain_db as f64));
                     }
@@ -1536,14 +1728,20 @@ impl App {
             if (a.changed() || b.changed()) && (had || sel.1 > sel.0) {
                 self.wave.selection = if sel.1 > sel.0 { Some(sel) } else { None };
             }
-            if icon_btn(ui, icons::X, false).on_hover_text("Clear selection (Del)").clicked() {
-                self.wave.selection = None;
+            if icon_btn(ui, icons::CARET_LEFT, false).on_hover_text("Previous take (←)").clicked() {
+                self.step_take(-1);
+            }
+            if icon_btn(ui, icons::CARET_RIGHT, false).on_hover_text("Next take (→)").clicked() {
+                self.step_take(1);
+            }
+            if icon_btn(ui, icons::ARROWS_IN_LINE_HORIZONTAL, false).on_hover_text(format!("Trim the selection to the sound (T): what sits {} dB under its peak goes", hark_core::pcm::TRIM_BELOW_PEAK_DB)).clicked() {
+                self.trim_selection();
             }
             if icon_btn(ui, icons::MAGNIFYING_GLASS_PLUS, false).on_hover_text("Zoom to selection (Z)").clicked() {
                 self.wave.zoom_to_selection();
             }
-            if icon_btn(ui, icons::ARROWS_IN_LINE_HORIZONTAL, false).on_hover_text(format!("Trim the selection to the sound (T): what sits {} dB under its peak goes", hark_core::pcm::TRIM_BELOW_PEAK_DB)).clicked() {
-                self.trim_selection();
+            if icon_btn(ui, icons::X, false).on_hover_text("Clear selection (Del)").clicked() {
+                self.wave.selection = None;
             }
             group(ui);
             ui.label(RichText::new("Fade").color(self.theme.muted));
@@ -1561,6 +1759,10 @@ impl App {
                     ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::Linear, "Linear");
                     ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::Logarithmic, "Logarithmic");
                 });
+            if icon_btn(ui, icons::X, false).on_hover_text("Clear fades").clicked() {
+                self.wave.fade_in = 0.0;
+                self.wave.fade_out = 0.0;
+            }
             self.wave.clamp_fades(duration);
         });
     }
@@ -1713,30 +1915,34 @@ impl App {
             ui.add(small(e.clone(), theme.warn));
         }
 
-        ui.add_space(10.0);
+        // The button sits at the foot of the card whatever height the panel was dragged to;
+        // the card's natural height, which the panel cannot go under, is the content plus it.
+        // The cursor measures the content: the card's min rect is stretched to the panel.
+        const BUTTON_H: f32 = 40.0;
+        let natural = ui.cursor().top() - ui.min_rect().top() + 10.0 + BUTTON_H;
+        if (natural - self.export_card_h).abs() > 0.5 {
+            self.export_card_h = natural;
+            ui.ctx().request_repaint();
+        }
         let can = matches!(req, Some(Ok(_)));
-        let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 40.0));
-        let hot = can && ui.rect_contains_pointer(rect);
-        let fill = match (can, hot) {
-            (true, true) => theme.accent.gamma_multiply(1.15).to_opaque(),
-            (true, false) => theme.accent,
-            (false, _) => theme.overlay,
-        };
-        let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 15.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), if can { theme.on_accent() } else { theme.muted }))
-            .fill(fill)
-            .stroke(Stroke::NONE)
-            .corner_radius(CornerRadius::same(6))
-            .min_size(rect.size());
-        ui.allocate_ui_with_layout(rect.size(), egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            let avail = ui.available_rect_before_wrap();
+            let rect = egui::Rect::from_min_max(egui::pos2(avail.left(), avail.bottom() - BUTTON_H), avail.right_bottom());
+            let hot = can && ui.rect_contains_pointer(rect);
+            let fill = match (can, hot) {
+                (true, true) => theme.accent.gamma_multiply(1.15).to_opaque(),
+                (true, false) => theme.accent,
+                (false, _) => theme.overlay,
+            };
+            let button = egui::Button::new(theme::icon_text(icons::EXPORT, "Export", 15.0, egui::FontFamily::Name(theme::SEMIBOLD.into()), if can { theme.on_accent() } else { theme.muted }))
+                .fill(fill)
+                .stroke(Stroke::NONE)
+                .corner_radius(CornerRadius::same(6))
+                .min_size(rect.size());
             if ui.add_enabled(can, button).on_hover_text("E").clicked() {
                 self.export();
             }
         });
-        let h = ui.min_rect().height();
-        if (h - self.export_card_h).abs() > 0.5 {
-            self.export_card_h = h;
-            ui.ctx().request_repaint();
-        }
     }
 
     /// The preset combo: the saved presets, "custom" once the values were edited, and a way to
@@ -2060,6 +2266,16 @@ impl eframe::App for App {
         }
         self.handle_keys(&ctx);
 
+        // A panel forgets its dragged size when its state goes, and the list its column widths.
+        if std::mem::take(&mut self.reset_layout) {
+            ctx.data_mut(|d| {
+                for id in PANELS {
+                    d.remove::<egui::containers::panel::PanelState>(egui::Id::new(id));
+                }
+                d.remove::<ColumnWidths>(egui::Id::new(COLUMNS_ID));
+            });
+        }
+
         let pad = theme::PAD;
         let bar = egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(pad, 8));
         egui::Panel::top("top").resizable(false).exact_size(TOP_BAR_H + 16.0).frame(bar).show(ui, |ui| {
@@ -2068,17 +2284,28 @@ impl eframe::App for App {
         egui::Panel::bottom("status").frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(pad, 4))).show(ui, |ui| {
             self.ui_status(ui);
         });
-        // The export card decides the height of the whole bottom panel.
-        let bottom_h = self.export_card_h + 2.0 * theme::CARD_PAD as f32 + 16.0;
-        egui::Panel::bottom("bottom").resizable(false).exact_size(bottom_h).frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 8 })).show(ui, |ui| {
+        // The export card's natural height is the least the bottom panel can be; dragging it
+        // taller gives the waveform the room.
+        let bottom_min = self.export_card_h + 2.0 * (theme::CARD_PAD + pad) as f32;
+        let bottom_max = (ui.available_rect_before_wrap().height() - LIST_MIN_H).max(bottom_min);
+        egui::Panel::bottom("bottom").resizable(true).default_size(bottom_min).size_range(bottom_min..=bottom_max).frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin::same(pad))).show(ui, |ui| {
             self.ui_bottom(ui);
         });
-        egui::Panel::left("tree").resizable(true).default_size(250.0).frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin { left: 4, right: 4, top: 8, bottom: 8 })).show(ui, |ui| {
+        let tree_max = (ui.available_width() * 0.5).max(160.0);
+        egui::Panel::left("tree").resizable(true).default_size(250.0).size_range(160.0..=tree_max).frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin { left: 4, right: 4, top: 8, bottom: 8 })).show(ui, |ui| {
             self.ui_tree(ui);
         });
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 0 })).show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin { left: pad, right: pad, top: 8, bottom: 8 })).show(ui, |ui| {
             self.ui_list(ui);
         });
+        // A double-click on a separator puts that panel back to its default size. The handle's
+        // id is egui's own naming, `<panel id>.__resize`, which it does not expose.
+        for id in PANELS {
+            let panel = egui::Id::new(id);
+            if ui.read_response(panel.with("__resize")).is_some_and(|r| r.double_clicked()) {
+                ctx.data_mut(|d| d.remove::<egui::containers::panel::PanelState>(panel));
+            }
+        }
 
         self.ui_settings(&ctx);
 

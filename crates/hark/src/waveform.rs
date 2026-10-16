@@ -4,7 +4,7 @@
 //! else competes for the grab, and the playhead. Wheel zooms, middle drag and shift-wheel pan.
 
 use egui::epaint::{Mesh, Vertex, WHITE_UV};
-use egui::{Align2, Color32, CursorIcon, FontId, PointerButton, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
+use egui::{Align2, Color32, CursorIcon, FontId, PointerButton, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
 use hark_core::pcm::FadeShape;
 use hark_core::peaks::sample_columns;
 use hark_core::{Pcm, Peaks};
@@ -165,6 +165,34 @@ fn handle(lane: Rect, rect: Rect, x: f32, pointing_right: bool, fill: Color32) -
     ]
 }
 
+/// The tick spacing for a span: the first of a 1-2-5 sequence that keeps labels apart.
+fn ruler_step(span: f64, width: f32) -> f64 {
+    const LABEL_PX: f64 = 80.0;
+    const STEPS: [f64; 19] = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0];
+    let least = span / width.max(1.0) as f64 * LABEL_PX;
+    STEPS.into_iter().find(|&s| s >= least).unwrap_or(600.0)
+}
+
+/// Ticks along the bottom of the ruler, a label at each major one.
+fn draw_ruler(painter: &egui::Painter, lane: Rect, v0: f64, v1: f64, x_of: &dyn Fn(f64) -> f32, label: Color32, tick: Color32) {
+    let step = ruler_step(v1 - v0, lane.width());
+    let minor = step / if (step / 10f64.powf(step.log10().floor())).round() == 2.0 { 4.0 } else { 5.0 };
+    let font = FontId::monospace(10.0);
+    for i in (v0 / minor).floor() as i64..=(v1 / minor).ceil() as i64 {
+        let t = i as f64 * minor;
+        if t < v0 || t > v1 {
+            continue;
+        }
+        let x = painter.round_to_pixel_center(x_of(t));
+        let major = ((t / step) - (t / step).round()).abs() < 1e-6;
+        let h = if major { 7.0 } else { 3.0 };
+        painter.vline(x, (lane.bottom() - h)..=lane.bottom(), Stroke::new(1.0, if major { label } else { tick }));
+        if major && x + 56.0 <= lane.right() {
+            painter.text(Pos2::new(x + 3.0, lane.top() + 2.0), Align2::LEFT_TOP, fmt_time(t), font.clone(), label);
+        }
+    }
+}
+
 /// A filled band between two polylines sharing x positions, as one mesh.
 fn band(xs: &[f32], top: &[f32], bottom: &[f32], color: Color32) -> Shape {
     let mut mesh = Mesh::default();
@@ -256,8 +284,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
     let rect = Rect::from_min_max(Pos2::new(full.left(), lane.bottom()), full.right_bottom());
     let visuals = ui.visuals().clone();
     painter.rect_filled(full, 4.0, visuals.extreme_bg_color);
-    painter.rect_filled(lane, 0.0, visuals.faint_bg_color);
-    painter.text(lane.center(), Align2::CENTER_CENTER, "Fades", FontId::proportional(10.0), visuals.weak_text_color());
+    painter.rect_filled(lane, egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, visuals.faint_bg_color);
 
     let Some(peaks) = peaks else {
         let idle = visuals.weak_text_color();
@@ -307,17 +334,26 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
         _ => draw_envelope(&painter, peaks, samples.filter(|_| frames_per_px < peaks.bin_frames as f64), rect, v0, v1, state.gain, colors),
     }
 
-    // Selection, fades, handles.
+    draw_ruler(&painter, lane, v0, v1, &x_of, visuals.weak_text_color(), colors.axis);
+
+    // Selection, fades, handles. The selection's length reads on the ruler, between its
+    // edges, when it fits there clear of the fade handles.
     let hovered_hit = resp.hover_pos().and_then(|p| hit(state, lane, p, duration, &x_of));
     let active = state.drag.or(hovered_hit);
     if let Some((a, b)) = state.selection {
         let xa = x_of(a).clamp(rect.left(), rect.right());
         let xb = x_of(b).clamp(rect.left(), rect.right());
-        let sel = Rect::from_min_max(Pos2::new(xa, rect.top()), Pos2::new(xb, rect.bottom()));
+        let sel = Rect::from_min_max(Pos2::new(xa, lane.top()), Pos2::new(xb, rect.bottom()));
         painter.rect_filled(sel, 0.0, colors.selection.gamma_multiply(0.18));
         let edge = |which: Drag| if active == Some(which) { Stroke::new(2.5, Color32::WHITE) } else { Stroke::new(1.0, colors.selection) };
-        painter.vline(xa, rect.y_range(), edge(Drag::Start));
-        painter.vline(xb, rect.y_range(), edge(Drag::End));
+        painter.vline(xa, full.y_range(), edge(Drag::Start));
+        painter.vline(xb, full.y_range(), edge(Drag::End));
+        let length = painter.layout_no_wrap(fmt_time(b - a), FontId::monospace(11.0), colors.fade);
+        if length.size().x + 2.0 * HANDLE_W + 12.0 <= xb - xa {
+            let at = Pos2::new((xa + xb) * 0.5 - length.size().x * 0.5, lane.center().y - length.size().y * 0.5);
+            painter.rect_filled(Rect::from_min_size(at, length.size()).expand2(Vec2::new(4.0, 1.0)), 2.0, visuals.faint_bg_color);
+            painter.galley(at, length, colors.fade);
+        }
     }
     let (a, b) = state.bounds(duration);
     let curve = |from: f64, to: f64, rising: bool| {
@@ -351,21 +387,6 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
             painter.vline(x_of(t), rect.y_range(), Stroke::new(1.5, colors.playhead));
         }
     }
-
-    // Time ruler.
-    let font = FontId::monospace(10.0);
-    painter.text(rect.left_top() + Vec2::new(4.0, 2.0), Align2::LEFT_TOP, fmt_time(v0), font.clone(), visuals.weak_text_color());
-    painter.text(rect.right_top() + Vec2::new(-4.0, 2.0), Align2::RIGHT_TOP, fmt_time(v1), font, visuals.weak_text_color());
-    if let Some((a, b)) = state.selection {
-        painter.text(
-            rect.center_bottom() + Vec2::new(0.0, -3.0),
-            Align2::CENTER_BOTTOM,
-            format!("{} – {}  ({})", fmt_time(a), fmt_time(b), fmt_time(b - a)),
-            FontId::monospace(13.0),
-            colors.fade,
-        );
-    }
-    painter.rect_stroke(full, 4.0, Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color), StrokeKind::Inside);
 
     // Cursor.
     match active {
