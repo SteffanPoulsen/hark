@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod dnd;
+mod keys;
 mod preset_ui;
 mod settings;
 mod theme;
@@ -19,6 +20,7 @@ use hark_core::audition::{Clip, Player, Source};
 use hark_core::export::{ExportRequest, Selection};
 use hark_core::library::{ChannelClass, Query, Sort, SortKey};
 use hark_core::copies::CopyRequest;
+use hark_core::keys::Action;
 use hark_core::{Config, Db, ExportPreset, FileRecord, Loudness};
 
 use theme::Theme;
@@ -111,6 +113,7 @@ fn main() -> eframe::Result {
             "--settings" => {
                 settings = Some(match args.next().as_deref() {
                     Some("tags") => settings::Page::Tags,
+                    Some("keys") => settings::Page::Keys,
                     Some("presets") | Some("export") => settings::Page::Presets,
                     Some("general") | None => settings::Page::General,
                     Some(other) => {
@@ -232,6 +235,10 @@ struct App {
     audio_error: Option<String>,
     worker: Worker,
     drag: dnd::DragOut,
+    /// A drag out of the window began: the desktop's drag grab takes the button release, so
+    /// winit never reports it and egui would hold the press until the next click. The next
+    /// frame's input gets the release.
+    drag_took_release: bool,
 
     expanded: HashSet<PathBuf>,
     dir_children: HashMap<PathBuf, Vec<PathBuf>>,
@@ -286,6 +293,8 @@ struct App {
     /// egui does not centre buttons on the row they are in.
     search_id: egui::Id,
     tag_edit: Option<(usize, String)>,
+    /// The action whose key the settings window is waiting for.
+    key_capture: Option<Action>,
     /// Playback was running when the device was reopened; resume once the file reloads.
     play_on_load: bool,
     /// Output file name for the next export; empty takes the preset's template.
@@ -333,6 +342,7 @@ impl App {
             audio_error,
             worker,
             drag: dnd::DragOut::new(cc),
+            drag_took_release: false,
             expanded,
             dir_children: HashMap::new(),
             location: None,
@@ -372,6 +382,7 @@ impl App {
             copies_clear: false,
             search_id: egui::Id::new("search"),
             tag_edit: None,
+            key_capture: None,
             play_on_load: false,
             export_name: String::new(),
             preset_edit: preset_name,
@@ -675,6 +686,12 @@ impl App {
     }
 
 
+    fn zoom_to_selection(&mut self) {
+        if let Some(cur) = &self.current {
+            self.wave.zoom_to_selection(cur.duration_secs);
+        }
+    }
+
     fn export_request(&self) -> Option<Result<ExportRequest, String>> {
         let i = self.selected?;
         let f = &self.files[i];
@@ -770,7 +787,10 @@ impl App {
     /// Hands `paths` to the drop target of the drag the pointer is in the middle of.
     fn drag_out(&mut self, paths: Vec<PathBuf>, image: Option<dnd::Image>, ready: Option<dnd::Ready>, what: &str) {
         match self.drag.start(paths, image, ready) {
-            Ok(()) => self.set_status(format!("Dragging {what}"), false),
+            Ok(()) => {
+                self.drag_took_release = true;
+                self.set_status(format!("Dragging {what}"), false);
+            }
             Err(e) => self.set_status(format!("Drag: {e}; the file lands at {what}"), true),
         }
     }
@@ -895,6 +915,8 @@ impl App {
         let n = self.files.len();
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
         let shift = ctx.input(|i| i.modifiers.shift);
+        let map = self.config.keys.clone();
+        let fired = |a: Action| keys::pressed(ctx, &map, a);
         // egui-winit turns Ctrl+C into its own event in place of the key press.
         if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))) {
             self.copy_shortcut(ctx);
@@ -906,12 +928,6 @@ impl App {
         }
         if pressed(Key::ArrowUp) && n > 0 {
             go(self, self.selected.map(|i| i.saturating_sub(1)).unwrap_or(0));
-        }
-        if pressed(Key::ArrowRight) {
-            self.step_take(1);
-        }
-        if pressed(Key::ArrowLeft) {
-            self.step_take(-1);
         }
         if pressed(Key::PageDown) && n > 0 {
             go(self, self.selected.map(|i| (i + 10).min(n - 1)).unwrap_or(0));
@@ -925,38 +941,44 @@ impl App {
         if pressed(Key::End) && n > 0 {
             go(self, n - 1);
         }
-        if pressed(Key::Space) {
+        if fired(Action::NextTake) {
+            self.step_take(1);
+        }
+        if fired(Action::PreviousTake) {
+            self.step_take(-1);
+        }
+        if fired(Action::Play) {
             if self.is_playing() && !shift {
                 self.stop();
             } else {
                 self.play(None);
             }
         }
-        if pressed(Key::Enter) {
+        if fired(Action::PlayFromStart) {
             self.play(Some(0.0));
         }
-        if pressed(Key::Escape) {
+        if fired(Action::Stop) {
             self.stop();
         }
-        if pressed(Key::F) {
+        if fired(Action::Favorite) {
             self.toggle_favorite();
         }
-        if pressed(Key::L) {
+        if fired(Action::Loop) {
             self.loop_on = !self.loop_on;
         }
-        if pressed(Key::A) {
+        if fired(Action::Autoplay) {
             self.autoplay = !self.autoplay;
         }
-        if pressed(Key::E) {
+        if fired(Action::Export) {
             self.export();
         }
-        if pressed(Key::Z) {
-            self.wave.zoom_to_selection();
+        if fired(Action::Zoom) {
+            self.zoom_to_selection();
         }
-        if pressed(Key::T) {
+        if fired(Action::Trim) {
             self.trim_selection();
         }
-        if pressed(Key::Delete) || pressed(Key::Backspace) {
+        if fired(Action::ClearSelection) {
             self.wave.selection = None;
             self.wave.fade_in = 0.0;
             self.wave.fade_out = 0.0;
@@ -964,11 +986,11 @@ impl App {
         if let Some(cur) = &self.current {
             let pos = self.player.as_ref().map(|p| p.position() as f64 / p.sample_rate as f64);
             if let Some(t) = pos {
-                if pressed(Key::OpenBracket) {
+                if fired(Action::SelectionStart) {
                     let end = self.wave.selection.map(|(_, b)| b).filter(|b| *b > t).unwrap_or(cur.duration_secs);
                     self.wave.selection = Some((t, end));
                 }
-                if pressed(Key::CloseBracket) {
+                if fired(Action::SelectionEnd) {
                     let start = self.wave.selection.map(|(a, _)| a).filter(|a| *a < t).unwrap_or(0.0);
                     self.wave.selection = Some((start, t));
                 }
@@ -980,6 +1002,11 @@ impl App {
                 self.toggle_tag(&tag.name);
             }
         }
+    }
+
+    /// The action's chord as a hint reads it: `Ctrl+C`, `←`, `Space`.
+    fn key_of(&self, action: Action) -> String {
+        keys::hint(self.config.keys.chord(action))
     }
 
     // ---- widgets ----
@@ -1327,6 +1354,7 @@ impl App {
         self.list_rect = ui.max_rect();
         let mut action: Option<(usize, FileAction)> = None;
         let defs = self.config.tags.clone();
+        let favorite_key = self.key_of(Action::Favorite);
         let shown_folder = match &self.location {
             Some(Location::Folder(d)) if self.search.trim().is_empty() => Some(d.clone()),
             _ => None,
@@ -1511,7 +1539,7 @@ impl App {
                         context = Some(i);
                     }
                     egui::Popup::context_menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                        if let Some(a) = file_menu(ui, f, &defs, &theme) {
+                        if let Some(a) = file_menu(ui, f, &defs, &theme, &favorite_key) {
                             action = Some((i, a));
                         }
                     });
@@ -1768,20 +1796,20 @@ impl App {
                     action = Some(WaveAction::Copy);
                 }
                 ui.separator();
-                if item(ui, icons::ARROWS_IN_LINE_HORIZONTAL, "Trim to the sound", "T", true) {
+                if item(ui, icons::ARROWS_IN_LINE_HORIZONTAL, "Trim to the sound", &self.key_of(Action::Trim), true) {
                     action = Some(WaveAction::Trim);
                 }
-                if item(ui, icons::MAGNIFYING_GLASS_PLUS, "Zoom to selection", "Z", has_selection) {
+                if item(ui, icons::MAGNIFYING_GLASS_PLUS, "Zoom to selection", &self.key_of(Action::Zoom), has_selection) {
                     action = Some(WaveAction::Zoom);
                 }
-                if item(ui, icons::X, "Clear selection", "Del", has_selection) {
+                if item(ui, icons::X, "Clear selection", &self.key_of(Action::ClearSelection), has_selection) {
                     action = Some(WaveAction::Clear);
                 }
             });
             match action {
                 Some(WaveAction::Copy) => self.copy_selection(),
                 Some(WaveAction::Trim) => self.trim_selection(),
-                Some(WaveAction::Zoom) => self.wave.zoom_to_selection(),
+                Some(WaveAction::Zoom) => self.zoom_to_selection(),
                 Some(WaveAction::Clear) => {
                     self.wave.selection = None;
                     self.wave.fade_in = 0.0;
@@ -1816,12 +1844,13 @@ impl App {
         let Some(i) = self.selected else { return };
         ui.spacing_mut().item_spacing.x = 6.0;
         let defs = self.config.tags.clone();
+        let favorite_key = self.key_of(Action::Favorite);
         let file = self.files[i].clone();
         let mut action = None;
         let menu_button = |ui: &mut egui::Ui, action: &mut Option<FileAction>| {
             let b = theme::tool_button(ui, icons::TAG, "Tags").on_hover_text("Favorite, tags and more; also on right-click of a row");
             egui::Popup::menu(&b).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                *action = file_menu(ui, &file, &defs, &self.theme);
+                *action = file_menu(ui, &file, &defs, &self.theme, &favorite_key);
             });
         };
         let chips: Vec<(usize, &str)> = file.tags.iter().map(|t| (defs.iter().position(|d| &d.name == t).unwrap_or(defs.len()), t.as_str())).collect();
@@ -1860,10 +1889,10 @@ impl App {
                     self.play(None);
                 }
             }
-            if icon_btn(ui, icons::REPEAT, self.loop_on).on_hover_text("Loop (L)").clicked() {
+            if icon_btn(ui, icons::REPEAT, self.loop_on).on_hover_text(format!("Loop ({})", self.key_of(Action::Loop))).clicked() {
                 self.loop_on = !self.loop_on;
             }
-            if ui.add(egui::Button::new("Auto").selected(self.autoplay).min_size(egui::vec2(0.0, CONTROL_H))).on_hover_text("Autoplay on selection (A)").clicked() {
+            if ui.add(egui::Button::new("Auto").selected(self.autoplay).min_size(egui::vec2(0.0, CONTROL_H))).on_hover_text(format!("Autoplay on selection ({})", self.key_of(Action::Autoplay))).clicked() {
                 self.autoplay = !self.autoplay;
             }
             let t = playhead.unwrap_or(0.0);
@@ -1877,25 +1906,29 @@ impl App {
             if (a.changed() || b.changed()) && (had || sel.1 > sel.0) {
                 self.wave.selection = if sel.1 > sel.0 { Some(sel) } else { None };
             }
-            if icon_btn(ui, icons::CARET_LEFT, false).on_hover_text("Previous take (←)").clicked() {
+            if icon_btn(ui, icons::CARET_LEFT, false).on_hover_text(format!("Previous take ({})", self.key_of(Action::PreviousTake))).clicked() {
                 self.step_take(-1);
             }
-            if icon_btn(ui, icons::CARET_RIGHT, false).on_hover_text("Next take (→)").clicked() {
+            if icon_btn(ui, icons::CARET_RIGHT, false).on_hover_text(format!("Next take ({})", self.key_of(Action::NextTake))).clicked() {
                 self.step_take(1);
             }
-            if icon_btn(ui, icons::ARROWS_IN_LINE_HORIZONTAL, false).on_hover_text(format!("Trim the selection to the sound (T): what sits {} dB under its peak goes", hark_core::pcm::TRIM_BELOW_PEAK_DB)).clicked() {
+            if icon_btn(ui, icons::ARROWS_IN_LINE_HORIZONTAL, false).on_hover_text(format!("Trim the selection to the sound ({}): what sits {} dB under its peak goes", self.key_of(Action::Trim), hark_core::pcm::TRIM_BELOW_PEAK_DB)).clicked() {
                 self.trim_selection();
             }
-            if icon_btn(ui, icons::MAGNIFYING_GLASS_PLUS, false).on_hover_text("Zoom to selection (Z)").clicked() {
-                self.wave.zoom_to_selection();
+            if icon_btn(ui, icons::MAGNIFYING_GLASS_PLUS, false).on_hover_text(format!("Zoom to selection ({})", self.key_of(Action::Zoom))).clicked() {
+                self.wave.zoom_to_selection(duration);
             }
-            if icon_btn(ui, icons::X, false).on_hover_text("Clear selection (Del)").clicked() {
+            if icon_btn(ui, icons::X, false).on_hover_text(format!("Clear selection ({})", self.key_of(Action::ClearSelection))).clicked() {
                 self.wave.selection = None;
             }
             group(ui);
             ui.label(RichText::new("Fade").color(self.theme.muted));
-            ui.add(secs_field(&mut self.wave.fade_in, duration));
-            ui.add(secs_field(&mut self.wave.fade_out, duration));
+            if ui.add(secs_field(&mut self.wave.fade_in, duration)).changed() {
+                self.wave.touch_fade(waveform::Fade::In);
+            }
+            if ui.add(secs_field(&mut self.wave.fade_out, duration)).changed() {
+                self.wave.touch_fade(waveform::Fade::Out);
+            }
             egui::ComboBox::from_id_salt("fade-shape")
                 .width(64.0)
                 .selected_text(match self.wave.fade_shape {
@@ -2074,7 +2107,7 @@ impl App {
             ui.ctx().request_repaint();
         }
         let can = matches!(req, Some(Ok(_)));
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
             let avail = ui.available_rect_before_wrap();
             let rect = egui::Rect::from_min_max(egui::pos2(avail.left(), avail.bottom() - BUTTON_H), avail.right_bottom());
             let hot = can && ui.rect_contains_pointer(rect);
@@ -2088,7 +2121,7 @@ impl App {
                 .stroke(Stroke::NONE)
                 .corner_radius(CornerRadius::same(6))
                 .min_size(rect.size());
-            if ui.add_enabled(can, button).on_hover_text("E").clicked() {
+            if ui.add_enabled(can, button).on_hover_text(self.key_of(Action::Export)).clicked() {
                 self.export();
             }
         });
@@ -2256,7 +2289,18 @@ impl App {
     fn ui_status(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if self.status.is_empty() {
-                for (key, action) in [("Space", "Play"), ("↑ ↓", "Audition"), ("← →", "Takes"), ("F", "Favorite"), ("1–9", "Tags"), ("[ ]", "Selection"), ("E", "Export"), ("Ctrl+C", "Copy")] {
+                let pair = |a: Action, b: Action| format!("{} {}", self.key_of(a), self.key_of(b));
+                let hints = [
+                    (self.key_of(Action::Play), "Play"),
+                    ("↑ ↓".to_string(), "Audition"),
+                    (pair(Action::PreviousTake, Action::NextTake), "Takes"),
+                    (self.key_of(Action::Favorite), "Favorite"),
+                    ("1–9".to_string(), "Tags"),
+                    (pair(Action::SelectionStart, Action::SelectionEnd), "Selection"),
+                    (self.key_of(Action::Export), "Export"),
+                    ("Ctrl+C".to_string(), "Copy"),
+                ];
+                for (key, action) in &hints {
                     self.key_hint(ui, key, action);
                 }
             } else {
@@ -2311,11 +2355,11 @@ enum FileAction {
 
 /// The per-file menu: favorite, every tag with the carried ones checked, and the file's place
 /// on disk. Returns what was clicked; toggles keep the menu open, the rest close it.
-fn file_menu(ui: &mut egui::Ui, file: &FileRecord, defs: &[hark_core::TagDef], theme: &Theme) -> Option<FileAction> {
+fn file_menu(ui: &mut egui::Ui, file: &FileRecord, defs: &[hark_core::TagDef], theme: &Theme, favorite_key: &str) -> Option<FileAction> {
     theme::menu_items(ui);
     let mut action = None;
     let mut fav = file.favorite;
-    if theme::menu_check(ui, &mut fav, theme::icon_text(icons::STAR, "Favorite", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).on_hover_text("F").changed() {
+    if theme::menu_check(ui, &mut fav, theme::icon_text(icons::STAR, "Favorite", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).on_hover_text(favorite_key).changed() {
         action = Some(FileAction::Favorite);
     }
     ui.separator();
@@ -2418,6 +2462,13 @@ fn reveal(path: &Path) -> std::io::Result<()> {
 
 /// Two lines: what the file becomes, and what is done to the signal on the way.
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if std::mem::take(&mut self.drag_took_release) {
+            let (pos, modifiers) = ctx.input(|i| (i.pointer.interact_pos(), i.modifiers));
+            raw_input.events.insert(0, egui::Event::PointerButton { pos: pos.unwrap_or(egui::Pos2::ZERO), button: egui::PointerButton::Primary, pressed: false, modifiers });
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let zoom = ctx.zoom_factor();

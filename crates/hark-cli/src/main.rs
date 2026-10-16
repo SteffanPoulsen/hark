@@ -111,6 +111,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<PresetsCmd>,
     },
+    /// The window's keys: each action's chord, and changing one.
+    Keys {
+        #[command(subcommand)]
+        cmd: Option<KeysCmd>,
+    },
     /// Export a file, or a selection of it, through a preset.
     Export(ExportArgs),
     /// Write a file, or a selection of it, as heard into the copy folder for another
@@ -249,6 +254,16 @@ enum TagsCmd {
     Move { name: String, position: usize },
     /// Remove a tag definition and the marks that carry it.
     Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum KeysCmd {
+    List,
+    /// Bind an action to a chord such as `E`, `Ctrl+Shift+E` or `ArrowLeft`; key names are
+    /// the window's.
+    Set { action: String, chord: String },
+    /// An action back to its default, or every action with none named.
+    Reset { action: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -800,6 +815,40 @@ fn run() -> Result<()> {
                 }
                 for (u, n) in used.iter().filter(|(u, _)| !config.tags.iter().any(|t| &t.name == u)) {
                     println!("{u:<12} {n:>5} files  (undefined)");
+                }
+            }
+        }
+        Cmd::Keys { cmd } => {
+            use hark_core::keys::Action;
+            let mut config = load(&project)?;
+            let find = |id: &str| Action::from_id(id).ok_or_else(|| anyhow!("no action {id}; one of {}", Action::ALL.map(Action::id).join(", ")));
+            match cmd.unwrap_or(KeysCmd::List) {
+                KeysCmd::List => {
+                    if json {
+                        let rows: Vec<serde_json::Value> = Action::ALL
+                            .into_iter()
+                            .map(|a| serde_json::json!({ "action": a.id(), "label": a.label(), "chord": config.keys.chord(a), "default": a.default_chord() }))
+                            .collect();
+                        print_json(&rows)?;
+                    } else {
+                        for a in Action::ALL {
+                            let chord = config.keys.chord(a);
+                            println!("{:<16} {:<14} {}{}", a.id(), chord, a.label(), if chord == a.default_chord() { String::new() } else { format!("  (default {})", a.default_chord()) });
+                        }
+                    }
+                }
+                KeysCmd::Set { action, chord } => {
+                    let a = find(&action)?;
+                    config.keys.set(a, &chord).map_err(|e| anyhow!("{e}"))?;
+                    config.save()?;
+                    println!("{} = {}", a.id(), config.keys.chord(a));
+                }
+                KeysCmd::Reset { action } => {
+                    match action {
+                        Some(id) => config.keys.reset(find(&id)?),
+                        None => config.keys.reset_all(),
+                    }
+                    config.save()?;
                 }
             }
         }

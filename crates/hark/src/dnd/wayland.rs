@@ -203,6 +203,7 @@ impl Dispatch<wl_data_source::WlDataSource, Payload> for State {
             }
             wl_data_source::Event::Cancelled | wl_data_source::Event::DndFinished => {
                 st.dragging.store(false, Ordering::Release);
+                st.press.store(NO_PRESS, Ordering::Release);
                 if let Some((surface, buffer)) = &payload.icon {
                     surface.destroy();
                     buffer.destroy();

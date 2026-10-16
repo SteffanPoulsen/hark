@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::keys::Keymap;
 use crate::library::Sort;
 use crate::pcm::{DownmixMode, FadeShape};
 use crate::project::Project;
@@ -169,6 +170,9 @@ pub struct Config {
     /// A palette file (`{"bg": "#14121B", "accent": "#1AD1D1", ...}`) that overrides the built-in theme.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme_file: Option<PathBuf>,
+    /// The window's keys that differ from the defaults, action to chord.
+    #[serde(default, skip_serializing_if = "Keymap::is_empty")]
+    pub keys: Keymap,
 }
 
 fn default_stream_above_mb() -> f64 {
@@ -241,6 +245,7 @@ impl Default for Config {
             ui_zoom: default_ui_zoom(),
             list_sort: Sort::default(),
             theme_file: None,
+            keys: Keymap::default(),
         }
     }
 }

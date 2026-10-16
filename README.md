@@ -38,7 +38,7 @@ Binaries land in `target/release/hark` (the window) and `target/release/hark-cli
 
 ## Use
 
-Start `hark`, add a library folder with the button under the tree, pick a folder, and arrow through the files. `hark --open <file>` starts on a file, with `--in` and `--out` seconds for a selection and `--fade-in` and `--fade-out` for its fades; `hark --project <file.hark>` opens a project; `hark --settings [general|tags|presets]` opens the settings window, a window of its own with those three pages. A project has no window of its own: its folders are the tree, its output folder is on the export card, and its name is its file's.
+Start `hark`, add a library folder with the button under the tree, pick a folder, and arrow through the files. `hark --open <file>` starts on a file, with `--in` and `--out` seconds for a selection and `--fade-in` and `--fade-out` for its fades; `hark --project <file.hark>` opens a project; `hark --settings [general|tags|presets|keys]` opens the settings window, a window of its own with those four pages. A project has no window of its own: its folders are the tree, its output folder is on the export card, and its name is its file's.
 
 | Key | Action |
 |---|---|
@@ -57,6 +57,8 @@ Start `hark`, add a library folder with the button under the tree, pick a folder
 | Delete | Clear the selection and fades |
 | E | Export the selection with the chosen preset |
 | Ctrl+C | Copy the selection as heard to the clipboard as a file; over the list, the original file |
+
+Every key but the list's arrows, the tag digits and Ctrl+C can be changed on the settings window's Keys page or with `hark-cli keys set <action> <chord>`; `hark-cli keys` lists the actions and their chords.
 
 On the waveform: drag to select, drag a selection edge to adjust it, shift-drag inside to move it, Ctrl-drag to carry the selection out of the window into another program, drag the triangles in the strip above to set fades, click to play from there, wheel to zoom, shift-wheel or middle-drag to pan, double-click to zoom out. A row dragged out of the list carries the original file. The window scale is in settings; Ctrl+= and Ctrl+- change it too.
 
@@ -104,7 +106,7 @@ The same record is in the file as JSON, readable by anything that walks RIFF chu
 
 ## Configuration
 
-`~/.config/hark/config.json` (or the platform equivalent) holds the default state's folders and output folder, the known project files and the open one, the tags, the export presets, the default preset, the window zoom, the audition sample rate and the streaming threshold (`stream_above_mb`, 256 MB of decoded audio by default, about ten minutes of 48 kHz stereo). The defaults define `clean`, `sfx`, `ambient`, `music` and `voice` presets and a matching set of tags. Edit the file, use the settings window, or `hark-cli config`. A project file is JSON too: an id (favorites key on it), its folders, the output folder and the last export folder; `hark-cli --project <file or name>` acts in one without opening it.
+`~/.config/hark/config.json` (or the platform equivalent) holds the default state's folders and output folder, the known project files and the open one, the tags, the export presets, the default preset, the keys that differ from the defaults, the window zoom, the audition sample rate and the streaming threshold (`stream_above_mb`, 256 MB of decoded audio by default, about ten minutes of 48 kHz stereo). The defaults define `clean`, `sfx`, `ambient`, `music` and `voice` presets and a matching set of tags. Edit the file, use the settings window, or `hark-cli config`. A project file is JSON too: an id (favorites key on it), its folders, the output folder and the last export folder; `hark-cli --project <file or name>` acts in one without opening it.
 
 The library database lives in the data directory and only indexes what the files already carry; deleting it loses nothing but the marks, which `hark-cli` can re-apply. Waveform peaks are cached in the cache directory.
 

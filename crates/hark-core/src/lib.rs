@@ -3,6 +3,7 @@ pub mod config;
 pub mod decode;
 pub mod export;
 pub mod flac;
+pub mod keys;
 pub mod library;
 pub mod loudness;
 pub mod origin;

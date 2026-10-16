@@ -4,6 +4,7 @@
 use egui::{Color32, CornerRadius, Margin, RichText};
 use egui_phosphor::regular as icons;
 use hark_core::audition::Player;
+use hark_core::keys::Action;
 
 use crate::theme::{self, Theme};
 use crate::preset_ui;
@@ -14,16 +15,18 @@ pub enum Page {
     General,
     Tags,
     Presets,
+    Keys,
 }
 
 impl Page {
-    const ALL: [Page; 3] = [Page::General, Page::Tags, Page::Presets];
+    const ALL: [Page; 4] = [Page::General, Page::Tags, Page::Presets, Page::Keys];
 
     fn title(self) -> &'static str {
         match self {
             Page::General => "General",
             Page::Tags => "Tags",
             Page::Presets => "Presets",
+            Page::Keys => "Keys",
         }
     }
 
@@ -32,6 +35,7 @@ impl Page {
             Page::General => icons::SLIDERS_HORIZONTAL,
             Page::Tags => icons::TAG,
             Page::Presets => icons::SLIDERS,
+            Page::Keys => icons::KEYBOARD,
         }
     }
 }
@@ -87,6 +91,7 @@ impl App {
                 self.settings_open = false;
                 self.tag_edit = None;
                 self.preset_rename = None;
+                self.key_capture = None;
             }
             let theme = self.theme.clone();
             egui::Panel::left("settings-nav").resizable(false).exact_size(NAV_W).frame(egui::Frame::new().fill(theme.bg_deep).inner_margin(Margin::same(12))).show(ctx, |ui| {
@@ -111,6 +116,7 @@ impl App {
                             Page::General => self.page_general(ui),
                             Page::Tags => self.page_tags(ui),
                             Page::Presets => self.page_presets(ui),
+                            Page::Keys => self.page_keys(ui),
                         });
                     });
                 });
@@ -386,6 +392,87 @@ impl App {
         });
         if let Some(a) = action {
             self.apply_tag_action(a);
+        }
+    }
+
+    /// One row per rebindable action: click its key, press the new one. The key pressed is
+    /// taken from this window's events, so the main window's handler never sees it.
+    fn page_keys(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme.clone();
+        heading(ui, &theme, "Keys", "Click a key and press the new one, with any modifiers held; Escape keeps the old. The list's arrows, the tag digits and Ctrl+C are fixed.");
+        if let Some(action) = self.key_capture {
+            let got = ui.ctx().input(|i| i.events.iter().find_map(|e| match e {
+                egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                _ => None,
+            }));
+            match got {
+                Some((egui::Key::Escape, _)) => self.key_capture = None,
+                Some((key, modifiers)) => {
+                    if let Some(chord) = crate::keys::chord_of(key, modifiers) {
+                        if let Err(e) = self.config.keys.set(action, &chord) {
+                            self.set_status(format!("Key: {e}"), true);
+                        }
+                        let _ = self.config.save();
+                        self.key_capture = None;
+                    }
+                }
+                None => {}
+            }
+        }
+        let mut reset_all = false;
+        let mut set_capture: Option<Option<Action>> = None;
+        let mut reset: Option<Action> = None;
+        card(ui, &theme, |ui| {
+            row(ui, &theme, true, "Defaults", "Every key back to what it started as.", |ui| {
+                let b = egui::Button::new(theme::icon_text(icons::ARROW_COUNTER_CLOCKWISE, "Reset all", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(0.0, 28.0));
+                if ui.add_enabled(!self.config.keys.is_empty(), b).clicked() {
+                    reset_all = true;
+                }
+            });
+        });
+        ui.add_space(12.0);
+        card(ui, &theme, |ui| {
+            for (n, action) in Action::ALL.into_iter().enumerate() {
+                let chord = self.config.keys.chord(action).to_string();
+                let capturing = self.key_capture == Some(action);
+                let conflicts = self.config.keys.conflicts(action);
+                let unknown = crate::keys::binding(&chord).is_none();
+                row(ui, &theme, n == 0, action.label(), action.describe(), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let (text, color) = match (capturing, unknown, conflicts.is_empty()) {
+                        (true, _, _) => ("Press a key…".to_string(), theme.accent),
+                        (_, true, _) => (chord.clone(), theme.err),
+                        (_, _, false) => (crate::keys::hint(&chord), theme.warn),
+                        _ => (crate::keys::hint(&chord), theme.text),
+                    };
+                    let b = egui::Button::new(RichText::new(text).family(egui::FontFamily::Name(theme::MEDIUM.into())).color(color)).selected(capturing).min_size(egui::vec2(96.0, 28.0));
+                    let b = ui.add(b);
+                    let b = if unknown {
+                        b.on_hover_text("Not a key the window knows")
+                    } else if !conflicts.is_empty() {
+                        b.on_hover_text(format!("Also {}", conflicts.iter().map(|a| a.label()).collect::<Vec<_>>().join(", ")))
+                    } else {
+                        b
+                    };
+                    if b.clicked() {
+                        set_capture = Some(if capturing { None } else { Some(action) });
+                    }
+                    if !self.config.keys.is_default(action) && theme::tool_button(ui, icons::ARROW_COUNTER_CLOCKWISE, "").on_hover_text(format!("Back to {}", crate::keys::hint(action.default_chord()))).clicked() {
+                        reset = Some(action);
+                    }
+                });
+            }
+        });
+        if let Some(c) = set_capture {
+            self.key_capture = c;
+        }
+        if let Some(action) = reset {
+            self.config.keys.reset(action);
+            let _ = self.config.save();
+        }
+        if reset_all {
+            self.config.keys.reset_all();
+            let _ = self.config.save();
         }
     }
 

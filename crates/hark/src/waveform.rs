@@ -41,6 +41,15 @@ pub struct WaveState {
     /// The edge moved last. When both edges sit on one spot, it is the one a grab takes, so
     /// dragging back reopens the selection the way it was just closed.
     last_edge: Option<Drag>,
+    /// The fade set last. It keeps its length when the two overlap, pushing the other back,
+    /// and takes the grab when both handles sit on one spot.
+    last_fade: Option<Fade>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Fade {
+    In,
+    Out,
 }
 
 pub enum WaveEvent {
@@ -61,7 +70,7 @@ pub struct WaveColors {
 
 impl Default for WaveState {
     fn default() -> Self {
-        WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), gain: 1.0, drag: None, last_edge: None }
+        WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), gain: 1.0, drag: None, last_edge: None, last_fade: None }
     }
 }
 
@@ -73,6 +82,7 @@ impl WaveState {
         self.fade_out = 0.0;
         self.drag = None;
         self.last_edge = None;
+        self.last_fade = None;
     }
 
     /// The span the fades hang off: the selection, or the whole file.
@@ -80,11 +90,21 @@ impl WaveState {
         self.selection.unwrap_or((0.0, duration))
     }
 
+    /// Marks a fade as the one set last, so clamping keeps it and shortens the other.
+    pub fn touch_fade(&mut self, which: Fade) {
+        self.last_fade = Some(which);
+    }
+
     pub fn clamp_fades(&mut self, duration: f64) {
         let (a, b) = self.bounds(duration);
         let len = (b - a).max(0.0);
-        self.fade_in = self.fade_in.clamp(0.0, len);
-        self.fade_out = self.fade_out.clamp(0.0, len - self.fade_in);
+        if self.last_fade == Some(Fade::Out) {
+            self.fade_out = self.fade_out.clamp(0.0, len);
+            self.fade_in = self.fade_in.clamp(0.0, len - self.fade_out);
+        } else {
+            self.fade_in = self.fade_in.clamp(0.0, len);
+            self.fade_out = self.fade_out.clamp(0.0, len - self.fade_in);
+        }
     }
 
     /// Pans the view, keeping its width, until the span is inside it; a span wider than the
@@ -96,21 +116,27 @@ impl WaveState {
             return;
         }
         if span.1 - span.0 >= w {
-            let pad = (span.1 - span.0) * 0.05;
-            self.view = (span.0 - pad, span.1 + pad);
+            self.fit(span, duration);
             return;
         }
         let start = (span.0 - w * 0.1).min(duration - w).max(0.0);
         self.view = (start, start + w);
     }
 
-    pub fn zoom_to_selection(&mut self) {
+    pub fn zoom_to_selection(&mut self, duration: f64) {
         if let Some((a, b)) = self.selection {
             if b > a {
-                let pad = (b - a) * 0.05;
-                self.view = (a - pad, b + pad);
+                self.fit((a, b), duration);
             }
         }
+    }
+
+    /// The view becomes the span with a little room on each side, kept inside the file.
+    fn fit(&mut self, span: (f64, f64), duration: f64) {
+        let pad = (span.1 - span.0) * 0.05;
+        let w = (span.1 - span.0 + 2.0 * pad).min(duration);
+        let start = (span.0 - pad).clamp(0.0, duration - w);
+        self.view = (start, start + w);
     }
 
     fn zoom_at(&mut self, anchor: f64, factor: f64, duration: f64) {
@@ -136,12 +162,13 @@ fn hit(state: &WaveState, lane: Rect, p: Pos2, duration: f64, x_of: &dyn Fn(f64)
     if lane.contains(p) {
         let din = (p.x - x_of(a + state.fade_in)).abs();
         let dout = (p.x - x_of(b - state.fade_out)).abs();
-        return if din <= HANDLE_GRAB_PX && din <= dout {
-            Some(Drag::FadeIn)
-        } else if dout <= HANDLE_GRAB_PX {
-            Some(Drag::FadeOut)
-        } else {
-            None
+        let last = if state.last_fade == Some(Fade::Out) { Drag::FadeOut } else { Drag::FadeIn };
+        return match (din <= HANDLE_GRAB_PX, dout <= HANDLE_GRAB_PX) {
+            (true, true) if (din - dout).abs() < 1.0 => Some(last),
+            (true, true) => Some(if din < dout { Drag::FadeIn } else { Drag::FadeOut }),
+            (true, false) => Some(Drag::FadeIn),
+            (false, true) => Some(Drag::FadeOut),
+            (false, false) => None,
         };
     }
     state.selection?;
@@ -454,8 +481,14 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
                         state.selection = Some((na, na + len));
                     }
                 }
-                Drag::FadeIn => state.fade_in = (t - state.bounds(duration).0).max(0.0),
-                Drag::FadeOut => state.fade_out = (state.bounds(duration).1 - t).max(0.0),
+                Drag::FadeIn => {
+                    state.fade_in = (t - state.bounds(duration).0).max(0.0);
+                    state.last_fade = Some(Fade::In);
+                }
+                Drag::FadeOut => {
+                    state.fade_out = (state.bounds(duration).1 - t).max(0.0);
+                    state.last_fade = Some(Fade::Out);
+                }
             }
             state.clamp_fades(duration);
         }
