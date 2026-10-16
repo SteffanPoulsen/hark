@@ -22,6 +22,7 @@ Auditioning a big library in a DAW means importing first, and in a file manager 
 - **Copy and drag into a DAW.** Ctrl-drag the waveform into Reaper, Pro Tools, a folder or a chat, or press Ctrl+C and paste: the selection as heard, with its fades and gain, lands as a WAV at the source's rate and channels. Copies stay in hark's own folder until you clear it, since a DAW may reference them in place.
 - **Preset-driven export.** WAV or FLAC, bit depth with dither, resampling, mono downmix, peak or EBU R128 loudness normalisation under a true-peak ceiling, and a file name template. Override any of it for one export.
 - **An origin inside every export.** A `hark` RIFF chunk and a BWF `bext` description in WAV, an APPLICATION block and a Vorbis comment in FLAC: source path and hash, pack, selection, fades, preset and measured gain. `hark-cli reexport` runs that recipe again with changes.
+- **Keys you can change.** Every action has a key, and all but the list's arrows and the tag digits can be rebound on the settings window's Keys page or with the CLI.
 - **A CLI for all of it.** `hark-cli` exposes the same core with `--json` on every command, so a script or an agent can search, mark, analyse and export without a window.
 
 ![The presets page of the settings window](docs/screenshots/presets.png)

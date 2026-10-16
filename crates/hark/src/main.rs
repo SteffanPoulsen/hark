@@ -2342,6 +2342,7 @@ impl App {
                     (pair(Action::SelectionStart, Action::SelectionEnd), "Selection"),
                     (self.key_of(Action::Export), "Export"),
                     ("Ctrl+C".to_string(), "Copy"),
+                    ("Ctrl+Drag".to_string(), "Drag out"),
                 ];
                 for (key, action) in &hints {
                     self.key_hint(ui, key, action);
