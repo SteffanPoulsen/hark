@@ -1294,10 +1294,16 @@ impl App {
             }
             ui.add_space(6.0);
             if self.config.roots().is_empty() {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.weak(if self.config.active.is_some() { "No folders in this project yet. Add one below." } else { "No library folders yet. Add one below." });
+                let area = egui::Rect::from_min_max(ui.cursor().min, ui.clip_rect().max);
+                let title = if self.config.active.is_some() { "No folders in this project" } else { "No library folders yet" };
+                ui.scope_builder(egui::UiBuilder::new().max_rect(area.shrink2(egui::vec2(24.0, 0.0))).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
+                    // A little above the middle, where a centred block looks centred.
+                    ui.add_space(((area.height() - 110.0) * 0.42).max(16.0));
+                    ui.label(theme::icon(icons::FOLDER_DASHED).size(44.0).color(self.theme.muted));
+                    ui.add_space(10.0);
+                    ui.label(theme::semibold(title).size(15.0));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Add a folder of sounds below.").color(self.theme.muted).size(12.5));
                 });
                 return;
             }
