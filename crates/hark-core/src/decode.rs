@@ -5,6 +5,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::codecs::CodecParameters;
+use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
@@ -142,11 +143,27 @@ pub fn decode_span(path: &Path, start_secs: f64, end_secs: f64) -> Result<Pcm> {
     Ok(pcm)
 }
 
+/// Packets that may fail in a row at the start of a file before it is judged undecodable.
+const UNDECODABLE_AFTER: u32 = 100;
+
+fn make_decoder(params: &symphonia::core::codecs::audio::AudioCodecParameters) -> Result<Box<dyn AudioDecoder>> {
+    Ok(symphonia::default::get_codecs().make_audio_decoder(params, &AudioDecoderOptions::default())?)
+}
+
 /// A file decoded one packet at a time, seekable by frame.
+///
+/// A damaged file plays as far as it can: a packet that fails to decode is dropped, and a file
+/// cut off inside its last packet ends at the one before. The decoder is rebuilt after a failed
+/// packet, because a failure can leave it unable to decode the rest: symphonia 0.6's AAC
+/// decoder keeps the channel layout of a stray mono element for the whole stream.
 pub struct Reader {
     opened: Opened,
     decoder: Box<dyn AudioDecoder>,
     chunk: Vec<f32>,
+    decoded_any: bool,
+    /// Failures before the first packet decodes, and the latest of them.
+    failures: u32,
+    failure: Option<anyhow::Error>,
     /// From the header until the first packet decodes, then from the decoded audio.
     pub sample_rate: u32,
     pub channels: u16,
@@ -159,7 +176,7 @@ pub struct Reader {
 impl Reader {
     pub fn open(path: &Path) -> Result<Reader> {
         let opened = open(path)?;
-        let decoder = symphonia::default::get_codecs().make_audio_decoder(&opened.params, &AudioDecoderOptions::default())?;
+        let decoder = make_decoder(&opened.params)?;
         Ok(Reader {
             sample_rate: opened.params.sample_rate.unwrap_or(0),
             channels: opened.params.channels.as_ref().map(|c| c.count() as u16).unwrap_or(0),
@@ -167,6 +184,9 @@ impl Reader {
             opened,
             decoder,
             chunk: Vec::new(),
+            decoded_any: false,
+            failures: 0,
+            failure: None,
             chunk_start: None,
         })
     }
@@ -174,15 +194,30 @@ impl Reader {
     /// Appends the next packet's interleaved frames to `out`; `false` once the file is exhausted.
     pub fn next_chunk(&mut self, out: &mut Vec<f32>) -> Result<bool> {
         loop {
-            let Some(packet) = self.opened.reader.next_packet()? else { return Ok(false) };
+            let packet = match self.opened.reader.next_packet() {
+                Ok(Some(p)) => p,
+                Ok(None) => return self.exhausted(),
+                Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return self.exhausted(),
+                Err(e) => return Err(e.into()),
+            };
             if packet.track_id != self.opened.track_id {
                 continue;
             }
             let buf = match self.decoder.decode(&packet) {
                 Ok(b) => b,
-                Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    if !self.decoded_any {
+                        self.failures += 1;
+                        if self.failures >= UNDECODABLE_AFTER {
+                            return Err(e.into());
+                        }
+                        self.failure = Some(e.into());
+                    }
+                    self.decoder = make_decoder(&self.opened.params)?;
+                    continue;
+                }
             };
+            self.decoded_any = true;
             self.sample_rate = buf.spec().rate();
             self.channels = buf.spec().channels().count() as u16;
             self.chunk_start = match self.opened.time_base {
@@ -192,6 +227,13 @@ impl Reader {
             buf.copy_to_vec_interleaved(&mut self.chunk);
             out.extend_from_slice(&self.chunk);
             return Ok(true);
+        }
+    }
+
+    fn exhausted(&mut self) -> Result<bool> {
+        match self.failure.take() {
+            Some(e) if !self.decoded_any => Err(e),
+            _ => Ok(false),
         }
     }
 
@@ -215,7 +257,33 @@ impl Reader {
 pub fn is_audio_extension(ext: &str) -> bool {
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "wav" | "wave" | "flac" | "ogg" | "oga" | "mp3" | "aif" | "aiff" | "aifc" | "m4a" | "mp4"
+        "wav" | "wave" | "flac" | "ogg" | "oga" | "mp3" | "aac" | "aif" | "aiff" | "aifc" | "m4a" | "mp4"
             | "caf" | "mka" | "webm" | "opus"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file cut off partway, as a recorder that lost power leaves it, decodes up to the cut.
+    #[test]
+    fn cut_off_file_decodes_to_the_cut() {
+        let samples: Vec<f32> = (0..96_000).map(|i| ((i % 100) as f32 / 50.0 - 1.0) * 0.9).collect();
+        let pcm = Pcm { sample_rate: 48_000, channels: 2, samples };
+        for ext in ["wav", "flac"] {
+            let path = std::env::temp_dir().join(format!("hark-cut-{}.{ext}", std::process::id()));
+            match ext {
+                "wav" => crate::wav::write(&path, &pcm, 24, false, b"{}", &Default::default()).unwrap(),
+                _ => crate::flac::write(&path, &pcm, 24, false, b"{}", "").unwrap(),
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::write(&path, &bytes[..bytes.len() * 2 / 3 + 7]).unwrap();
+            let back = decode(&path);
+            let _ = std::fs::remove_file(&path);
+            let back = back.unwrap_or_else(|e| panic!("{ext}: {e:#}"));
+            let frames = back.samples.len() / 2;
+            assert!(frames > 48_000 / 2 && frames < 48_000, "{ext}: {frames} frames");
+        }
+    }
 }
