@@ -469,7 +469,7 @@ impl Player {
             .unwrap_or_else(|| default_device(&host))?;
         let device_name = device_name(&device);
         let default = device.default_output_config()?;
-        let mut config: cpal::StreamConfig = default.clone().into();
+        let mut config: cpal::StreamConfig = default.into();
         if let Some(rate) = preferred_rate {
             if device.supported_output_configs().map(|mut c| c.any(|r| r.min_sample_rate() <= rate && rate <= r.max_sample_rate())).unwrap_or(false) {
                 config.sample_rate = rate;
@@ -745,7 +745,7 @@ where
 {
     let mut scratch: Vec<f32> = Vec::new();
     let stream = device.build_output_stream(
-        config.clone(),
+        *config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
             scratch.resize(data.len(), 0.0);
             mixer.fill(&mut scratch);

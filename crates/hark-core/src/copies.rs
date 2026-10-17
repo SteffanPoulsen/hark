@@ -185,7 +185,7 @@ pub fn list(folder: &Path) -> (FolderSummary, Vec<PathBuf>) {
             meta.is_file().then(|| (e.path(), meta.len(), meta.modified().unwrap_or(std::time::UNIX_EPOCH)))
         })
         .collect();
-    files.sort_by(|a, b| b.2.cmp(&a.2));
+    files.sort_by_key(|f| std::cmp::Reverse(f.2));
     let summary = FolderSummary { folder: folder.to_path_buf(), files: files.len(), bytes: files.iter().map(|f| f.1).sum() };
     (summary, files.into_iter().map(|f| f.0).collect())
 }

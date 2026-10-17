@@ -443,7 +443,7 @@ fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
 }
 
 fn abs(p: &Path) -> Result<PathBuf> {
-    Ok(std::fs::canonicalize(p).with_context(|| format!("{}", p.display()))?)
+    std::fs::canonicalize(p).with_context(|| format!("{}", p.display()))
 }
 
 /// Absolute path of an output folder, created when missing.

@@ -107,7 +107,7 @@ impl Dragger {
         let stride = w * 4;
         let size = stride * h;
         let mut argb = Vec::with_capacity(size as usize);
-        for px in im.rgba.chunks_exact(4) {
+        for px in im.rgba.as_chunks::<4>().0 {
             let a = px[3] as u32;
             let pre = |c: u8| ((c as u32 * a + 127) / 255) as u8;
             argb.extend_from_slice(&[pre(px[2]), pre(px[1]), pre(px[0]), px[3]]);
