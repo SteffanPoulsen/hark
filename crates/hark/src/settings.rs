@@ -576,7 +576,7 @@ impl App {
             self.preset_edit = self.config.default_preset.clone();
         }
         card(ui, &theme, |ui| {
-            row(ui, &theme, true, "Default preset", "Used by the CLI when none is given, and by the card at startup.", |ui| {
+            row(ui, &theme, true, "Default preset", "The preset a project's export card starts on.", |ui| {
                 egui::ComboBox::from_id_salt("default-preset").width(150.0).selected_text(&self.config.default_preset).show_ui(ui, |ui| {
                     for name in &names {
                         if ui.selectable_value(&mut self.config.default_preset, name.clone(), name).clicked() {
@@ -661,6 +661,9 @@ impl App {
         }
         if let Some(new) = rename {
             if new != editing && self.config.rename_preset(&editing, &new).is_ok() {
+                if let Err(e) = self.db.rename_card_preset(&editing, &new) {
+                    self.set_status(format!("Rename preset: {e:#}"), true);
+                }
                 if self.preset_name.as_deref() == Some(&editing) {
                     self.preset_name = Some(new.clone());
                 }

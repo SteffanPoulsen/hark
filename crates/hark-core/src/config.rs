@@ -181,6 +181,12 @@ pub struct Config {
     /// The order the window lists files in; the column headers change it.
     #[serde(default)]
     pub list_sort: Sort,
+    /// Selecting a file in the window plays it.
+    #[serde(default = "default_true")]
+    pub autoplay: bool,
+    /// Playback in the window loops the selection, or the whole file.
+    #[serde(default)]
+    pub looping: bool,
     /// A palette file (`{"bg": "#14121B", "accent": "#1AD1D1", ...}`) that overrides the built-in theme.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme_file: Option<PathBuf>,
@@ -259,6 +265,8 @@ impl Default for Config {
             stream_above_mb: default_stream_above_mb(),
             ui_zoom: default_ui_zoom(),
             list_sort: Sort::default(),
+            autoplay: true,
+            looping: false,
             theme_file: None,
             keys: Keymap::default(),
         }

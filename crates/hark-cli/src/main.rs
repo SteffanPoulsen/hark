@@ -138,11 +138,18 @@ enum Cmd {
     Config {
         #[arg(long)]
         output_root: Option<PathBuf>,
+        /// The preset a project's export card starts on.
         #[arg(long)]
         default_preset: Option<String>,
         /// Window zoom on top of the display scale.
         #[arg(long)]
         ui_zoom: Option<f32>,
+        /// Selecting a file in the window plays it.
+        #[arg(long)]
+        autoplay: Option<bool>,
+        /// Playback in the window loops.
+        #[arg(long = "loop")]
+        looping: Option<bool>,
         /// Sample rate the output device is opened at; 0 takes the device default.
         #[arg(long)]
         output_rate: Option<u32>,
@@ -388,8 +395,9 @@ impl PresetValues {
 #[derive(Args)]
 struct ExportArgs {
     file: PathBuf,
+    /// The preset to export through, by name; `presets` lists them.
     #[arg(long)]
-    preset: Option<String>,
+    preset: String,
     /// Selection start in seconds.
     #[arg(long = "in")]
     start: Option<f64>,
@@ -892,6 +900,7 @@ fn run() -> Result<()> {
                 PresetsCmd::Rename { old, new } => {
                     config.rename_preset(&old, &new)?;
                     config.save()?;
+                    open_db(&project)?.rename_card_preset(&old, &new)?;
                 }
                 PresetsCmd::Remove { name } => {
                     config.remove_preset(&name)?;
@@ -912,7 +921,7 @@ fn run() -> Result<()> {
             let db = open_db(&project)?;
             let record = db.get(&file)?;
             let (tags, favorite) = record.map(|r| (r.tags, r.favorite)).unwrap_or_default();
-            let mut req = ExportRequest::from_config(&config, &file, a.preset.as_deref(), tags, favorite)?;
+            let mut req = ExportRequest::from_config(&config, &file, Some(&a.preset), tags, favorite)?;
             req.selection = match (a.start, a.end) {
                 (None, None) => None,
                 (s, e) => Some(Selection { start_secs: s.unwrap_or(0.0), end_secs: e.unwrap_or(f64::MAX) }),
@@ -1014,7 +1023,7 @@ fn run() -> Result<()> {
                 print_json(&results)?;
             }
         }
-        Cmd::Config { output_root, default_preset, ui_zoom, output_rate, output_device, stream_above_mb, path } => {
+        Cmd::Config { output_root, default_preset, ui_zoom, autoplay, looping, output_rate, output_device, stream_above_mb, path } => {
             let mut config = load(&project)?;
             let mut changed = false;
             if let Some(o) = output_root {
@@ -1029,6 +1038,14 @@ fn run() -> Result<()> {
             }
             if let Some(z) = ui_zoom {
                 config.ui_zoom = z.clamp(0.5, 3.0);
+                changed = true;
+            }
+            if let Some(a) = autoplay {
+                config.autoplay = a;
+                changed = true;
+            }
+            if let Some(l) = looping {
+                config.looping = l;
                 changed = true;
             }
             if let Some(r) = output_rate {

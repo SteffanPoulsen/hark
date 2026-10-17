@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+use crate::config::ExportPreset;
 use crate::decode::{is_audio_extension, probe, AudioInfo};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -169,6 +170,18 @@ pub struct Query {
     pub limit: usize,
 }
 
+/// Where a project's export card and Preview were left, kept per project like favorites so the
+/// project file does not change with them.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CardState {
+    /// The preset the card was on; `None` once its values were edited.
+    pub preset_name: Option<String>,
+    /// The card's values, which stand when the named preset is gone or there is none.
+    pub preset: ExportPreset,
+    pub preview: bool,
+    pub overwrite: bool,
+}
+
 pub struct Db {
     conn: Connection,
     /// Favorites are read and written for this project.
@@ -199,6 +212,7 @@ CREATE INDEX IF NOT EXISTS files_name ON files(name COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS file_tags (hash TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY (hash, tag));
 CREATE TABLE IF NOT EXISTS favorites (project TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (project, hash));
 CREATE TABLE IF NOT EXISTS hashes (hash TEXT PRIMARY KEY, size INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS card_state (project TEXT PRIMARY KEY, state TEXT NOT NULL);
 INSERT OR IGNORE INTO hashes SELECT hash, size FROM files WHERE hash IS NOT NULL;
 ";
 
@@ -571,6 +585,22 @@ impl Db {
 
     pub fn forget_project(&self, project: &str) -> Result<usize> {
         Ok(self.conn.execute("DELETE FROM favorites WHERE project = ?1", params![project])?)
+    }
+
+    /// The project's card as it was left; `None` for a project never opened in the window.
+    pub fn card_state(&self) -> Result<Option<CardState>> {
+        let json: Option<String> = self.conn.query_row("SELECT state FROM card_state WHERE project = ?1", params![self.project], |r| r.get(0)).optional()?;
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    pub fn set_card_state(&self, state: &CardState) -> Result<()> {
+        self.conn.execute("INSERT OR REPLACE INTO card_state (project, state) VALUES (?1, ?2)", params![self.project, serde_json::to_string(state)?])?;
+        Ok(())
+    }
+
+    /// Cards of every project that were on preset `old` follow its rename.
+    pub fn rename_card_preset(&self, old: &str, new: &str) -> Result<usize> {
+        Ok(self.conn.execute("UPDATE card_state SET state = json_set(state, '$.preset_name', ?2) WHERE json_extract(state, '$.preset_name') = ?1", params![old, new])?)
     }
 
     pub fn rename_tag(&self, old: &str, new: &str) -> Result<usize> {

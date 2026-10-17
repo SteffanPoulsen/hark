@@ -20,7 +20,7 @@ use hark_core::audition::{Clip, Player, Source};
 use hark_core::config::Normalize;
 use hark_core::export::{ExportRequest, PreviewLevel, Selection};
 use hark_core::pcm::DownmixMode;
-use hark_core::library::{ChannelClass, Query, Sort, SortKey};
+use hark_core::library::{CardState, ChannelClass, Query, Sort, SortKey};
 use hark_core::copies::CopyRequest;
 use hark_core::keys::Action;
 use hark_core::{Config, Db, ExportPreset, FileRecord, Loudness};
@@ -275,11 +275,10 @@ struct App {
     open_region: Option<(PathBuf, OpenRegion)>,
     /// The takes of the file they were found in, kept for the arrow keys.
     takes: Option<(PathBuf, Vec<(f64, f64)>)>,
-
-    autoplay: bool,
-    loop_on: bool,
     /// Hear and see the file as the export card would write it: its channels and its level.
     preview: bool,
+    /// The card as the database last stored it for this project.
+    card_saved: Option<CardState>,
     /// The preview's last known level and the last one asked for. A known level of the current
     /// file stands in while a newer one for it is measured, so editing the preset never blanks
     /// the wave.
@@ -365,7 +364,7 @@ impl App {
         let preset = config.preset(&preset_name).cloned().unwrap_or_default();
         let scanning = (!config.roots().is_empty()).then_some(ScanPhase::Walking { seen: 0 });
         let expanded = config.roots().iter().map(|r| r.path.clone()).collect();
-        App {
+        let mut app = App {
             config,
             theme,
             db,
@@ -393,9 +392,8 @@ impl App {
             open_region: None,
             synced: None,
             takes: None,
-            autoplay: true,
-            loop_on: false,
             preview: true,
+            card_saved: None,
             level: None,
             level_asked: None,
             folded: None,
@@ -427,6 +425,46 @@ impl App {
             export_name: String::new(),
             preset_edit: preset_name,
             preset_rename: None,
+        };
+        app.restore_card();
+        app
+    }
+
+    fn card_state(&self) -> CardState {
+        CardState { preset_name: self.preset_name.clone(), preset: self.preset.clone(), preview: self.preview, overwrite: self.overwrite }
+    }
+
+    /// Sets the card and Preview as the open project left them; a project never opened starts
+    /// on the default preset.
+    fn restore_card(&mut self) {
+        let state = self.db.card_state().unwrap_or_else(|e| {
+            self.set_status(format!("Export card: {e:#}"), true);
+            None
+        });
+        match state {
+            Some(s) => {
+                match s.preset_name.and_then(|n| self.config.preset(&n).cloned().map(|p| (n, p))) {
+                    Some((name, preset)) => (self.preset, self.preset_name) = (preset, Some(name)),
+                    None => (self.preset, self.preset_name) = (s.preset, None),
+                }
+                self.preview = s.preview;
+                self.overwrite = s.overwrite;
+            }
+            None => {
+                let (name, preset) = self.config.default_preset();
+                (self.preset, self.preset_name) = (preset.clone(), Some(name));
+            }
+        }
+        self.card_saved = Some(self.card_state());
+    }
+
+    fn remember_card(&mut self) {
+        let state = self.card_state();
+        if self.card_saved.as_ref() != Some(&state) {
+            if let Err(e) = self.db.set_card_state(&state) {
+                self.set_status(format!("Export card: {e:#}"), true);
+            }
+            self.card_saved = Some(state);
         }
     }
 
@@ -479,7 +517,7 @@ impl App {
         let Some(take) = next else { return };
         self.wave.selection = Some(take);
         self.wave.reveal(take, duration);
-        if self.autoplay {
+        if self.config.autoplay {
             self.play(None);
         }
     }
@@ -709,7 +747,7 @@ impl App {
             None => (0, total),
         };
         let fold = if self.preview { self.preset.mono } else { None };
-        Some(Clip { source: cur.source.clone(), start, end: end.max(start), looped: self.loop_on, fade_in: frames(self.wave.fade_in), fade_out: frames(self.wave.fade_out), fade_shape: self.wave.fade_shape, fold })
+        Some(Clip { source: cur.source.clone(), start, end: end.max(start), looped: self.config.looping, fade_in: frames(self.wave.fade_in), fade_out: frames(self.wave.fade_out), fade_shape: self.wave.fade_shape, fold })
     }
 
     /// Asks the worker for what the preview of the current file needs and does not have yet.
@@ -1003,7 +1041,7 @@ impl App {
                             let wanted = self.selected.and_then(|i| self.files.get(i)).map(|f| f.path == path).unwrap_or(false);
                             if wanted && self.current.as_ref().map(|c| c.path != path).unwrap_or(true) {
                                 self.show_loaded(l);
-                                if self.autoplay || std::mem::take(&mut self.play_on_load) {
+                                if self.config.autoplay || std::mem::take(&mut self.play_on_load) {
                                     self.play(None);
                                 }
                             }
@@ -1109,7 +1147,7 @@ impl App {
             self.copy_shortcut(ctx);
             return;
         }
-        let go = |app: &mut App, i: usize| app.select(i, app.autoplay);
+        let go = |app: &mut App, i: usize| app.select(i, app.config.autoplay);
         if pressed(Key::ArrowDown) && n > 0 {
             go(self, self.selected.map(|i| (i + 1).min(n - 1)).unwrap_or(0));
         }
@@ -1151,10 +1189,12 @@ impl App {
             self.toggle_favorite();
         }
         if fired(Action::Loop) {
-            self.loop_on = !self.loop_on;
+            self.config.looping = !self.config.looping;
+            let _ = self.config.save();
         }
         if fired(Action::Autoplay) {
-            self.autoplay = !self.autoplay;
+            self.config.autoplay = !self.config.autoplay;
+            let _ = self.config.save();
         }
         if fired(Action::Preview) {
             self.preview = !self.preview;
@@ -1809,7 +1849,7 @@ impl App {
         } else if let Some(i) = double {
             self.select(i, true);
         } else if let Some(i) = clicked {
-            self.select(i, self.autoplay);
+            self.select(i, self.config.autoplay);
         } else if let Some(i) = context {
             if self.selected != Some(i) {
                 self.select(i, false);
@@ -2106,11 +2146,13 @@ impl App {
                     self.play(None);
                 }
             }
-            if icon_btn(ui, icons::REPEAT, self.loop_on).on_hover_text(format!("Loop ({})", self.key_of(Action::Loop))).clicked() {
-                self.loop_on = !self.loop_on;
+            if icon_btn(ui, icons::REPEAT, self.config.looping).on_hover_text(format!("Loop ({})", self.key_of(Action::Loop))).clicked() {
+                self.config.looping = !self.config.looping;
+                let _ = self.config.save();
             }
-            if ui.add(egui::Button::new("Auto").selected(self.autoplay).min_size(egui::vec2(0.0, CONTROL_H))).on_hover_text(format!("Autoplay on selection ({})", self.key_of(Action::Autoplay))).clicked() {
-                self.autoplay = !self.autoplay;
+            if ui.add(egui::Button::new("Auto").selected(self.config.autoplay).min_size(egui::vec2(0.0, CONTROL_H))).on_hover_text(format!("Autoplay on selection ({})", self.key_of(Action::Autoplay))).clicked() {
+                self.config.autoplay = !self.config.autoplay;
+                let _ = self.config.save();
             }
             if icon_btn(ui, icons::EAR, self.preview).on_hover_text(format!("Preview export: hear and see the card's channels and level ({})", self.key_of(Action::Preview))).clicked() {
                 self.preview = !self.preview;
@@ -2448,6 +2490,7 @@ impl App {
     }
 
     pub fn apply_project_action(&mut self, action: ProjectAction) {
+        self.remember_card();
         let result = match action {
             ProjectAction::Default => self.config.close_project(),
             ProjectAction::Open(path) => self.config.open_project(&path),
@@ -2466,6 +2509,7 @@ impl App {
             self.set_status(format!("Project: {e:#}"), true);
         }
         self.db.set_project(self.config.project_id());
+        self.restore_card();
         self.location = None;
         self.expanded = self.config.roots().iter().map(|r| r.path.clone()).collect();
         self.rescan();
@@ -2724,6 +2768,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.remember_card();
         let ctx = ui.ctx().clone();
         let zoom = ctx.zoom_factor();
         if (zoom - self.config.ui_zoom).abs() > 1e-3 {
