@@ -17,7 +17,9 @@ use egui::{Color32, CornerRadius, FontId, Key, Margin, RichText, Sense, Stroke, 
 use egui_extras::{Column, TableBuilder};
 use egui_phosphor::regular as icons;
 use hark_core::audition::{Clip, Player, Source};
-use hark_core::export::{ExportRequest, Selection};
+use hark_core::config::Normalize;
+use hark_core::export::{ExportRequest, PreviewLevel, Selection};
+use hark_core::pcm::DownmixMode;
 use hark_core::library::{ChannelClass, Query, Sort, SortKey};
 use hark_core::copies::CopyRequest;
 use hark_core::keys::Action;
@@ -25,7 +27,7 @@ use hark_core::{Config, Db, ExportPreset, FileRecord, Loudness};
 
 use theme::Theme;
 use waveform::{WaveEvent, WaveState};
-use worker::{Done, Job, Loaded, ScanPhase, Worker};
+use worker::{Done, Folded, Job, LoadRequest, Loaded, ScanPhase, Worker};
 
 /// Twenty minutes of stereo at 48 kHz, decoded audio and peaks together.
 const CACHE_BYTES: usize = 48_000 * 60 * 20 * 2 * 4;
@@ -162,11 +164,14 @@ fn main() -> eframe::Result {
     )
 }
 
-type ClipKey = (usize, usize, bool, usize, usize, hark_core::pcm::FadeShape);
+type ClipKey = (usize, usize, bool, usize, usize, hark_core::pcm::FadeShape, Option<DownmixMode>);
 
 fn clip_key(c: &Clip) -> ClipKey {
-    (c.start, c.end, c.looped, c.fade_in, c.fade_out, c.fade_shape)
+    (c.start, c.end, c.looped, c.fade_in, c.fade_out, c.fade_shape, c.fold)
 }
+
+/// What a preview level depends on: the file, and the preset's channels and normalisation.
+type LevelKey = (PathBuf, Option<DownmixMode>, Normalize);
 
 /// A selection and fades asked for on the command line, applied once the opened file loads.
 #[derive(Default, Clone, Copy)]
@@ -273,6 +278,16 @@ struct App {
 
     autoplay: bool,
     loop_on: bool,
+    /// Hear and see the file as the export card would write it: its channels and its level.
+    preview: bool,
+    /// The preview's last known level and the last one asked for. A known level of the current
+    /// file stands in while a newer one for it is measured, so editing the preset never blanks
+    /// the wave.
+    level: Option<(LevelKey, PreviewLevel)>,
+    level_asked: Option<LevelKey>,
+    /// The last file folded as the preview hears it, and the last fold asked for.
+    folded: Option<(PathBuf, DownmixMode, Arc<Folded>)>,
+    fold_asked: Option<(PathBuf, DownmixMode)>,
     transport_h: f32,
     /// Height the export card's content took on the last frame; the bottom panel is sized to it.
     export_card_h: f32,
@@ -380,6 +395,11 @@ impl App {
             takes: None,
             autoplay: true,
             loop_on: false,
+            preview: true,
+            level: None,
+            level_asked: None,
+            folded: None,
+            fold_asked: None,
             transport_h: 34.0,
             export_card_h: 380.0,
             export_state: ExportState::Idle,
@@ -569,12 +589,20 @@ impl App {
         self.player.as_ref().map(|p| p.sample_rate).unwrap_or(48_000)
     }
 
-    fn request_load(&mut self, path: &Path) {
-        if self.cache.contains_key(path) || self.pending.contains(path) {
+    /// `selected` for the file the user is waiting on, which loads on a thread of its own even
+    /// when a preload of it is already queued.
+    fn request_load(&mut self, path: &Path, selected: bool) {
+        if self.cache.contains_key(path) || (!selected && self.pending.contains(path)) {
             return;
         }
         self.pending.insert(path.to_path_buf());
-        self.worker.send(Job::Load { path: path.to_path_buf(), device_rate: self.device_rate(), stream_above_mb: self.config.stream_above_mb });
+        let preview = (self.preview && (self.preset.mono.is_some() || !matches!(self.preset.normalize, Normalize::None))).then(|| self.preset.clone());
+        let req = LoadRequest { path: path.to_path_buf(), device_rate: self.device_rate(), stream_above_mb: self.config.stream_above_mb, preview };
+        if !selected {
+            self.worker.send(Job::Load(req));
+        } else if let Some(skipped) = self.worker.load_selected(req).filter(|p| p != path) {
+            self.pending.remove(&skipped);
+        }
     }
 
     fn remember(&mut self, loaded: Arc<Loaded>) {
@@ -614,7 +642,7 @@ impl App {
                     self.play(None);
                 }
             } else {
-                self.request_load(&path);
+                self.request_load(&path, true);
                 self.current = None;
                 self.wave.reset(self.files[i].info.as_ref().map(|x| x.duration_secs).unwrap_or(1.0));
             }
@@ -623,11 +651,11 @@ impl App {
         }
         for d in 1..=PRELOAD {
             if let Some(f) = self.files.get(i + d) {
-                self.request_load(&f.path.clone());
+                self.request_load(&f.path.clone(), false);
             }
             if i >= d {
                 if let Some(f) = self.files.get(i - d) {
-                    self.request_load(&f.path.clone());
+                    self.request_load(&f.path.clone(), false);
                 }
             }
         }
@@ -648,7 +676,26 @@ impl App {
         if l.peaks.is_none() || !measured {
             self.worker.analyze(l.path.clone(), l.peaks.clone());
         }
+        if let Some(p) = &l.prepared {
+            if let Some(level) = &p.level {
+                let key = (l.path.clone(), p.mono, p.normalize);
+                self.level = Some((key.clone(), level.clone()));
+                self.level_asked = Some(key);
+            }
+            if let (Some(mode), Some(f)) = (p.mono, &p.folded) {
+                self.folded = Some((l.path.clone(), mode, f.clone()));
+                self.fold_asked = Some((l.path.clone(), mode));
+            }
+        }
         self.current = Some(l);
+    }
+
+    /// The preview has neither a fold nor a level of the current file yet, where it wants one.
+    fn preview_pending(&self) -> bool {
+        let Some(cur) = self.current.as_ref().filter(|_| self.preview) else { return false };
+        let fold = self.preset.mono.is_some() && self.folded_view().is_none();
+        let level = self.previewing_level() && !self.level.as_ref().is_some_and(|(k, _)| k.0 == cur.path);
+        fold || level
     }
 
     /// The selection with its fades as a clip, or the whole file without one.
@@ -661,7 +708,51 @@ impl App {
             Some((a, b)) => (frames(a), frames(b)),
             None => (0, total),
         };
-        Some(Clip { source: cur.source.clone(), start, end: end.max(start), looped: self.loop_on, fade_in: frames(self.wave.fade_in), fade_out: frames(self.wave.fade_out), fade_shape: self.wave.fade_shape })
+        let fold = if self.preview { self.preset.mono } else { None };
+        Some(Clip { source: cur.source.clone(), start, end: end.max(start), looped: self.loop_on, fade_in: frames(self.wave.fade_in), fade_out: frames(self.wave.fade_out), fade_shape: self.wave.fade_shape, fold })
+    }
+
+    /// Asks the worker for what the preview of the current file needs and does not have yet.
+    fn request_preview(&mut self) {
+        let Some(cur) = self.current.as_ref().filter(|_| self.preview) else { return };
+        if !matches!(self.preset.normalize, Normalize::None) {
+            let key = (cur.path.clone(), self.preset.mono, self.preset.normalize);
+            if self.level_asked.as_ref() != Some(&key) {
+                self.worker.preview_level(cur.path.clone(), self.preset.clone());
+                self.level_asked = Some(key);
+            }
+        }
+        if let Some(mode) = self.preset.mono {
+            let key = (cur.path.clone(), mode);
+            if self.fold_asked.as_ref() != Some(&key) {
+                self.worker.fold(cur.path.clone(), cur.source.clone(), mode);
+                self.fold_asked = Some(key);
+            }
+        }
+    }
+
+    /// The preview's level owns playback and the waveform: the preset normalises.
+    fn previewing_level(&self) -> bool {
+        self.preview && !matches!(self.preset.normalize, Normalize::None)
+    }
+
+    /// The gain playback and the waveform run at, in dB: the preset's level under the preview
+    /// (unity until the file's first level comes, and for silence), the fader otherwise.
+    fn level_db(&self) -> f64 {
+        if !self.previewing_level() {
+            return self.gain_db as f64;
+        }
+        match (&self.level, &self.current) {
+            (Some((key, l)), Some(cur)) if key.0 == cur.path => l.gain_db.unwrap_or(0.0),
+            _ => 0.0,
+        }
+    }
+
+    /// The current file folded as the preview hears it; under another downmix while the one
+    /// asked for is built.
+    fn folded_view(&self) -> Option<Arc<Folded>> {
+        let cur = self.current.as_ref().filter(|_| self.preview && self.preset.mono.is_some())?;
+        self.folded.as_ref().filter(|(p, _, _)| *p == cur.path).map(|(_, _, f)| f.clone())
     }
 
     fn play(&mut self, from_secs: Option<f64>) {
@@ -904,7 +995,8 @@ impl App {
                     match result {
                         Ok(l) if matches!(&l.source, Source::Whole(p) if p.sample_rate != self.device_rate()) => {
                             // Decoded for a device that has since been reopened at another rate.
-                            self.request_load(&path);
+                            let wanted = self.selected.and_then(|i| self.files.get(i)).is_some_and(|f| f.path == path);
+                            self.request_load(&path, wanted);
                         }
                         Ok(l) => {
                             self.remember(l.clone());
@@ -923,10 +1015,28 @@ impl App {
                 Done::Analyzed(path, Ok((peaks, loudness))) => {
                     self.record_loudness(&path, loudness);
                     if let Some(old) = self.cache.get(&path) {
-                        let l = Arc::new(Loaded { path: old.path.clone(), source_rate: old.source_rate, channels: old.channels, duration_secs: old.duration_secs, source: old.source.clone(), peaks: Some(peaks), loudness });
+                        let l = Arc::new(Loaded { path: old.path.clone(), source_rate: old.source_rate, channels: old.channels, duration_secs: old.duration_secs, source: old.source.clone(), peaks: Some(peaks), loudness, prepared: old.prepared.clone() });
                         self.cache.insert(path.clone(), l.clone());
                         if self.current.as_ref().map(|c| c.path == path).unwrap_or(false) {
                             self.current = Some(l);
+                        }
+                    }
+                }
+                Done::Level { path, preset, result } => {
+                    let key = (path.clone(), preset.mono, preset.normalize);
+                    if self.level_asked.as_ref() == Some(&key) {
+                        let level = result.unwrap_or_else(|e| {
+                            self.set_status(format!("Preview level of {}: {e}", path.display()), true);
+                            PreviewLevel::default()
+                        });
+                        self.level = Some((key, level));
+                    }
+                }
+                Done::Folded { path, mode, result } => {
+                    if self.fold_asked.as_ref() == Some(&(path.clone(), mode)) {
+                        match result {
+                            Ok(f) => self.folded = Some((path, mode, Arc::new(f))),
+                            Err(e) => self.set_status(format!("Preview of {}: {e}", path.display()), true),
                         }
                     }
                 }
@@ -1045,6 +1155,9 @@ impl App {
         }
         if fired(Action::Autoplay) {
             self.autoplay = !self.autoplay;
+        }
+        if fired(Action::Preview) {
+            self.preview = !self.preview;
         }
         if fired(Action::Export) {
             self.export();
@@ -1807,11 +1920,23 @@ impl App {
         // The transport row wraps at narrow widths; the waveform leaves it the height it took on
         // the last frame.
         let wave_h = (ui.available_height() - self.transport_h - ui.spacing().item_spacing.y).max(80.0);
-        let peaks = self.current.as_ref().and_then(|c| c.peaks.clone());
-        let samples = self.current.as_ref().and_then(|c| match &c.source {
-            Source::Whole(p) => Some(p.clone()),
-            Source::File { .. } => None,
-        });
+        let pending = self.preview_pending();
+        let placeholder = match &self.current {
+            None => "no file",
+            Some(_) if pending => "Loading preview",
+            Some(_) => "Reading waveform",
+        };
+        let (peaks, samples) = match self.folded_view() {
+            _ if pending => (None, None),
+            Some(f) => (Some(f.peaks.clone()), f.samples.clone()),
+            None => (
+                self.current.as_ref().and_then(|c| c.peaks.clone()),
+                self.current.as_ref().and_then(|c| match &c.source {
+                    Source::Whole(p) => Some(p.clone()),
+                    Source::File { .. } => None,
+                }),
+            ),
+        };
         let colors = waveform::WaveColors {
             peak: self.theme.accent.gamma_multiply(0.55),
             rms: self.theme.accent.gamma_multiply(0.95),
@@ -1824,14 +1949,25 @@ impl App {
         // The gain fader stands beside the waveform and scales it, so what you hear is what
         // you see.
         const FADER_W: f32 = 36.0;
-        self.wave.gain = hark_core::pcm::db_to_gain(self.gain_db as f64) as f32;
+        let level_db = self.level_db();
+        let inert = self.previewing_level();
+        self.wave.gain = hark_core::pcm::db_to_gain(level_db);
+        if let Some(p) = self.player.as_ref().filter(|p| p.gain() != self.wave.gain) {
+            p.set_gain(self.wave.gain);
+        }
+        let level_hint = match &self.level {
+            Some((k, _)) if self.level_asked.as_ref() != Some(k) => "Previewing the preset's level: measuring the file".to_string(),
+            Some((_, l)) => std::iter::once("Previewing the preset's level".to_string()).chain(l.warnings.iter().cloned()).collect::<Vec<_>>().join("\n"),
+            None if self.level_asked.is_some() => "Previewing the preset's level: measuring the file".to_string(),
+            None => "Previewing the preset's level".to_string(),
+        };
         let mut event = WaveEvent::None;
         let mut wave_resp = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             let wave_w = ui.available_width() - FADER_W - 8.0;
             ui.allocate_ui_with_layout(egui::vec2(wave_w, wave_h), egui::Layout::top_down(egui::Align::Min), |ui| {
-                let (ev, resp) = waveform::show(ui, &mut self.wave, peaks.as_deref(), samples.as_deref(), duration, playhead, wave_h, &colors);
+                let (ev, resp) = waveform::show(ui, &mut self.wave, peaks.as_deref(), samples.as_deref(), duration, playhead, wave_h, placeholder, &colors);
                 event = ev;
                 wave_resp = Some(resp);
             });
@@ -1839,20 +1975,21 @@ impl App {
             ui.allocate_ui_with_layout(egui::vec2(FADER_W, wave_h), egui::Layout::top_down(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let readout = ui.allocate_response(egui::vec2(FADER_W, waveform::LANE_H), egui::Sense::hover()).on_hover_text("dB");
-                let (rail, fader) = ui.allocate_exact_size(egui::vec2(FADER_W, wave_h - waveform::LANE_H), Sense::click_and_drag());
-                let fader = fader.on_hover_text("Volume; right-click or double-click resets");
+                // Under the preview's level the preset sets the gain, so the fader only shows it.
+                let (rail, fader) = ui.allocate_exact_size(egui::vec2(FADER_W, wave_h - waveform::LANE_H), if inert { Sense::hover() } else { Sense::click_and_drag() });
+                let fader = fader.on_hover_text(if inert { level_hint.as_str() } else { "Volume; right-click or double-click resets" });
                 const MIN_DB: f32 = -36.0;
                 const MAX_DB: f32 = 12.0;
                 let (top, bottom) = (rail.top() + 10.0, rail.bottom() - 10.0);
-                let y_of = |db: f32| bottom - (db - MIN_DB) / (MAX_DB - MIN_DB) * (bottom - top);
-                let mut changed = fader.double_clicked() || fader.secondary_clicked();
-                if changed {
-                    self.gain_db = 0.0;
-                } else if let Some(p) = fader.interact_pointer_pos().filter(|_| fader.dragged() || fader.clicked()) {
-                    self.gain_db = ((MIN_DB + (bottom - p.y) / (bottom - top) * (MAX_DB - MIN_DB)).clamp(MIN_DB, MAX_DB) * 2.0).round() / 2.0;
-                    changed = true;
+                let y_of = |db: f32| bottom - (db.clamp(MIN_DB, MAX_DB) - MIN_DB) / (MAX_DB - MIN_DB) * (bottom - top);
+                if !inert {
+                    if fader.double_clicked() || fader.secondary_clicked() {
+                        self.gain_db = 0.0;
+                    } else if let Some(p) = fader.interact_pointer_pos().filter(|_| fader.dragged() || fader.clicked()) {
+                        self.gain_db = ((MIN_DB + (bottom - p.y) / (bottom - top) * (MAX_DB - MIN_DB)).clamp(MIN_DB, MAX_DB) * 2.0).round() / 2.0;
+                    }
                 }
-                let hot = fader.hovered() || fader.dragged();
+                let hot = !inert && (fader.hovered() || fader.dragged());
                 if hot {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                 }
@@ -1860,13 +1997,9 @@ impl App {
                 let p = ui.painter();
                 p.vline(x, top..=bottom, Stroke::new(2.0, self.theme.line));
                 p.hline((x - 6.0)..=(x + 6.0), y_of(0.0), Stroke::new(1.0, self.theme.muted));
-                p.rect_filled(egui::Rect::from_center_size(egui::pos2(x, y_of(self.gain_db)), egui::vec2(14.0, 6.0)), 2.0, if hot { self.theme.text } else { self.theme.muted });
-                p.text(egui::pos2(x, readout.rect.center().y), egui::Align2::CENTER_CENTER, format!("{:+.0}", self.gain_db), FontId::proportional(11.0), self.theme.muted);
-                if changed {
-                    if let Some(p) = &self.player {
-                        p.set_gain(hark_core::pcm::db_to_gain(self.gain_db as f64));
-                    }
-                }
+                let ink = if inert { self.theme.accent } else if hot { self.theme.text } else { self.theme.muted };
+                p.rect_filled(egui::Rect::from_center_size(egui::pos2(x, y_of(level_db as f32)), egui::vec2(14.0, 6.0)), 2.0, ink);
+                p.text(egui::pos2(x, readout.rect.center().y), egui::Align2::CENTER_CENTER, format!("{level_db:+.0}"), FontId::proportional(11.0), if inert { self.theme.accent } else { self.theme.muted });
             });
         });
         // The selection's menu, on a right-click anywhere on the wave.
@@ -1978,6 +2111,9 @@ impl App {
             }
             if ui.add(egui::Button::new("Auto").selected(self.autoplay).min_size(egui::vec2(0.0, CONTROL_H))).on_hover_text(format!("Autoplay on selection ({})", self.key_of(Action::Autoplay))).clicked() {
                 self.autoplay = !self.autoplay;
+            }
+            if icon_btn(ui, icons::EAR, self.preview).on_hover_text(format!("Preview export: hear and see the card's channels and level ({})", self.key_of(Action::Preview))).clicked() {
+                self.preview = !self.preview;
             }
             let t = playhead.unwrap_or(0.0);
             ui.add_sized(egui::vec2(52.0, CONTROL_H), egui::Label::new(RichText::new(waveform::fmt_time(t)).monospace().color(if playing { self.theme.text } else { self.theme.muted })));
@@ -2401,6 +2537,7 @@ impl App {
                     (self.key_of(Action::Favorite), "Favorite"),
                     ("1–9".to_string(), "Tags"),
                     (pair(Action::SelectionStart, Action::SelectionEnd), "Selection"),
+                    (self.key_of(Action::Preview), "Preview"),
                     (self.key_of(Action::Export), "Export"),
                     ("Ctrl+C".to_string(), "Copy"),
                     ("Ctrl+Drag".to_string(), "Drag out"),
@@ -2599,6 +2736,7 @@ impl eframe::App for App {
             self.refresh_list();
         }
         self.handle_keys(&ctx);
+        self.request_preview();
         self.sync_clip();
 
         // A panel forgets its dragged size when its state goes, and the list its column widths.

@@ -17,6 +17,7 @@ pub enum Action {
     Favorite,
     Loop,
     Autoplay,
+    Preview,
     SelectionStart,
     SelectionEnd,
     PreviousTake,
@@ -28,13 +29,14 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 14] = [
+    pub const ALL: [Action; 15] = [
         Action::Play,
         Action::PlayFromStart,
         Action::Stop,
         Action::Favorite,
         Action::Loop,
         Action::Autoplay,
+        Action::Preview,
         Action::SelectionStart,
         Action::SelectionEnd,
         Action::PreviousTake,
@@ -54,6 +56,7 @@ impl Action {
             Action::Favorite => "favorite",
             Action::Loop => "loop",
             Action::Autoplay => "autoplay",
+            Action::Preview => "preview",
             Action::SelectionStart => "selection_start",
             Action::SelectionEnd => "selection_end",
             Action::PreviousTake => "previous_take",
@@ -77,6 +80,7 @@ impl Action {
             Action::Favorite => "Favorite",
             Action::Loop => "Loop",
             Action::Autoplay => "Autoplay",
+            Action::Preview => "Preview export",
             Action::SelectionStart => "Selection start",
             Action::SelectionEnd => "Selection end",
             Action::PreviousTake => "Previous take",
@@ -96,6 +100,7 @@ impl Action {
             Action::Favorite => "Toggle the file's favorite mark.",
             Action::Loop => "Toggle looping.",
             Action::Autoplay => "Toggle playing a file when it is selected.",
+            Action::Preview => "Toggle hearing and seeing the file as the export card would write it: its channels and its level.",
             Action::SelectionStart => "Set the selection start at the playhead.",
             Action::SelectionEnd => "Set the selection end at the playhead.",
             Action::PreviousTake => "Select the previous take, the spans of sound parted by silence.",
@@ -115,6 +120,7 @@ impl Action {
             Action::Favorite => "F",
             Action::Loop => "L",
             Action::Autoplay => "A",
+            Action::Preview => "P",
             Action::SelectionStart => "OpenBracket",
             Action::SelectionEnd => "CloseBracket",
             Action::PreviousTake => "ArrowLeft",

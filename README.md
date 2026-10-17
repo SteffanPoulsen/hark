@@ -21,6 +21,7 @@ Auditioning a big library in a DAW means importing first, and in a file manager 
 - **Waveform selection with fades.** Drag a region or trim it to the sound, step through the takes a recording holds with Left and Right, set fade in and out, zoom, loop, seek by clicking, and scale the level with the fader beside the waveform.
 - **Copy and drag into a DAW.** Ctrl-drag the waveform into Reaper, Pro Tools, a folder or a chat, or press Ctrl+C and paste. Copies stay in hark's own folder until you clear it, since a DAW may reference them in place.
 - **Preset-driven export.** WAV or FLAC, bit depth with dither, resampling, mono downmix, peak or EBU R128 loudness normalisation under a true-peak ceiling, and a file name template. Override any of it for one export.
+- **Preview the export.** With Preview on, playback and the waveform follow the export card: a mono preset folds the sound to one channel, so phase cancellation is heard and seen, and a normalising preset plays the file at the level it would export at. The source file is never touched.
 - **An origin inside every export.** A `hark` RIFF chunk and a BWF `bext` description in WAV, an APPLICATION block and a Vorbis comment in FLAC: source path and hash, pack, selection, fades, preset and measured gain. `hark-cli reexport` runs that recipe again with changes.
 - **Keys you can change.** Every action has a key, and all but the list's arrows and the tag digits can be rebound on the settings window's Keys page or with the CLI.
 - **A CLI for all of it.** `hark-cli` exposes the same core with `--json` on every command, so a script or an agent can search, mark, analyse and export without a window.
@@ -52,6 +53,7 @@ Start `hark`, add a library folder with the button under the tree, pick a folder
 | 1 to 9 | Toggle the first nine tags |
 | L | Loop |
 | A | Autoplay |
+| P | Preview the export: hear and see the card's channels and level |
 | `[` and `]` | Set the selection start or end at the playhead |
 | Z | Zoom to the selection |
 | T | Trim the selection, or the whole file, to the sound |
@@ -82,6 +84,7 @@ hark-cli roots add ~/Audio/Libraries/Footsteps
 hark-cli tags add footstep --color '#79b86a'
 hark-cli presets add sfx-quiet --from sfx
 hark-cli presets set sfx-quiet --normalize lufs --target=-20 --ceiling=-1 --rate 48000
+hark-cli play "Footsteps/gravel_03.wav" --preset sfx-quiet
 hark-cli export "Footsteps/gravel_03.wav" --preset sfx --into sfx/footsteps --in 0.2 --out 1.4 --fade-out 0.1
 hark-cli copies
 hark-cli inspect ~/Projects/game/Assets/Audio/sfx/gravel_03.wav

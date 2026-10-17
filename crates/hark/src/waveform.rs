@@ -327,8 +327,9 @@ fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64
 }
 
 /// Draws the wave and handles its input; the response comes back so the caller can hang a
-/// menu on it.
-pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: Option<&Pcm>, duration: f64, playhead: Option<f64>, height: f32, colors: &WaveColors) -> (WaveEvent, egui::Response) {
+/// menu on it. `placeholder` is written across the lanes while there are no peaks.
+#[allow(clippy::too_many_arguments)]
+pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: Option<&Pcm>, duration: f64, playhead: Option<f64>, height: f32, placeholder: &str, colors: &WaveColors) -> (WaveEvent, egui::Response) {
     let width = ui.available_width();
     let (resp, painter) = ui.allocate_painter(Vec2::new(width, height), Sense::click_and_drag());
     let full = resp.rect;
@@ -343,7 +344,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
         for s in handle(lane, rect, rect.left(), true, idle).into_iter().chain(handle(lane, rect, rect.right(), false, idle)) {
             painter.add(s);
         }
-        painter.text(rect.center(), Align2::CENTER_CENTER, "no file", FontId::proportional(14.0), visuals.weak_text_color());
+        painter.text(rect.center(), Align2::CENTER_CENTER, placeholder, FontId::proportional(14.0), visuals.weak_text_color());
         return (WaveEvent::None, resp);
     };
     let duration = duration.max(1e-6);

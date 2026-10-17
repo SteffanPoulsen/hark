@@ -4,7 +4,7 @@ use anyhow::Result;
 use ebur128::{EbuR128, Mode};
 use serde::{Deserialize, Serialize};
 
-use crate::pcm::{gain_to_db, Pcm};
+use crate::pcm::{gain_to_db, DownmixMode, Pcm};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Loudness {
@@ -62,21 +62,41 @@ pub fn measure(pcm: &Pcm) -> Result<Loudness> {
     }
 }
 
-/// Measures a file one packet at a time; only a clip too short to gate is decoded whole.
-pub fn measure_file(path: &Path) -> Result<Loudness> {
+/// Measures a file one packet at a time, folded to one channel when `fold` is set; only a clip
+/// too short to gate is decoded whole. Gives up as soon as `abort` says so.
+pub fn measure_file(path: &Path, fold: Option<DownmixMode>, abort: &dyn Fn() -> bool) -> Result<Loudness> {
     let mut reader = crate::decode::Reader::open(path)?;
+    let channels = reader.channels as usize;
     let mut chunk = Vec::new();
+    let mut folded = Vec::new();
     let mut meter = None;
     while reader.next_chunk(&mut chunk)? {
+        let samples = match fold {
+            Some(mode) => {
+                folded.clear();
+                folded.extend(chunk.chunks(channels).map(|f| mode.fold(f)));
+                &folded
+            }
+            None => &chunk,
+        };
         if meter.is_none() {
-            meter = Some(Meter::new(reader.channels, reader.sample_rate)?);
+            meter = Some(Meter::new(if fold.is_some() { 1 } else { reader.channels }, reader.sample_rate)?);
         }
-        meter.as_mut().unwrap().push(&chunk)?;
+        meter.as_mut().unwrap().push(samples)?;
         chunk.clear();
+        if abort() {
+            anyhow::bail!("superseded");
+        }
     }
     match meter.and_then(|m| m.finish()) {
         Some(l) => Ok(l),
-        None => measure(&crate::decode::decode(path)?),
+        None => {
+            let pcm = crate::decode::decode(path)?;
+            measure(&match fold {
+                Some(mode) => pcm.to_mono(mode),
+                None => pcm,
+            })
+        }
     }
 }
 

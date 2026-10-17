@@ -7,9 +7,9 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, ExportPreset, Normalize, OutputFormat, Root};
-use crate::loudness;
+use crate::loudness::{self, Loudness};
 use crate::origin::{Measured, Origin, OutputRef, SelectionRef, SourceRef};
-use crate::pcm::{db_to_gain, Pcm};
+use crate::pcm::{db_to_gain, gain_to_db, Pcm};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Selection {
@@ -247,40 +247,86 @@ fn process(mut pcm: Pcm, req: &ExportRequest, preset: &ExportPreset) -> Result<(
                 }
             }
         }
-        Normalize::Peak { target_dbfs } => {
-            let peak = pcm.peak();
-            if peak > 0.0 {
-                let gain = db_to_gain(target_dbfs) / peak;
-                measured.applied_gain_db = 20.0 * (gain as f64).log10();
-                pcm.apply_gain(gain);
-            } else {
-                warnings.push("silent output; peak normalisation skipped".into());
-            }
-        }
-        Normalize::Lufs { target_lufs, true_peak_ceiling_dbfs } => {
-            let l = loudness::measure(&pcm)?;
-            measured.source_lufs = Some(l.integrated_lufs);
-            if l.integrated_lufs.is_finite() && l.integrated_lufs > -70.0 {
-                let mut gain_db = target_lufs - l.integrated_lufs;
-                if l.true_peak_dbfs + gain_db > true_peak_ceiling_dbfs {
-                    gain_db = true_peak_ceiling_dbfs - l.true_peak_dbfs;
-                    measured.limited_by_true_peak = true;
-                    warnings.push(format!(
-                        "gain held to {gain_db:+.2} dB by the {true_peak_ceiling_dbfs} dBTP ceiling; output sits below {target_lufs} LUFS"
-                    ));
-                }
-                if l.momentary {
-                    warnings.push("too short for integrated loudness; normalised on the loudest 400 ms window".into());
-                }
+        normalize => {
+            if let Some(gain_db) = normalize_gain(&normalize, pcm.peak(), || loudness::measure(&pcm), &mut measured, &mut warnings)? {
                 measured.applied_gain_db = gain_db;
                 pcm.apply_gain(db_to_gain(gain_db));
-            } else {
-                warnings.push("silent output; loudness normalisation skipped".into());
             }
         }
     }
 
     Ok((pcm, warnings, measured))
+}
+
+/// The gain in dB a normalising preset gives audio with this sample peak and loudness, or
+/// `None` for silence, which stays as it is. `loudness` is only measured for a loudness
+/// target.
+fn normalize_gain(normalize: &Normalize, sample_peak: f32, loudness: impl FnOnce() -> Result<Loudness>, measured: &mut Measured, warnings: &mut Vec<String>) -> Result<Option<f64>> {
+    match *normalize {
+        Normalize::None => Ok(None),
+        Normalize::Peak { target_dbfs } => {
+            if sample_peak > 0.0 {
+                Ok(Some(target_dbfs - gain_to_db(sample_peak as f64)))
+            } else {
+                warnings.push("silent output; peak normalisation skipped".into());
+                Ok(None)
+            }
+        }
+        Normalize::Lufs { target_lufs, true_peak_ceiling_dbfs } => {
+            let l = loudness()?;
+            measured.source_lufs = Some(l.integrated_lufs);
+            if !(l.integrated_lufs.is_finite() && l.integrated_lufs > -70.0) {
+                warnings.push("silent output; loudness normalisation skipped".into());
+                return Ok(None);
+            }
+            let mut gain_db = target_lufs - l.integrated_lufs;
+            if l.true_peak_dbfs + gain_db > true_peak_ceiling_dbfs {
+                gain_db = true_peak_ceiling_dbfs - l.true_peak_dbfs;
+                measured.limited_by_true_peak = true;
+                warnings.push(format!("gain held to {gain_db:+.2} dB by the {true_peak_ceiling_dbfs} dBTP ceiling; output sits below {target_lufs} LUFS"));
+            }
+            if l.momentary {
+                warnings.push("too short for integrated loudness; normalised on the loudest 400 ms window".into());
+            }
+            Ok(Some(gain_db))
+        }
+    }
+}
+
+/// The level the preview plays a file at under a normalising preset.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct PreviewLevel {
+    /// `None` when the preset does not normalise or the file is silent.
+    pub gain_db: Option<f64>,
+    pub warnings: Vec<String>,
+}
+
+/// The gain `preset` would give the whole of `path`, folded as it folds, by the rule an
+/// export applies to its selection. Measured in one streaming pass, so a long file is never
+/// held whole; the preset's resampling is skipped, which can move the true peak by a hair.
+pub fn preview_level(path: &Path, preset: &ExportPreset, abort: &dyn Fn() -> bool) -> Result<PreviewLevel> {
+    if matches!(preset.normalize, Normalize::None) {
+        return Ok(PreviewLevel::default());
+    }
+    level_of(loudness::measure_file(path, preset.mono, abort)?, preset)
+}
+
+/// `preview_level` of audio already decoded.
+pub fn preview_level_of(pcm: &Pcm, preset: &ExportPreset) -> Result<PreviewLevel> {
+    if matches!(preset.normalize, Normalize::None) {
+        return Ok(PreviewLevel::default());
+    }
+    let l = match preset.mono {
+        Some(mode) => loudness::measure(&pcm.to_mono(mode))?,
+        None => loudness::measure(pcm)?,
+    };
+    level_of(l, preset)
+}
+
+fn level_of(l: Loudness, preset: &ExportPreset) -> Result<PreviewLevel> {
+    let mut level = PreviewLevel::default();
+    level.gain_db = normalize_gain(&preset.normalize, db_to_gain(l.sample_peak_dbfs), || Ok(l), &mut Measured::default(), &mut level.warnings)?;
+    Ok(level)
 }
 
 /// Rebuilds the request an exported file carries, so it can be run again with changes.

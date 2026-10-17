@@ -18,7 +18,7 @@ use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler};
 
 use crate::decode::Reader;
-use crate::pcm::{FadeShape, Pcm};
+use crate::pcm::{DownmixMode, FadeShape, Pcm};
 
 const DECLICK_SECS: f64 = 0.005;
 /// How far ahead of the callback a stream is decoded; also the ring's capacity.
@@ -29,6 +29,8 @@ const STREAM_POLL: Duration = Duration::from_millis(5);
 const RESAMPLE_CHUNK: usize = 1024;
 /// Source frames decoded on each side of a resampled span as filter context.
 const RESAMPLE_MARGIN: usize = 2048;
+/// Channels of a streamed frame the mixer reads; any beyond are not heard.
+const MAX_STREAM_CHANNELS: usize = 64;
 
 #[derive(Clone)]
 pub enum Source {
@@ -76,12 +78,14 @@ pub struct Clip {
     pub fade_in: usize,
     pub fade_out: usize,
     pub fade_shape: FadeShape,
+    /// Heard folded to one channel, as an export through a mono preset would be.
+    pub fold: Option<DownmixMode>,
 }
 
 impl Clip {
     pub fn whole(pcm: Arc<Pcm>) -> Clip {
         let end = pcm.frames();
-        Clip { source: Source::Whole(pcm), start: 0, end, looped: false, fade_in: 0, fade_out: 0, fade_shape: FadeShape::EqualPower }
+        Clip { source: Source::Whole(pcm), start: 0, end, looped: false, fade_in: 0, fade_out: 0, fade_shape: FadeShape::EqualPower, fold: None }
     }
 }
 
@@ -93,11 +97,12 @@ struct Bounds {
     fade_in: usize,
     fade_out: usize,
     fade_shape: FadeShape,
+    fold: Option<DownmixMode>,
 }
 
 impl Bounds {
     fn of(clip: &Clip) -> Bounds {
-        Bounds { start: clip.start, end: clip.end, looped: clip.looped, fade_in: clip.fade_in, fade_out: clip.fade_out, fade_shape: clip.fade_shape }
+        Bounds { start: clip.start, end: clip.end, looped: clip.looped, fade_in: clip.fade_in, fade_out: clip.fade_out, fade_shape: clip.fade_shape, fold: clip.fold }
     }
 
     fn envelope(&self, pos: usize) -> f32 {
@@ -187,26 +192,39 @@ impl Feed {
     }
 
     /// Mixes the frame at `pos` (whole) or the next ring frame (stream) into `out` at gain
-    /// `g`; `false` when the stream has nothing for it yet.
-    fn mix_frame(&self, pos: usize, take: &mut Take, g: f32, out: &mut [f32]) -> bool {
-        match self {
+    /// `g`, folded to every output channel alike when `fold` is set; `false` when the stream
+    /// has nothing for it yet.
+    fn mix_frame(&self, pos: usize, take: &mut Take, g: f32, fold: Option<DownmixMode>, out: &mut [f32]) -> bool {
+        let mut ring_frame = [0.0f32; MAX_STREAM_CHANNELS];
+        let src: &[f32] = match self {
             Feed::Whole(p) => {
                 let ic = p.channels as usize;
-                let src = &p.samples[pos * ic..(pos + 1) * ic];
-                for (i, o) in out.iter_mut().enumerate() {
-                    *o += src[i.min(ic - 1)] * g;
-                }
+                &p.samples[pos * ic..(pos + 1) * ic]
             }
             Feed::Stream(s) => {
                 if !s.ready.load(Ordering::Acquire) || take.taken >= take.avail {
                     return false;
                 }
-                let ic = s.ring.channels;
+                let ic = s.ring.channels.min(MAX_STREAM_CHANNELS);
                 let frame = take.first + take.taken;
-                for (i, o) in out.iter_mut().enumerate() {
-                    *o += s.ring.sample(frame, i.min(ic - 1)) * g;
+                for (c, v) in ring_frame[..ic].iter_mut().enumerate() {
+                    *v = s.ring.sample(frame, c);
                 }
                 take.taken += 1;
+                &ring_frame[..ic]
+            }
+        };
+        match fold {
+            Some(mode) => {
+                let v = mode.fold(src) * g;
+                for o in out.iter_mut() {
+                    *o += v;
+                }
+            }
+            None => {
+                for (i, o) in out.iter_mut().enumerate() {
+                    *o += src[i.min(src.len() - 1)] * g;
+                }
             }
         }
         true
@@ -298,6 +316,8 @@ struct Mixer {
     dying: Option<(Voice, usize)>,
     channels: usize,
     declick: usize,
+    /// The gain the last block ended on.
+    gain: f32,
 }
 
 impl Mixer {
@@ -332,9 +352,14 @@ impl Mixer {
                 }
                 // The position stays where it is: a voice below a moved start runs on to the
                 // end and loops from the new start, and one past a moved end wraps at once.
+                // A changed fold crossfades: the voice as it was ramps out beside the refolded one.
                 Cmd::Bounds(bounds) => {
                     if let Some(v) = &mut self.voice {
-                        if let Feed::Whole(_) = v.feed {
+                        if let Feed::Whole(p) = &v.feed {
+                            if bounds.fold != v.bounds.fold {
+                                self.dying = Some((Voice { feed: Feed::Whole(p.clone()), bounds: v.bounds, pos: v.pos, age: v.age }, self.declick));
+                                v.age = 0;
+                            }
                             v.bounds = bounds;
                         }
                     }
@@ -342,18 +367,22 @@ impl Mixer {
             }
         }
         out.fill(0.0);
-        let gain = f32::from_bits(self.shared.gain.load(Ordering::Relaxed));
         let oc = self.channels;
+        let frames = out.len() / oc;
+        // The gain moves to its new value across the block, so a level change never steps.
+        let (from, to) = (self.gain, f32::from_bits(self.shared.gain.load(Ordering::Relaxed)));
+        self.gain = to;
+        let gain = |n: usize| from + (to - from) * (n + 1) as f32 / frames.max(1) as f32;
 
         if let Some((v, left)) = &mut self.dying {
             let mut take = v.feed.begin();
             let mut starved = false;
-            for frame in out.chunks_mut(oc) {
+            for (n, frame) in out.chunks_mut(oc).enumerate() {
                 if *left == 0 || v.pos >= v.bounds.end {
                     break;
                 }
-                let g = gain * v.bounds.envelope(v.pos) * (*left as f32 / self.declick as f32);
-                if !v.feed.mix_frame(v.pos, &mut take, g, frame) {
+                let g = gain(n) * v.bounds.envelope(v.pos) * (*left as f32 / self.declick as f32);
+                if !v.feed.mix_frame(v.pos, &mut take, g, v.bounds.fold, frame) {
                     starved = true;
                     break;
                 }
@@ -369,7 +398,6 @@ impl Mixer {
         let Some(v) = &mut self.voice else { return };
         let mut take = v.feed.begin();
         let mut done = false;
-        let frames = out.len() / oc;
         for (n, frame) in out.chunks_mut(oc).enumerate() {
             if v.pos >= v.bounds.end {
                 if v.bounds.looped && v.bounds.end > v.bounds.start {
@@ -379,8 +407,8 @@ impl Mixer {
                     break;
                 }
             }
-            let g = gain * v.sample_gain(self.declick);
-            if !v.feed.mix_frame(v.pos, &mut take, g, frame) {
+            let g = gain(n) * v.sample_gain(self.declick);
+            if !v.feed.mix_frame(v.pos, &mut take, g, v.bounds.fold, frame) {
                 if v.feed.exhausted(&take) {
                     done = true;
                 } else if v.feed.ready() {
@@ -461,6 +489,7 @@ impl Player {
             dying: None,
             channels: config.channels as usize,
             declick: (DECLICK_SECS * config.sample_rate as f64).round().max(1.0) as usize,
+            gain: 1.0,
         };
         let closing = Arc::new(AtomicBool::new(false));
         let stream = match default.sample_format() {
@@ -772,7 +801,7 @@ mod tests {
                 underruns: AtomicUsize::new(0),
             });
             let (tx, rx) = channel();
-            let mixer = Mixer { rx, shared, voice: None, dying: None, channels: 2, declick: 1 };
+            let mixer = Mixer { rx, shared, voice: None, dying: None, channels: 2, declick: 1, gain: 1.0 };
             Bench { mixer, tx, device_rate }
         }
 
@@ -809,7 +838,7 @@ mod tests {
     }
 
     fn bounds(start: usize, end: usize, looped: bool) -> Bounds {
-        Bounds { start, end, looped, fade_in: 0, fade_out: 0, fade_shape: FadeShape::Linear }
+        Bounds { start, end, looped, fade_in: 0, fade_out: 0, fade_shape: FadeShape::Linear, fold: None }
     }
 
     #[test]

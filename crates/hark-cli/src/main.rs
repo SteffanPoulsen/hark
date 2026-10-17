@@ -189,6 +189,10 @@ enum Cmd {
         /// config for this run.
         #[arg(long, value_name = "MB")]
         stream_above: Option<f64>,
+        /// Play it as an export through this preset would sound: folded to mono when the
+        /// preset downmixes, and at the level it normalises the whole file to.
+        #[arg(long)]
+        preset: Option<String>,
     },
 }
 
@@ -696,7 +700,7 @@ fn run() -> Result<()> {
         }
         Cmd::Analyze { file, store } => {
             let file = abs(&file)?;
-            let l = hark_core::loudness::measure_file(&file)?;
+            let l = hark_core::loudness::measure_file(&file, None, &|| false)?;
             if store {
                 open_db(&project)?.set_loudness(&file, l.integrated_lufs, l.true_peak_dbfs)?;
             }
@@ -1074,11 +1078,18 @@ fn run() -> Result<()> {
                 }
             }
         }
-        Cmd::Play { file, start, end, from, looped, seconds, jump, stream_above } => {
+        Cmd::Play { file, start, end, from, looped, seconds, jump, stream_above, preset } => {
             let file = abs(&file)?;
             let config = load(&project)?;
             let player = hark_core::audition::Player::open(config.output_sample_rate, config.output_device.as_deref())?;
             let info = hark_core::probe(&file)?;
+            let preset = preset.map(|n| config.preset(&n).cloned().ok_or_else(|| anyhow!("unknown preset {n}"))).transpose()?;
+            let fold = preset.as_ref().and_then(|p| p.mono);
+            let level = preset.as_ref().map(|p| hark_core::export::preview_level(&file, p, &|| false)).transpose()?.unwrap_or_default();
+            if let Some(db) = level.gain_db {
+                player.set_gain(hark_core::pcm::db_to_gain(db));
+            }
+            let (gain_db, warnings) = (level.gain_db, level.warnings);
             let streamed = info.decoded_mb() > stream_above.unwrap_or(config.stream_above_mb);
             let source = if streamed {
                 Source::File { path: file.clone(), source_rate: info.sample_rate, channels: info.channels, source_frames: (info.duration_secs * info.sample_rate as f64).round() as u64 }
@@ -1097,10 +1108,20 @@ fn run() -> Result<()> {
                 fade_in: 0,
                 fade_out: 0,
                 fade_shape: Default::default(),
+                fold,
             };
             let from = from.map(frame).unwrap_or(clip.start);
             if !json {
                 eprintln!("{} on {} at {} Hz", if streamed { "streaming" } else { "playing" }, player.device_name, player.sample_rate);
+                if let Some(mode) = fold {
+                    eprintln!("{}", mode.name());
+                }
+                if let Some(db) = gain_db {
+                    eprintln!("{db:+.2} dB, as the export would apply");
+                }
+                for w in &warnings {
+                    eprintln!("warning: {w}");
+                }
             }
             let t0 = Instant::now();
             player.play_from(clip.clone(), from);
@@ -1135,6 +1156,9 @@ fn run() -> Result<()> {
                 "played_secs": t0.elapsed().as_secs_f64(),
                 "position_frames": player.position(),
                 "underrun_frames": player.underrun_frames(),
+                "fold": fold,
+                "gain_db": gain_db,
+                "warnings": warnings,
             });
             if json {
                 print_json(&report)?;

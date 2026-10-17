@@ -89,6 +89,21 @@ impl DownmixMode {
             DownmixMode::Right => "Right channel",
         }
     }
+
+    /// One interleaved frame folded to a single sample. The audition mixer calls this per
+    /// frame, so it allocates nothing.
+    pub fn fold(self, frame: &[f32]) -> f32 {
+        let c = frame.len();
+        if c == 1 {
+            return frame[0];
+        }
+        match self {
+            DownmixMode::Left => frame[0],
+            DownmixMode::Right => frame[1.min(c - 1)],
+            DownmixMode::Average => frame.iter().sum::<f32>() / c as f32,
+            DownmixMode::SumMinus3 => frame.iter().sum::<f32>() / (c as f32).sqrt(),
+        }
+    }
 }
 
 impl Pcm {
@@ -168,21 +183,7 @@ impl Pcm {
         if c == 1 {
             return self.clone();
         }
-        let frames = self.frames();
-        let mut out = Vec::with_capacity(frames);
-        match mode {
-            DownmixMode::Left => out.extend(self.samples.chunks(c).map(|f| f[0])),
-            DownmixMode::Right => out.extend(self.samples.chunks(c).map(|f| f[1.min(c - 1)])),
-            DownmixMode::Average => {
-                let k = 1.0 / c as f32;
-                out.extend(self.samples.chunks(c).map(|f| f.iter().sum::<f32>() * k));
-            }
-            DownmixMode::SumMinus3 => {
-                let k = 1.0 / (c as f32).sqrt();
-                out.extend(self.samples.chunks(c).map(|f| f.iter().sum::<f32>() * k));
-            }
-        }
-        Pcm { sample_rate: self.sample_rate, channels: 1, samples: out }
+        Pcm { sample_rate: self.sample_rate, channels: 1, samples: self.samples.chunks(c).map(|f| mode.fold(f)).collect() }
     }
 
     /// The span of sound inside `start..end` seconds: from the first to the last frame within

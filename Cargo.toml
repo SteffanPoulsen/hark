@@ -39,3 +39,8 @@ codegen-units = 4
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# Decoding, peaks and the mixer run per sample; unoptimised they make a dev build's loads
+# many times slower than a release build's.
+[profile.dev.package.hark-core]
+opt-level = 2
