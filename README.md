@@ -4,122 +4,83 @@
 
 ![hark auditioning a sword take, one hit selected with fades, the export card set to the sfx preset](docs/screenshots/hero.png)
 
-hark sits between your sound libraries and the project they feed. Point it at the folders the libraries live in, arrow through them at keyboard speed, star and tag what works, select the part you want on the waveform, and export it through a preset into the project's audio folder with a consistent name, format and loudness. Every exported file carries where it came from and how it was made, embedded in the file itself, so months later `hark-cli inspect` still knows.
+hark sits between your sound libraries and the project they feed. Point it at the folders your libraries live in, arrow through them at keyboard speed, star and tag what works, select the part you want on the waveform, and export it through a preset into the project's audio folder with a consistent name, format and loudness. Every exported file carries a record of where it came from and how it was made, inside the file itself.
 
-Linux (Wayland) first, Windows and macOS from the same code. No accounts, no subscriptions, no cloud. Free software under the GPL.
+Linux (Wayland) first, with Windows and macOS builds from the same code. No accounts, no cloud. Free software under the GPL.
 
 ## Why
 
-Auditioning a big library in a DAW means importing first, and in a file manager means waiting for a player to open; neither remembers what you liked. Exporting by hand gives a different level and format every time, and leaves a file in the project with no link back to the pack it came from. hark does the whole loop in one window, at the speed of the arrow keys, and writes the link into the file.
+Auditioning a large library in a DAW means importing first, and in a file manager means waiting for a player; neither remembers what you liked. Exporting by hand gives a different level and format each time, and leaves a file in the project with no link back to the pack it came from. hark does the whole loop in one window and writes the link into the file.
 
-## Features
+## What it does
 
-- **Instant audition.** Arrowing through the list plays each file as it lands: one always-open audio stream, pre-decoded neighbours, cached waveform peaks. Hour-long recordings stream from disk and start as fast as a one-shot.
-- **Library, not import.** Folders stay where they are and are never modified. A folder lists everything under it, each file with its subfolder, duration, channels, rate, bit depth, codec and loudness; search covers everything, and a filter narrows by favorites, tags, type and channels.
-- **Favorites and tags** from the keyboard. Tags are yours to define, with a colour each. Marks key on the file's content, so a renamed or moved file keeps them.
-- **Projects.** A `.hark` file beside the game, the edit or the show holds its library folders, its output folder and its own favorites. Switch between projects from the top bar.
-- **Waveform selection with fades.** Drag a region or trim it to the sound, step through the takes a recording holds with Left and Right, set fade in and out, zoom, loop, seek by clicking, and scale the level with the fader beside the waveform.
-- **Copy and drag into a DAW.** Ctrl-drag the waveform into Reaper, Pro Tools, a folder or a chat, or press Ctrl+C and paste. Copies stay in hark's own folder until you clear it, since a DAW may reference them in place.
-- **Preset-driven export.** WAV or FLAC, bit depth with dither, resampling, mono downmix, peak or EBU R128 loudness normalisation under a true-peak ceiling, and a file name template. Override any of it for one export.
-- **Preview the export.** With Preview on, playback and the waveform follow the export card: a mono preset folds the sound to one channel, so phase cancellation is heard and seen, and a normalising preset plays the file at the level it would export at. The source file is never touched.
-- **An origin inside every export.** A `hark` RIFF chunk and a BWF `bext` description in WAV, an APPLICATION block and a Vorbis comment in FLAC: source path and hash, pack, selection, fades, preset and measured gain. `hark-cli reexport` runs that recipe again with changes.
-- **Keys you can change.** Every action has a key, and all but the list's arrows and the tag digits can be rebound on the settings window's Keys page or with the CLI.
-- **A CLI for all of it.** `hark-cli` exposes the same core with `--json` on every command, so a script or an agent can search, mark, analyse and export without a window.
+- **Instant audition.** Each file plays as the selection lands on it. Neighbours are pre-decoded and waveforms cached, and hour-long recordings stream from disk.
+- **A library, not an import.** Folders stay where they are and are never modified. Search and filter by name, favorite, tag, type and channel count. Reads WAV, FLAC, AIFF, MP3, Ogg Vorbis, AAC/M4A, CAF and Matroska audio.
+- **Favorites, tags and projects.** Tags are yours to define. Marks follow the file's content, so a renamed or moved file keeps them. A `.hark` project file beside your game, edit or show holds its own library folders, output folder and favorites.
+- **Waveform selection with fades.** Select a region, trim it to the sound, step through the takes a recording holds, and set fade in and out.
+- **Preset-driven export.** WAV or FLAC, bit depth with dither, resampling, mono downmix, peak or EBU R128 loudness normalisation under a true-peak ceiling, and a file name template; any of it can be overridden for one export. Preview plays and draws the sound as the preset would export it, folded to mono and at its normalised level.
+- **An origin inside every export.** A RIFF chunk and BWF `bext` description in WAV, an APPLICATION block and Vorbis comment in FLAC: source path and hash, selection, fades, preset and applied gain. `hark-cli inspect` reads it back and `hark-cli reexport` runs the recipe again with changes. A sidecar is never the only copy.
+- **Into a DAW directly.** Ctrl-drag the selection out of the waveform into Reaper, Pro Tools or a folder, or copy it with Ctrl+C and paste. The file is written through the export preset into a copy folder that hark never empties on its own, since a DAW may reference it in place.
+- **A CLI for all of it.** `hark-cli` sits on the same core as the window, with `--json` on every command, so a script or an agent can search, mark, analyse and export without a window.
 
 ![The presets page of the settings window](docs/screenshots/presets.png)
 
 ## Install
 
-Downloads for Linux and Windows are on the [Releases](../../releases) page. To build from source:
+Download the archive for Linux x86_64, Windows x86_64 or macOS (universal) from the [Releases](../../releases) page. On Linux, `install.sh` in the archive puts `hark` and `hark-cli` in `~/.local/bin` and installs the desktop entry and icon.
+
+Dragging out and clipboard copy need Wayland on Linux and are not available on macOS; everything else runs on all three.
+
+### From source
+
+Rust stable, then:
 
 ```
 cargo build --release
 ```
 
-Binaries land in `target/release/hark` (the window) and `target/release/hark-cli`. `packaging/install.sh` installs the desktop entry and the icon for the current user, so launchers and the compositor show hark by its app id; from a release archive it also puts the binaries in `~/.local/bin`. Rust stable; on Linux the PipeWire headers (`pipewire` package) are needed for the native backend, with ALSA as the fallback. Windows builds with the MSVC or GNU toolchain and uses WASAPI.
+This builds `target/release/hark` (the window) and `target/release/hark-cli`. `packaging/install.sh` installs the desktop entry and icon for a source build. On Linux the build needs the PipeWire and ALSA headers: `pipewire` on Arch; `libpipewire-0.3-dev libasound2-dev libclang-dev pkg-config libxkbcommon-dev libwayland-dev libgl-dev` on Debian and Ubuntu. Playback uses PipeWire natively and falls back to ALSA. Windows builds with the MSVC or GNU toolchain.
 
-## Use
+## Getting started
 
-Start `hark`, add a library folder with the button under the tree, pick a folder, and arrow through the files. `hark --open <file>` starts on a file, with `--in` and `--out` seconds for a selection and `--fade-in` and `--fade-out` for its fades; `hark --project <file.hark>` opens a project; `hark --settings [general|tags|presets|keys]` opens the settings window, a window of its own with those four pages. A project has no window of its own: its folders are the tree, its output folder is on the export card, and its name is its file's.
+Start `hark`, add a library folder with the button under the folder tree, pick a folder and arrow through the files. The status bar shows the main keys; the settings window's Keys page lists every action and rebinds them. To export, choose an output folder and a preset on the export card and press E.
 
-| Key | Action |
-|---|---|
-| Up / Down, PageUp / PageDown, Home / End | Move through the list, playing each file when autoplay is on |
-| Left / Right | Select the previous or next take in the file, the spans of sound parted by silence, playing it when autoplay is on |
-| Space | Play the selection or the whole file; stop when playing |
-| Enter | Play from the start |
-| Escape | Stop |
-| F | Toggle favorite |
-| 1 to 9 | Toggle the first nine tags |
-| L | Loop |
-| A | Autoplay |
-| P | Preview the export: hear and see the card's channels and level |
-| `[` and `]` | Set the selection start or end at the playhead |
-| Z | Zoom to the selection |
-| T | Trim the selection, or the whole file, to the sound |
-| Delete | Clear the selection and fades |
-| E | Export the selection with the chosen preset |
-| Ctrl+C | Copy the selection as heard to the clipboard as a file; over the list, the original file |
+For a project, create one from the project menu in the top bar or with `hark-cli projects new`. `hark --open <file>` starts on a file and `hark --project <file.hark>` opens a project.
 
-Every key but the list's arrows, the tag digits and Ctrl+C can be changed on the settings window's Keys page or with `hark-cli keys set <action> <chord>`; `hark-cli keys` lists the actions and their chords.
-
-On the waveform: drag to select, drag a selection edge to adjust it, shift-drag inside to move it, Ctrl-drag to carry the selection out of the window into another program, drag the triangles in the strip above to set fades, click to play from there, wheel to zoom, shift-wheel or middle-drag to pan, double-click to zoom out. A row dragged out of the list carries the original file. The window scale is in settings; Ctrl+= and Ctrl+- change it too.
-
-A copied or dragged selection is written first into the copy folder: `~/.local/share/hark/copies` unless settings or the project point elsewhere. Nothing in it is ever removed by hark, because Pro Tools and Reaper at factory settings reference a dropped file where it is; the settings window shows the folder with a clear button for when you know your sessions are consolidated. Dragging out needs Wayland on Linux; on X11, copy and paste.
-
-In the list, a column header sorts by that column and a second click reverses it; the name, folder and tag columns resize by the dividers in the header row. The folder tree, the bottom panel and the export card resize by their separators. A double-click on a divider or a separator puts that one back. The sizes are remembered between runs; the layout row in settings resets them all.
-
-### CLI
+## The CLI
 
 ```
+hark-cli projects new ~/Projects/game/MyGame.hark --output ~/Projects/game/Assets/Audio
 hark-cli roots add ~/Audio/Libraries --name libraries
 hark-cli scan
-hark-cli search footstep gravel --tag sfx --tag foley --type wav --channels mono
-hark-cli tag "Footsteps/gravel_03.wav" +sfx +foley
-hark-cli fav "Footsteps/gravel_03.wav"
-hark-cli analyze "Footsteps/gravel_03.wav" --store
-hark-cli takes "Swords/sword_hits_take03.wav" --json
-hark-cli projects new ~/Projects/game/MyGame.hark --output ~/Projects/game/Assets/Audio
-hark-cli roots add ~/Audio/Libraries/Footsteps
-hark-cli tags add footstep --color '#79b86a'
-hark-cli presets add sfx-quiet --from sfx
-hark-cli presets set sfx-quiet --normalize lufs --target=-20 --ceiling=-1 --rate 48000
-hark-cli play "Footsteps/gravel_03.wav" --preset sfx-quiet
-hark-cli export "Footsteps/gravel_03.wav" --preset sfx --into sfx/footsteps --in 0.2 --out 1.4 --fade-out 0.1
-hark-cli copies
-hark-cli inspect ~/Projects/game/Assets/Audio/sfx/gravel_03.wav
-hark-cli version --check
-hark-cli reexport ~/Projects/game/Assets/Audio/sfx/*.wav --preset sfx
+hark-cli search footstep gravel --tag foley --channels mono
+hark-cli tag ~/Audio/Libraries/Footsteps/gravel_03.wav +sfx +foley
+hark-cli export ~/Audio/Libraries/Footsteps/gravel_03.wav --preset sfx --in 0.2 --out 1.4 --fade-out 0.1 --into footsteps
+hark-cli inspect ~/Projects/game/Assets/Audio/footsteps/gravel_03.wav
+hark-cli reexport ~/Projects/game/Assets/Audio/footsteps/*.wav --preset voice
 ```
 
-`hark-cli --help` lists everything; `--json` makes any command machine-readable.
-
-### What an export carries
+`hark-cli --help` lists every command. What `inspect` shows for an export:
 
 ```
 $ hark-cli inspect Assets/Audio/sfx/combat/impact_metal_heavy_02.wav
   wave pcm_s24le · 48000 Hz · 1 ch · 24 bit · 1.600s
   bext: hark: Pigeon Wizard SFX:Impacts/impact_metal_heavy_02.wav
   origin: hark: Pigeon Wizard SFX:Impacts/impact_metal_heavy_02.wav
-    exported 2026-10-15T20:08:46+02:00 by hark 0.1.0 with preset sfx
+    exported 2026-10-15T20:08:46+02:00 by hark 0.4.0 with preset sfx
     source ~/Audio/Pigeon Wizard/Impacts/impact_metal_heavy_02.wav (230480 bytes, blake3 a1e93ed24193076e)
     fades 0.000s / 0.000s · gain -1.33 dB (true-peak limited)
 ```
 
-The same record is in the file as JSON, readable by anything that walks RIFF chunks or FLAC metadata blocks. A sidecar is never the only copy.
+The same record is stored as JSON, readable by anything that walks RIFF chunks or FLAC metadata blocks.
 
-## Configuration
+## Where things live
 
-`~/.config/hark/config.json` (or the platform equivalent) holds the default state's folders and output folder, the known project files and the open one, the tags, the export presets, the default preset, the keys that differ from the defaults, the window zoom, the output device and sample rate and the streaming threshold (`stream_above_mb`, 256 MB of decoded audio by default, about ten minutes of 48 kHz stereo). The defaults define `clean`, `sfx`, `ambient`, `music` and `voice` presets and a matching set of tags. Edit the file, use the settings window, or `hark-cli config`. A project file is JSON too: an id (favorites key on it), its folders, the output folder and the last export folder; `hark-cli --project <file or name>` acts in one without opening it.
+On Linux, settings, tags and presets are in `~/.config/hark/config.json`; the library database (`library.sqlite`) and the default copy folder (`copies/`) are in `~/.local/share/hark`; waveform peaks are cached in `~/.cache/hark/peaks`. Windows and macOS use their platform equivalents; `hark-cli config --path` prints the config file's location. The database indexes your folders and holds your tags and favorites; your audio files are never written to.
 
-The library database lives in the data directory and only indexes what the files already carry; deleting it loses nothing but the marks, which `hark-cli` can re-apply. Waveform peaks are cached in the cache directory.
+## Contributing
 
-## Layout
-
-- `crates/hark-core`: decoding (symphonia), peaks, loudness (ebur128), resampling (rubato), WAV and FLAC writing with embedded origin, the export pipeline, the library database (SQLite), config, and playback (cpal).
-- `crates/hark-cli`: the command line, a thin layer over the core.
-- `crates/hark`: the window (egui), a thin layer over the core.
-- `docs/screenshots/stage.sh`: synthesizes a sample library, stages a project over it and captures the screenshots above, so they can be retaken after a change.
+The workspace is one core library (`crates/hark-core`) with two thin frontends, the window (`crates/hark`) and the CLI (`crates/hark-cli`). [AGENTS.md](AGENTS.md) describes the layout and the invariants a change must keep; [ROADMAP.md](ROADMAP.md) holds the ideas that have been weighed.
 
 ## Licence
 
