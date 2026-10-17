@@ -157,8 +157,8 @@ pub struct Query {
     pub dir: Option<PathBuf>,
     /// Only files anywhere below this folder.
     pub under: Option<PathBuf>,
-    /// Folders to search within; empty means everywhere.
-    pub scope: Vec<PathBuf>,
+    /// Folders to search within; `None` is the whole library, and an empty list finds nothing.
+    pub scope: Option<Vec<PathBuf>>,
     pub favorites_only: bool,
     /// Files carrying any of these tags.
     pub tags: Vec<String>,
@@ -298,7 +298,38 @@ impl Db {
     }
 
     pub fn search(&self, q: &Query) -> Result<Vec<FileRecord>> {
-        let mut sql = format!("{SELECT} WHERE 1=1");
+        let (filter, names, values) = Self::filter(q);
+        let mut sql = format!("{SELECT}{filter}");
+        sql.push_str(&q.sort.clause());
+        if q.limit > 0 {
+            sql.push_str(&format!(" LIMIT {}", q.limit));
+        }
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":project", &self.project)];
+        for (n, v) in names.iter().zip(values.iter()) {
+            params.push((n.as_str(), v));
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params.as_slice(), Self::row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// How many files `search` would return, without its limit.
+    pub fn count(&self, q: &Query) -> Result<usize> {
+        let (filter, names, values) = Self::filter(q);
+        let sql = format!("SELECT count(*) FROM files f{filter}");
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
+        if q.favorites_only {
+            params.push((":project", &self.project));
+        }
+        for (n, v) in names.iter().zip(values.iter()) {
+            params.push((n.as_str(), v));
+        }
+        Ok(self.conn.query_row(&sql, params.as_slice(), |r| r.get::<_, i64>(0))? as usize)
+    }
+
+    /// The WHERE clause for `q`, with its parameter names and values.
+    fn filter(q: &Query) -> (String, Vec<String>, Vec<String>) {
+        let mut sql = String::from(" WHERE 1=1");
         let mut names: Vec<String> = Vec::new();
         let mut values: Vec<String> = Vec::new();
         let bind = |names: &mut Vec<String>, values: &mut Vec<String>, v: String| -> String {
@@ -350,21 +381,15 @@ impl Db {
         if let Some(under) = &q.under {
             sql.push_str(&format!(" AND {}", within(&mut names, &mut values, under)));
         }
-        if !q.scope.is_empty() {
-            let ors: Vec<String> = q.scope.iter().map(|s| within(&mut names, &mut values, s)).collect();
-            sql.push_str(&format!(" AND ({})", ors.join(" OR ")));
+        match &q.scope {
+            Some(scope) if scope.is_empty() => sql.push_str(" AND 0"),
+            Some(scope) => {
+                let ors: Vec<String> = scope.iter().map(|s| within(&mut names, &mut values, s)).collect();
+                sql.push_str(&format!(" AND ({})", ors.join(" OR ")));
+            }
+            None => {}
         }
-        sql.push_str(&q.sort.clause());
-        if q.limit > 0 {
-            sql.push_str(&format!(" LIMIT {}", q.limit));
-        }
-        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":project", &self.project)];
-        for (n, v) in names.iter().zip(values.iter()) {
-            params.push((n.as_str(), v));
-        }
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params.as_slice(), Self::row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        (sql, names, values)
     }
 
     pub fn count_dir(&self, dir: &Path) -> Result<usize> {
@@ -538,10 +563,6 @@ impl Db {
             self.conn.execute("DELETE FROM favorites WHERE project = ?1 AND hash = ?2", params![self.project, hash])?;
         }
         Ok(())
-    }
-
-    pub fn favorite_count(&self, project: &str) -> Result<usize> {
-        Ok(self.conn.query_row("SELECT count(*) FROM favorites WHERE project = ?1", params![project], |r| r.get::<_, i64>(0))? as usize)
     }
 
     pub fn rename_project(&self, old: &str, new: &str) -> Result<usize> {

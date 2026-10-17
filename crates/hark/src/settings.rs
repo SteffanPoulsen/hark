@@ -5,6 +5,8 @@ use egui::{Color32, CornerRadius, Margin, RichText};
 use egui_phosphor::regular as icons;
 use hark_core::audition::Player;
 use hark_core::keys::Action;
+use hark_core::update::Release;
+use std::sync::mpsc::Receiver;
 
 use crate::theme::{self, Theme};
 use crate::preset_ui;
@@ -16,10 +18,11 @@ pub enum Page {
     Tags,
     Presets,
     Keys,
+    About,
 }
 
 impl Page {
-    const ALL: [Page; 4] = [Page::General, Page::Tags, Page::Presets, Page::Keys];
+    const ALL: [Page; 5] = [Page::General, Page::Tags, Page::Presets, Page::Keys, Page::About];
 
     fn title(self) -> &'static str {
         match self {
@@ -27,6 +30,7 @@ impl Page {
             Page::Tags => "Tags",
             Page::Presets => "Presets",
             Page::Keys => "Keys",
+            Page::About => "About",
         }
     }
 
@@ -36,8 +40,14 @@ impl Page {
             Page::Tags => icons::TAG,
             Page::Presets => icons::SLIDERS,
             Page::Keys => icons::KEYBOARD,
+            Page::About => icons::INFO,
         }
     }
+}
+
+pub enum UpdateCheck {
+    Running(Receiver<Result<Release, String>>),
+    Done(Result<Release, String>),
 }
 
 const NAV_W: f32 = 180.0;
@@ -108,6 +118,9 @@ impl App {
                         self.settings_page = page;
                     }
                 }
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.label(RichText::new(format!("hark {}", hark_core::VERSION)).color(theme.muted).size(12.0));
+                });
             });
             egui::CentralPanel::default().frame(egui::Frame::new().fill(theme.bg).inner_margin(Margin::symmetric(24, 20))).show(ctx, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -118,9 +131,60 @@ impl App {
                             Page::Tags => self.page_tags(ui),
                             Page::Presets => self.page_presets(ui),
                             Page::Keys => self.page_keys(ui),
+                            Page::About => self.page_about(ui),
                         });
                     });
                 });
+            });
+        });
+    }
+
+    fn page_about(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme.clone();
+        if let Some(UpdateCheck::Running(rx)) = &self.update_check {
+            if let Ok(result) = rx.try_recv() {
+                self.update_check = Some(UpdateCheck::Done(result));
+            }
+        }
+        ui.label(theme::semibold("hark").size(28.0));
+        ui.label(RichText::new(format!("Version {}", hark_core::VERSION)).color(theme.muted));
+        ui.add_space(6.0);
+        ui.label("A local audio asset browser: audition a folder library, mark what you find, and export selections with their origin inside the file.");
+        ui.add_space(16.0);
+        let link = |ui: &mut egui::Ui, icon: &str, label: &str, url: String| {
+            if ui.add(egui::Button::new(theme::icon_text(icon, label, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(0.0, 28.0))).on_hover_text(&url).clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
+        };
+        card(ui, &theme, |ui| {
+            let (desc, release) = match &self.update_check {
+                None => ("Asks GitHub for the latest release. hark makes no other request.".to_string(), None),
+                Some(UpdateCheck::Running(_)) => ("Asking GitHub…".to_string(), None),
+                Some(UpdateCheck::Done(Ok(r))) if r.newer => (format!("hark {} is out.", r.version), Some(r.url.clone())),
+                Some(UpdateCheck::Done(Ok(_))) => ("This is the latest release.".to_string(), None),
+                Some(UpdateCheck::Done(Err(e))) => (format!("The check failed: {e}"), None),
+            };
+            row(ui, &theme, true, "Updates", &desc, |ui| {
+                if let Some(url) = release {
+                    link(ui, icons::DOWNLOAD_SIMPLE, "Get it", url);
+                }
+                let running = matches!(self.update_check, Some(UpdateCheck::Running(_)));
+                if ui.add_enabled(!running, egui::Button::new(theme::icon_text(icons::ARROWS_CLOCKWISE, "Check for updates", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(0.0, 28.0))).clicked() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(hark_core::update::latest().map_err(|e| format!("{e:#}")));
+                        ctx.request_repaint();
+                    });
+                    self.update_check = Some(UpdateCheck::Running(rx));
+                }
+            });
+            row(ui, &theme, false, "Source", "Code, issues and release notes.", |ui| {
+                link(ui, icons::TAG, "Releases", hark_core::update::releases_url());
+                link(ui, icons::GITHUB_LOGO, "GitHub", hark_core::update::REPOSITORY.to_string());
+            });
+            row(ui, &theme, false, "License", "Free software: use, study, change and share it under the same terms.", |ui| {
+                link(ui, icons::SCALES, "GPL-3.0-or-later", format!("{}/blob/master/LICENSE", hark_core::update::REPOSITORY));
             });
         });
     }

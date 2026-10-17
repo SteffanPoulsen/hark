@@ -13,6 +13,7 @@ pub mod peaks;
 pub mod project;
 pub mod resample;
 pub mod copies;
+pub mod update;
 pub mod wav;
 
 pub use config::{Config, ExportPreset, Root, TagDef};

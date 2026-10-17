@@ -116,6 +116,7 @@ fn main() -> eframe::Result {
                     Some("tags") => settings::Page::Tags,
                     Some("keys") => settings::Page::Keys,
                     Some("presets") | Some("export") => settings::Page::Presets,
+                    Some("about") => settings::Page::About,
                     Some("general") | None => settings::Page::General,
                     Some(other) => {
                         open = Some(PathBuf::from(other));
@@ -296,6 +297,7 @@ struct App {
     settings_page: settings::Page,
     /// The output devices the General page offers, listed once per opening of the window.
     outputs: Option<Vec<hark_core::audition::Output>>,
+    update_check: Option<settings::UpdateCheck>,
     /// The clear-copies confirmation is up.
     copies_clear: bool,
     /// The mark beside the wordmark, white on transparent, tinted at draw time.
@@ -394,6 +396,7 @@ impl App {
             file_count: 0,
             settings_open: false,
             outputs: None,
+            update_check: None,
             mark,
             settings_page: settings::Page::General,
             copies_clear: false,
@@ -504,9 +507,19 @@ impl App {
         dirs
     }
 
+    fn root_paths(&self) -> Vec<PathBuf> {
+        self.config.roots().iter().map(|r| r.path.clone()).collect()
+    }
+
+    /// The files the Favorites view lists, so the badge never counts a favorite outside the folders.
+    fn count_favorites(&mut self) {
+        let q = Query { favorites_only: true, scope: Some(self.root_paths()), ..Query::default() };
+        self.fav_count = self.db.count(&q).unwrap_or(0);
+    }
+
     fn refresh_list(&mut self) {
         self.list_dirty = false;
-        self.fav_count = self.db.favorite_count(self.db.project()).unwrap_or(0);
+        self.count_favorites();
         let mut q = Query {
             favorites_only: self.filter.favorites,
             tags: self.filter.tags.clone(),
@@ -517,14 +530,14 @@ impl App {
         };
         if !self.search.trim().is_empty() {
             q.text = self.search.clone();
-            q.scope = self.config.roots().iter().map(|r| r.path.clone()).collect();
+            q.scope = Some(self.root_paths());
             q.limit = SEARCH_LIMIT;
         } else {
             match &self.location {
                 Some(Location::Folder(d)) => q.under = Some(d.clone()),
                 Some(Location::Favorites) => {
                     q.favorites_only = true;
-                    q.scope = self.config.roots().iter().map(|r| r.path.clone()).collect();
+                    q.scope = Some(self.root_paths());
                 }
                 None => {
                     self.files.clear();
@@ -709,7 +722,7 @@ impl App {
         match self.db.ensure_hash(&path).and_then(|h| self.db.set_favorite(&h, on)) {
             Ok(()) => {
                 self.refresh_record(i);
-                self.fav_count = self.db.favorite_count(self.db.project()).unwrap_or(0);
+                self.count_favorites();
             }
             Err(e) => self.set_status(format!("Favorite: {e:#}"), true),
         }

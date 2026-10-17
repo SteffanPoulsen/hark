@@ -3,6 +3,7 @@ name = "hark-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [features]
 default = ["pipewire"]
@@ -23,3 +24,4 @@ directories.workspace = true
 cpal.workspace = true
 flacenc.workspace = true
 chrono.workspace = true
+ureq.workspace = true

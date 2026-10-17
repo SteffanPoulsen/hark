@@ -159,6 +159,12 @@ enum Cmd {
     },
     /// List the output devices playback can open, the system default aside.
     Devices,
+    /// This build's version and the repository it comes from.
+    Version {
+        /// Ask GitHub for the latest release and say whether it is newer.
+        #[arg(long)]
+        check: bool,
+    },
     /// Play a file through the output device and wait for it to finish. Files whose decoded
     /// audio is larger than the config's `stream_above_mb` stream from disk while they play.
     Play {
@@ -486,6 +492,12 @@ fn open_db(project: &Option<String>) -> Result<Db> {
     Ok(db)
 }
 
+/// The favorites of `project` that lie inside `roots`, as its Favorites view lists them.
+fn favorite_count(db: &mut Db, project: &str, roots: &[Root]) -> usize {
+    db.set_project(project);
+    db.count(&Query { favorites_only: true, scope: Some(roots.iter().map(|r| r.path.clone()).collect()), ..Query::default() }).unwrap_or(0)
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let json = cli.json;
@@ -493,7 +505,7 @@ fn run() -> Result<()> {
     match cli.cmd {
         Cmd::Projects { cmd } => {
             let mut config = load(&project)?;
-            let db = open_db(&project)?;
+            let mut db = open_db(&project)?;
             match cmd.unwrap_or(ProjectsCmd::List) {
                 ProjectsCmd::List => {}
                 ProjectsCmd::New { file, output } => {
@@ -527,19 +539,20 @@ fn run() -> Result<()> {
                         "id": loaded.as_ref().map(|p| p.id.clone()),
                         "output_root": loaded.as_ref().and_then(|p| p.output_root.clone()),
                         "roots": loaded.as_ref().map(|p| p.roots.clone()).unwrap_or_default(),
-                        "favorites": loaded.as_ref().and_then(|p| db.favorite_count(&p.id).ok()).unwrap_or(0),
+                        "favorites": loaded.as_ref().map(|p| favorite_count(&mut db, &p.id, &p.roots)).unwrap_or(0),
                     })
                 })
                 .collect();
+            let default_favorites = favorite_count(&mut db, hark_core::config::DEFAULT_PROJECT, &config.roots);
             if json {
-                print_json(&serde_json::json!({ "open": open, "default_roots": config.roots, "default_output_root": config.output_root, "default_favorites": db.favorite_count(hark_core::config::DEFAULT_PROJECT).unwrap_or(0), "projects": rows }))?;
+                print_json(&serde_json::json!({ "open": open, "default_roots": config.roots, "default_output_root": config.output_root, "default_favorites": default_favorites, "projects": rows }))?;
             } else {
                 println!(
                     "{} {:<16} {:<40} {} favorites, {} folders",
                     if open.is_none() { "*" } else { " " },
                     "Default",
                     config.output_root.as_ref().map(|o| o.display().to_string()).unwrap_or_else(|| "(no output folder)".into()),
-                    db.favorite_count(hark_core::config::DEFAULT_PROJECT).unwrap_or(0),
+                    default_favorites,
                     config.roots.len()
                 );
                 for r in &rows {
@@ -638,7 +651,7 @@ fn run() -> Result<()> {
                 text: words.join(" "),
                 dir: None,
                 under: under.map(|u| abs(&u)).transpose()?,
-                scope: config.roots().iter().map(|r| r.path.clone()).collect(),
+                scope: Some(config.roots().iter().map(|r| r.path.clone()).collect()),
                 favorites_only: fav,
                 tags: tag,
                 extensions: extension,
@@ -1045,6 +1058,19 @@ fn run() -> Result<()> {
             } else {
                 for o in &outputs {
                     println!("{:<48} {}", o.id, o.name);
+                }
+            }
+        }
+        Cmd::Version { check } => {
+            let latest = if check { Some(hark_core::update::latest()?) } else { None };
+            if json {
+                print_json(&serde_json::json!({ "version": hark_core::VERSION, "repository": hark_core::update::REPOSITORY, "latest": latest }))?;
+            } else {
+                println!("hark {}  {}", hark_core::VERSION, hark_core::update::REPOSITORY);
+                match latest {
+                    Some(r) if r.newer => println!("{} is out: {}", r.version, r.url),
+                    Some(_) => println!("up to date"),
+                    None => {}
                 }
             }
         }
