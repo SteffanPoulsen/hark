@@ -29,6 +29,7 @@ A Cargo workspace with one core and two thin frontends. The frontends never reim
 
 ## Working here
 
+- `cargo clippy` stays at zero warnings. Fix a finding when the fix leaves the code no worse; otherwise `#[allow]` it on that one item, with a reason where it isn't obvious. A warning left standing costs every later session that reads the output.
 - `cargo build` builds everything; `cargo check --target x86_64-pc-windows-gnu` checks the Windows build (mingw-w64 is installed on majestic-prime).
 - Test audio is generated, not committed: see the sox and ffmpeg recipe in the session that built the first version, or make a few files with `sox -n -r 48000 -c 2 out.wav synth 0.4 sine 440 fade 0 0.4 0.3`.
 - `hark-cli roots add <folder>` then `hark-cli export <file> --preset sfx --output-root /tmp/out` exercises the whole core; `hark --open <file>` opens the window on a file for a visual check.
