@@ -39,6 +39,8 @@ pub struct Project {
 }
 
 impl Project {
+    /// A project with an id of its own; no two are alike, so there is no default one.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Project {
         Project { id: fresh_id(), roots: Vec::new(), output_root: None, export_folder: None, copy_folder: None, legacy_scope: Vec::new(), legacy_whole_library: false }
     }

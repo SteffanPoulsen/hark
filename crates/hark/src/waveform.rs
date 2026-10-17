@@ -269,6 +269,7 @@ fn draw_lane_dividers(painter: &egui::Painter, rect: Rect, channels: usize, colo
 }
 
 /// With `samples`, the columns come from them instead of the peaks' bins.
+#[allow(clippy::too_many_arguments)]
 fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, samples: Option<&Pcm>, rect: Rect, v0: f64, v1: f64, gain: f32, colors: &WaveColors) {
     let channels = peaks.channels.max(1) as usize;
     let lane_h = rect.height() / channels as f32;
