@@ -68,6 +68,7 @@ pub enum WaveEvent {
     DragOut,
 }
 
+#[derive(Clone, Copy)]
 pub struct WaveColors {
     pub peak: Color32,
     pub rms: Color32,
@@ -326,10 +327,24 @@ fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64
     draw_lane_dividers(painter, rect, channels, colors);
 }
 
+/// What the wave waits on, written across its middle with a spinner while `busy`.
+fn draw_status(ui: &Ui, painter: &egui::Painter, rect: Rect, text: &str, busy: bool) {
+    const SPINNER: f32 = 14.0;
+    let visuals = ui.visuals();
+    let galley = painter.layout_no_wrap(text.to_string(), FontId::proportional(14.0), visuals.text_color());
+    let lead = if busy { SPINNER + 8.0 } else { 0.0 };
+    let size = Vec2::new(lead + galley.size().x, galley.size().y.max(SPINNER));
+    let at = rect.center() - size * 0.5;
+    if busy {
+        egui::Spinner::new().size(SPINNER).color(visuals.weak_text_color()).paint_at(ui, Rect::from_min_size(Pos2::new(at.x, rect.center().y - SPINNER * 0.5), Vec2::splat(SPINNER)));
+    }
+    painter.galley(Pos2::new(at.x + lead, rect.center().y - galley.size().y * 0.5), galley, visuals.text_color());
+}
+
 /// Draws the wave and handles its input; the response comes back so the caller can hang a
-/// menu on it. `placeholder` is written across the lanes while there are no peaks.
+/// menu on it. `status` is written across the lanes, over the envelope dimmed.
 #[allow(clippy::too_many_arguments)]
-pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: Option<&Pcm>, duration: f64, playhead: Option<f64>, height: f32, placeholder: &str, colors: &WaveColors) -> (WaveEvent, egui::Response) {
+pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: Option<&Pcm>, duration: f64, playhead: Option<f64>, height: f32, status: Option<(&str, bool)>, colors: &WaveColors) -> (WaveEvent, egui::Response) {
     let width = ui.available_width();
     let (resp, painter) = ui.allocate_painter(Vec2::new(width, height), Sense::click_and_drag());
     let full = resp.rect;
@@ -344,7 +359,9 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
         for s in handle(lane, rect, rect.left(), true, idle).into_iter().chain(handle(lane, rect, rect.right(), false, idle)) {
             painter.add(s);
         }
-        painter.text(rect.center(), Align2::CENTER_CENTER, placeholder, FontId::proportional(14.0), visuals.weak_text_color());
+        if let Some((text, busy)) = status {
+            draw_status(ui, &painter, rect, text, busy);
+        }
         return (WaveEvent::None, resp);
     };
     let duration = duration.max(1e-6);
@@ -382,9 +399,16 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
 
     // The wave itself.
     let frames_per_px = span * peaks.sample_rate as f64 / rect.width().max(1.0) as f64;
+    let wave = match status {
+        Some(_) => WaveColors { peak: colors.peak.gamma_multiply(0.2), rms: colors.rms.gamma_multiply(0.2), ..*colors },
+        None => *colors,
+    };
     match samples {
-        Some(pcm) if frames_per_px * (pcm.sample_rate as f64 / peaks.sample_rate as f64) <= SAMPLE_VIEW_FRAMES_PER_PX => draw_samples(&painter, pcm, rect, v0, v1, state.gain, colors),
-        _ => draw_envelope(&painter, peaks, samples.filter(|_| frames_per_px < peaks.bin_frames as f64), rect, v0, v1, state.gain, colors),
+        Some(pcm) if frames_per_px * (pcm.sample_rate as f64 / peaks.sample_rate as f64) <= SAMPLE_VIEW_FRAMES_PER_PX => draw_samples(&painter, pcm, rect, v0, v1, state.gain, &wave),
+        _ => draw_envelope(&painter, peaks, samples.filter(|_| frames_per_px < peaks.bin_frames as f64), rect, v0, v1, state.gain, &wave),
+    }
+    if let Some((text, busy)) = status {
+        draw_status(ui, &painter, rect, text, busy);
     }
 
     draw_ruler(&painter, lane, v0, v1, &x_of, visuals.weak_text_color(), colors.axis);

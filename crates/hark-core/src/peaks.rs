@@ -192,6 +192,11 @@ impl PeaksBuilder {
         self.total_frames += (samples.len() / c) as u64;
     }
 
+    /// The bins closed so far, `[channel][bin]`.
+    pub fn bins(&self) -> &[Vec<Bin>] {
+        &self.bins
+    }
+
     fn close_bin(&mut self) {
         let n = self.open_frames.max(1) as f32;
         for (bins, acc) in self.bins.iter_mut().zip(&mut self.open) {

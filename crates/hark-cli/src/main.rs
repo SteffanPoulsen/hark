@@ -713,7 +713,7 @@ fn run() -> Result<()> {
             let file = abs(&file)?;
             let l = hark_core::loudness::measure_file(&file, None, &|| false)?;
             if store {
-                open_db(&project)?.set_loudness(&file, l.integrated_lufs, l.true_peak_dbfs)?;
+                open_db(&project)?.set_loudness(&file, &l)?;
             }
             if json {
                 print_json(&l)?;

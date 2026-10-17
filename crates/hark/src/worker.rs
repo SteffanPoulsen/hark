@@ -4,14 +4,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use hark_core::audition::Source;
 use hark_core::config::Root;
 use hark_core::config::Normalize;
 use hark_core::copies::Plan;
-use hark_core::export::{ExportRequest, ExportResult, PreviewLevel};
+use hark_core::export::{ExportRequest, ExportResult};
 use hark_core::library::ScanReport;
 use hark_core::pcm::DownmixMode;
+use hark_core::peaks::{Bin, PeaksBuilder};
 use hark_core::{ExportPreset, Loudness, Pcm, Peaks};
 
 use crate::dnd::Ready;
@@ -27,17 +29,9 @@ pub struct Loaded {
     /// Measured by the analysis pass; `None` before it runs, and for a file whose loudness
     /// only the library holds.
     pub loudness: Option<Loudness>,
-    /// The preview made with a decoded file, so it never shows without it.
-    pub prepared: Option<Prepared>,
-}
-
-/// A decoded file's preview under the preset it was loaded with.
-#[derive(Clone)]
-pub struct Prepared {
-    pub mono: Option<DownmixMode>,
-    pub normalize: Normalize,
-    pub folded: Option<Arc<Folded>>,
-    pub level: Option<PreviewLevel>,
+    /// A decoded file folded as the preset it was loaded with folds, so its preview never
+    /// shows without it.
+    pub folded: Option<(DownmixMode, Arc<Folded>)>,
 }
 
 impl Loaded {
@@ -48,7 +42,7 @@ impl Loaded {
             Source::File { .. } => 0,
         };
         let peaks = |p: &Peaks| -> usize { p.bins.iter().map(|b| b.len() * 12).sum() };
-        let folded = self.prepared.as_ref().and_then(|p| p.folded.as_ref()).map(|f| peaks(&f.peaks) + f.samples.as_ref().map(|s| s.samples.len() * 4).unwrap_or(0)).unwrap_or(0);
+        let folded = self.folded.as_ref().map(|(_, f)| peaks(&f.peaks) + f.samples.as_ref().map(|s| s.samples.len() * 4).unwrap_or(0)).unwrap_or(0);
         audio + self.peaks.as_deref().map(peaks).unwrap_or(0) + folded
     }
 }
@@ -75,6 +69,8 @@ pub enum Job {
 pub struct Folded {
     pub peaks: Arc<Peaks>,
     pub samples: Option<Arc<Pcm>>,
+    /// Measured when the fold was asked to, for a preset that normalises.
+    pub loudness: Option<Loudness>,
 }
 
 /// Where a running scan is: walking the roots, or hashing files so moved marks find theirs.
@@ -95,8 +91,34 @@ pub enum Done {
     Copied { result: Result<ExportResult, String>, dragged: bool },
     /// One result per root, by name; a root that could not be scanned carries the reason.
     Scanned(Vec<(String, Result<ScanReport, String>)>),
-    Level { path: PathBuf, preset: ExportPreset, result: Result<PreviewLevel, String> },
-    Folded { path: PathBuf, mode: DownmixMode, result: Result<Folded, String> },
+    Folded { path: PathBuf, mode: DownmixMode, measure: bool, result: Result<Folded, String> },
+    /// Bins an analysis (`mode` `None`) or a fold of `path` closed since its last part, from
+    /// bin `from`; a part from bin 0 starts the envelope over.
+    Partial { path: PathBuf, mode: Option<DownmixMode>, from: usize, sample_rate: u32, bins: Vec<Vec<Bin>> },
+}
+
+/// How often a whole-file pass sends the bins it has closed.
+const PARTIAL_EVERY: Duration = Duration::from_millis(200);
+
+/// Sends a pass's new bins at most every `PARTIAL_EVERY`.
+struct Parts<'a> {
+    emit: &'a dyn Fn(Done),
+    path: &'a Path,
+    mode: Option<DownmixMode>,
+    sent: usize,
+    last: Instant,
+}
+
+impl Parts<'_> {
+    fn offer(&mut self, builder: &PeaksBuilder, sample_rate: u32) {
+        if self.last.elapsed() < PARTIAL_EVERY {
+            return;
+        }
+        self.last = Instant::now();
+        let bins: Vec<Vec<Bin>> = builder.bins().iter().map(|ch| ch[self.sent..].to_vec()).collect();
+        let from = std::mem::replace(&mut self.sent, builder.bins().first().map(|b| b.len()).unwrap_or(0));
+        (self.emit)(Done::Partial { path: self.path.to_path_buf(), mode: self.mode, from, sample_rate, bins });
+    }
 }
 
 /// A thread with one request in flight: a newer request replaces a waiting one, and `run`
@@ -107,8 +129,9 @@ struct Latest<T> {
 }
 
 impl<T: Send + 'static> Latest<T> {
-    /// `run` returns what to deliver, if anything, once it is done with a request.
-    fn spawn(done_tx: Sender<Done>, ctx: egui::Context, run: impl Fn(T, &dyn Fn() -> bool) -> Option<Done> + Send + 'static) -> Arc<Latest<T>> {
+    /// `run` returns what to deliver, if anything, once it is done with a request, and can
+    /// deliver along the way through its third argument.
+    fn spawn(done_tx: Sender<Done>, ctx: egui::Context, run: impl Fn(T, &dyn Fn() -> bool, &dyn Fn(Done)) -> Option<Done> + Send + 'static) -> Arc<Latest<T>> {
         let slot = Arc::new(Latest { next: Mutex::new(None), wake: Condvar::new() });
         let s = slot.clone();
         std::thread::spawn(move || loop {
@@ -120,7 +143,11 @@ impl<T: Send + 'static> Latest<T> {
                 next.take().unwrap()
             };
             let superseded = || s.next.lock().unwrap().is_some();
-            let Some(done) = run(request, &superseded) else { continue };
+            let emit = |d: Done| {
+                let _ = done_tx.send(d);
+                ctx.request_repaint();
+            };
+            let Some(done) = run(request, &superseded, &emit) else { continue };
             if done_tx.send(done).is_err() {
                 return;
             }
@@ -143,8 +170,7 @@ pub struct Worker {
     /// The file the user is waiting on loads here, never behind the pool's preloads.
     selected: Arc<Latest<LoadRequest>>,
     analysis: Arc<Latest<(PathBuf, Option<Arc<Peaks>>)>>,
-    level: Arc<Latest<(PathBuf, ExportPreset)>>,
-    fold: Arc<Latest<(PathBuf, Source, DownmixMode)>>,
+    fold: Arc<Latest<(PathBuf, Source, DownmixMode, bool)>>,
 }
 
 impl Worker {
@@ -184,20 +210,16 @@ impl Worker {
         }
         // A load always reports, even one a newer selection overtook: the window keeps it
         // in its cache, and counts the file as pending until it hears.
-        let selected = Latest::spawn(done_tx.clone(), ctx.clone(), |req: LoadRequest, _| Some(load_done(req)));
-        let analysis = Latest::spawn(done_tx.clone(), ctx.clone(), |(path, cached): (PathBuf, Option<Arc<Peaks>>), abort| {
-            let result = analyze(&path, cached, abort);
+        let selected = Latest::spawn(done_tx.clone(), ctx.clone(), |req: LoadRequest, _, _| Some(load_done(req)));
+        let analysis = Latest::spawn(done_tx.clone(), ctx.clone(), |(path, cached): (PathBuf, Option<Arc<Peaks>>), abort, emit| {
+            let result = analyze(&path, cached, abort, emit);
             (!abort()).then(|| Done::Analyzed(path, result.map_err(|e| format!("{e:#}"))))
         });
-        let level = Latest::spawn(done_tx.clone(), ctx.clone(), |(path, preset): (PathBuf, ExportPreset), abort| {
-            let result = hark_core::export::preview_level(&path, &preset, abort).map_err(|e| format!("{e:#}"));
-            (!abort()).then_some(Done::Level { path, preset, result })
+        let fold = Latest::spawn(done_tx, ctx, |(path, source, mode, measure): (PathBuf, Source, DownmixMode, bool), abort, emit| {
+            let result = fold(&path, &source, mode, measure, abort, emit).map_err(|e| format!("{e:#}"));
+            (!abort()).then_some(Done::Folded { path, mode, measure, result })
         });
-        let fold = Latest::spawn(done_tx, ctx, |(path, source, mode): (PathBuf, Source, DownmixMode), abort| {
-            let result = fold(&path, &source, mode, abort).map_err(|e| format!("{e:#}"));
-            (!abort()).then_some(Done::Folded { path, mode, result })
-        });
-        Worker { tx, rx, selected, analysis, level, fold }
+        Worker { tx, rx, selected, analysis, fold }
     }
 
     pub fn send(&self, job: Job) {
@@ -216,14 +238,10 @@ impl Worker {
         self.analysis.put((path, cached));
     }
 
-    /// Asks for the gain the preview plays the file at under `preset`.
-    pub fn preview_level(&self, path: PathBuf, preset: ExportPreset) {
-        self.level.put((path, preset));
-    }
-
-    /// Asks for the file folded to one channel, for the preview's waveform.
-    pub fn fold(&self, path: PathBuf, source: Source, mode: DownmixMode) {
-        self.fold.put((path, source, mode));
+    /// Asks for the file folded to one channel, for the preview's waveform, and with
+    /// `measure` its loudness, for the preview's level.
+    pub fn fold(&self, path: PathBuf, source: Source, mode: DownmixMode, measure: bool) {
+        self.fold.put((path, source, mode, measure));
     }
 
     pub fn poll(&self) -> Vec<Done> {
@@ -271,7 +289,7 @@ fn load(path: &Path, device_rate: u32, stream_above_mb: f64, preview: Option<Exp
             },
             peaks,
             loudness: None,
-            prepared: None,
+            folded: None,
         });
     }
     let source = hark_core::decode(path)?;
@@ -284,12 +302,10 @@ fn load(path: &Path, device_rate: u32, stream_above_mb: f64, preview: Option<Exp
         }
     };
     let device = Source::Whole(Arc::new(if source.sample_rate == device_rate { source.clone() } else { hark_core::resample::resample(&source, device_rate)? }));
-    let prepared = preview.map(|p| Prepared {
-        mono: p.mono,
-        normalize: p.normalize,
-        folded: p.mono.and_then(|mode| fold(path, &device, mode, &|| false).ok()).map(Arc::new),
-        level: hark_core::export::preview_level_of(&source, &p).ok(),
-    });
+    let measure = preview.as_ref().is_some_and(|p| !matches!(p.normalize, Normalize::None));
+    let mono = preview.and_then(|p| p.mono);
+    let folded = mono.and_then(|mode| Some((mode, Arc::new(fold(path, &device, mode, measure, &|| false, &|_| {}).ok()?))));
+    let loudness = (measure && mono.is_none()).then(|| hark_core::loudness::measure(&source).ok()).flatten();
     Ok(Loaded {
         path: path.to_path_buf(),
         source_rate: source.sample_rate,
@@ -297,21 +313,24 @@ fn load(path: &Path, device_rate: u32, stream_above_mb: f64, preview: Option<Exp
         duration_secs: source.duration_secs(),
         source: device,
         peaks: Some(Arc::new(peaks)),
-        loudness: None,
-        prepared,
+        loudness,
+        folded,
     })
 }
 
 /// One pass over a streamed file for its peaks (unless cached) and loudness, holding only a
 /// packet at a time; gives up as soon as `abort` says so.
-fn analyze(path: &Path, cached: Option<Arc<Peaks>>, abort: &dyn Fn() -> bool) -> anyhow::Result<(Arc<Peaks>, Option<Loudness>)> {
+fn analyze(path: &Path, cached: Option<Arc<Peaks>>, abort: &dyn Fn() -> bool, emit: &dyn Fn(Done)) -> anyhow::Result<(Arc<Peaks>, Option<Loudness>)> {
     let mut reader = hark_core::decode::Reader::open(path)?;
     let mut chunk = Vec::new();
     let mut builder = None;
     let mut meter = None;
+    let mut parts = Parts { emit, path, mode: None, sent: 0, last: Instant::now() };
     while reader.next_chunk(&mut chunk)? {
         if cached.is_none() {
-            builder.get_or_insert_with(|| hark_core::peaks::PeaksBuilder::new(reader.sample_rate, reader.channels, Peaks::DEFAULT_BIN)).push(&chunk);
+            let b = builder.get_or_insert_with(|| PeaksBuilder::new(reader.sample_rate, reader.channels, Peaks::DEFAULT_BIN));
+            b.push(&chunk);
+            parts.offer(b, reader.sample_rate);
         }
         if meter.is_none() {
             meter = hark_core::loudness::Meter::new(reader.channels, reader.sample_rate).ok();
@@ -336,26 +355,33 @@ fn analyze(path: &Path, cached: Option<Arc<Peaks>>, abort: &dyn Fn() -> bool) ->
     Ok((peaks, meter.and_then(|m| m.finish())))
 }
 
-fn fold(path: &Path, source: &Source, mode: DownmixMode, abort: &dyn Fn() -> bool) -> anyhow::Result<Folded> {
+fn fold(path: &Path, source: &Source, mode: DownmixMode, measure: bool, abort: &dyn Fn() -> bool, emit: &dyn Fn(Done)) -> anyhow::Result<Folded> {
     if let Source::Whole(pcm) = source {
         let mono = pcm.to_mono(mode);
-        return Ok(Folded { peaks: Arc::new(Peaks::from_pcm(&mono, Peaks::DEFAULT_BIN)), samples: Some(Arc::new(mono)) });
+        let loudness = if measure { Some(hark_core::loudness::measure(&mono)?) } else { None };
+        return Ok(Folded { peaks: Arc::new(Peaks::from_pcm(&mono, Peaks::DEFAULT_BIN)), samples: Some(Arc::new(mono)), loudness });
     }
     let mut reader = hark_core::decode::Reader::open(path)?;
     let channels = reader.channels as usize;
-    let mut builder = hark_core::peaks::PeaksBuilder::new(reader.sample_rate, 1, Peaks::DEFAULT_BIN);
+    let mut builder = PeaksBuilder::new(reader.sample_rate, 1, Peaks::DEFAULT_BIN);
+    let mut meter = if measure { Some(hark_core::loudness::Meter::new(1, reader.sample_rate)?) } else { None };
+    let mut parts = Parts { emit, path, mode: Some(mode), sent: 0, last: Instant::now() };
     let mut chunk = Vec::new();
     let mut folded = Vec::new();
     while reader.next_chunk(&mut chunk)? {
         folded.clear();
         folded.extend(chunk.chunks(channels).map(|f| mode.fold(f)));
         builder.push(&folded);
+        parts.offer(&builder, reader.sample_rate);
+        if let Some(m) = &mut meter {
+            m.push(&folded)?;
+        }
         chunk.clear();
         if abort() {
             anyhow::bail!("superseded");
         }
     }
-    Ok(Folded { peaks: Arc::new(builder.finish()), samples: None })
+    Ok(Folded { peaks: Arc::new(builder.finish()), samples: None, loudness: meter.and_then(|m| m.finish()) })
 }
 
 /// Scans every root, then matches orphaned marks; `progress` hears the phase a few times a

@@ -308,25 +308,14 @@ pub fn preview_level(path: &Path, preset: &ExportPreset, abort: &dyn Fn() -> boo
     if matches!(preset.normalize, Normalize::None) {
         return Ok(PreviewLevel::default());
     }
-    level_of(loudness::measure_file(path, preset.mono, abort)?, preset)
+    Ok(preview_level_from(&loudness::measure_file(path, preset.mono, abort)?, preset))
 }
 
-/// `preview_level` of audio already decoded.
-pub fn preview_level_of(pcm: &Pcm, preset: &ExportPreset) -> Result<PreviewLevel> {
-    if matches!(preset.normalize, Normalize::None) {
-        return Ok(PreviewLevel::default());
-    }
-    let l = match preset.mono {
-        Some(mode) => loudness::measure(&pcm.to_mono(mode))?,
-        None => loudness::measure(pcm)?,
-    };
-    level_of(l, preset)
-}
-
-fn level_of(l: Loudness, preset: &ExportPreset) -> Result<PreviewLevel> {
+/// `preview_level` from a measurement of the file folded as `preset` folds it.
+pub fn preview_level_from(l: &Loudness, preset: &ExportPreset) -> PreviewLevel {
     let mut level = PreviewLevel::default();
-    level.gain_db = normalize_gain(&preset.normalize, db_to_gain(l.sample_peak_dbfs), || Ok(l), &mut Measured::default(), &mut level.warnings)?;
-    Ok(level)
+    level.gain_db = normalize_gain(&preset.normalize, db_to_gain(l.sample_peak_dbfs), || Ok(*l), &mut Measured::default(), &mut level.warnings).unwrap_or_default();
+    level
 }
 
 /// Rebuilds the request an exported file carries, so it can be run again with changes.

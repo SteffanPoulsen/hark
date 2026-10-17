@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ExportPreset;
 use crate::decode::{is_audio_extension, probe, AudioInfo};
+use crate::loudness::Loudness;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct FileRecord {
@@ -25,11 +26,21 @@ pub struct FileRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub true_peak_dbfs: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_peak_dbfs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
     pub favorite: bool,
+}
+
+impl FileRecord {
+    /// The measurement the library holds, when it holds all of one. Only a clip shorter than
+    /// the 400 ms gating block measures momentarily, and those are measured from memory.
+    pub fn loudness(&self) -> Option<Loudness> {
+        Some(Loudness { integrated_lufs: self.lufs?, momentary: false, true_peak_dbfs: self.true_peak_dbfs?, sample_peak_dbfs: self.sample_peak_dbfs?, range_lu: None })
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -204,7 +215,8 @@ CREATE TABLE IF NOT EXISTS files (
     container TEXT,
     lufs REAL,
     true_peak REAL,
-    error TEXT
+    error TEXT,
+    sample_peak REAL
 );
 CREATE INDEX IF NOT EXISTS files_dir ON files(dir);
 CREATE INDEX IF NOT EXISTS files_hash ON files(hash);
@@ -225,7 +237,8 @@ DROP TABLE favorites_old;
 
 const SELECT: &str = "SELECT f.path, f.name, f.size, f.mtime_ns, f.hash, f.duration, f.sample_rate, f.channels, f.bits, f.codec, f.container, f.lufs, f.true_peak, f.error,
     (SELECT group_concat(tag, char(31)) FROM file_tags t WHERE t.hash = f.hash),
-    EXISTS(SELECT 1 FROM favorites v WHERE v.hash = f.hash AND v.project = :project)
+    EXISTS(SELECT 1 FROM favorites v WHERE v.hash = f.hash AND v.project = :project),
+    f.sample_peak
     FROM files f";
 
 impl Db {
@@ -256,6 +269,10 @@ impl Db {
             .any(|c| c == "project");
         if !has_project {
             conn.execute_batch(FAVORITES_BY_PROJECT)?;
+        }
+        let has_sample_peak = conn.prepare("PRAGMA table_info(files)")?.query_map([], |r| r.get::<_, String>(1))?.filter_map(|r| r.ok()).any(|c| c == "sample_peak");
+        if !has_sample_peak {
+            conn.execute_batch("ALTER TABLE files ADD COLUMN sample_peak REAL")?;
         }
         Ok(())
     }
@@ -294,6 +311,7 @@ impl Db {
             info,
             lufs: r.get(11)?,
             true_peak_dbfs: r.get(12)?,
+            sample_peak_dbfs: r.get(16)?,
             error: r.get(13)?,
             tags,
             favorite: r.get::<_, bool>(15)?,
@@ -464,7 +482,7 @@ impl Db {
                  VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, NULL, NULL, ?12)
                  ON CONFLICT(path) DO UPDATE SET dir=excluded.dir, name=excluded.name, size=excluded.size, mtime_ns=excluded.mtime_ns, hash=NULL,
                     duration=excluded.duration, sample_rate=excluded.sample_rate, channels=excluded.channels, bits=excluded.bits, codec=excluded.codec,
-                    container=excluded.container, lufs=NULL, true_peak=NULL, error=excluded.error",
+                    container=excluded.container, lufs=NULL, true_peak=NULL, sample_peak=NULL, error=excluded.error",
                 params![
                     key,
                     dir,
@@ -556,8 +574,8 @@ impl Db {
         Ok(())
     }
 
-    pub fn set_loudness(&self, path: &Path, lufs: f64, true_peak_dbfs: f64) -> Result<()> {
-        self.conn.execute("UPDATE files SET lufs = ?2, true_peak = ?3 WHERE path = ?1", params![path.to_string_lossy(), lufs, true_peak_dbfs])?;
+    pub fn set_loudness(&self, path: &Path, l: &Loudness) -> Result<()> {
+        self.conn.execute("UPDATE files SET lufs = ?2, true_peak = ?3, sample_peak = ?4 WHERE path = ?1", params![path.to_string_lossy(), l.integrated_lufs, l.true_peak_dbfs, l.sample_peak_dbfs])?;
         Ok(())
     }
 

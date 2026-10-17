@@ -23,7 +23,7 @@ use hark_core::pcm::DownmixMode;
 use hark_core::library::{CardState, ChannelClass, Query, Sort, SortKey};
 use hark_core::copies::CopyRequest;
 use hark_core::keys::Action;
-use hark_core::{Config, Db, ExportPreset, FileRecord, Loudness};
+use hark_core::{Config, Db, ExportPreset, FileRecord, Loudness, Peaks};
 
 use theme::Theme;
 use waveform::{WaveEvent, WaveState};
@@ -170,8 +170,13 @@ fn clip_key(c: &Clip) -> ClipKey {
     (c.start, c.end, c.looped, c.fade_in, c.fade_out, c.fade_shape, c.fold)
 }
 
-/// What a preview level depends on: the file, and the preset's channels and normalisation.
-type LevelKey = (PathBuf, Option<DownmixMode>, Normalize);
+/// An envelope a whole-file pass is building: the analysis of `path` (`mode` `None`) or its
+/// fold.
+struct Building {
+    path: PathBuf,
+    mode: Option<DownmixMode>,
+    peaks: Peaks,
+}
 
 /// A selection and fades asked for on the command line, applied once the opened file loads.
 #[derive(Default, Clone, Copy)]
@@ -279,14 +284,17 @@ struct App {
     preview: bool,
     /// The card as the database last stored it for this project.
     card_saved: Option<CardState>,
-    /// The preview's last known level and the last one asked for. A known level of the current
-    /// file stands in while a newer one for it is measured, so editing the preset never blanks
-    /// the wave.
-    level: Option<(LevelKey, PreviewLevel)>,
-    level_asked: Option<LevelKey>,
-    /// The last file folded as the preview hears it, and the last fold asked for.
+    /// The last file analysis was asked for: coming back to it does not start its pass over.
+    analysis_asked: Option<PathBuf>,
+    /// The last file folded as the preview hears it, and the last fold asked for, with whether
+    /// it was to measure.
     folded: Option<(PathBuf, DownmixMode, Arc<Folded>)>,
-    fold_asked: Option<(PathBuf, DownmixMode)>,
+    fold_asked: Option<(PathBuf, DownmixMode, bool)>,
+    /// At most one analysis and one fold, each as far as its pass has got. Each kind runs one
+    /// pass at a time, so a result of that kind ends whatever of it is still here.
+    building: Vec<Building>,
+    /// A whole-file pass that failed, shown in the wave until another file is chosen.
+    pass_error: Option<(PathBuf, String)>,
     transport_h: f32,
     /// Height the export card's content took on the last frame; the bottom panel is sized to it.
     export_card_h: f32,
@@ -394,10 +402,11 @@ impl App {
             takes: None,
             preview: true,
             card_saved: None,
-            level: None,
-            level_asked: None,
+            analysis_asked: None,
             folded: None,
             fold_asked: None,
+            building: Vec::new(),
+            pass_error: None,
             transport_h: 34.0,
             export_card_h: 380.0,
             export_state: ExportState::Idle,
@@ -710,30 +719,56 @@ impl App {
             self.wave.fade_in = r.fade_in.max(0.0);
             self.wave.fade_out = r.fade_out.max(0.0);
         }
-        let measured = l.loudness.is_some() || self.files.iter().find(|f| f.path == l.path).map(|f| f.lufs.is_some()).unwrap_or(false);
-        if l.peaks.is_none() || !measured {
-            self.worker.analyze(l.path.clone(), l.peaks.clone());
+        let recorded = self.record_of(&l.path).and_then(FileRecord::loudness).is_some();
+        if l.loudness.is_some() && !recorded {
+            self.record_loudness(&l.path, l.loudness);
         }
-        if let Some(p) = &l.prepared {
-            if let Some(level) = &p.level {
-                let key = (l.path.clone(), p.mono, p.normalize);
-                self.level = Some((key.clone(), level.clone()));
-                self.level_asked = Some(key);
-            }
-            if let (Some(mode), Some(f)) = (p.mono, &p.folded) {
-                self.folded = Some((l.path.clone(), mode, f.clone()));
-                self.fold_asked = Some((l.path.clone(), mode));
-            }
+        let measured = l.loudness.is_some() || recorded;
+        if (l.peaks.is_none() || !measured) && self.analysis_asked.as_ref() != Some(&l.path) {
+            self.worker.analyze(l.path.clone(), l.peaks.clone());
+            self.analysis_asked = Some(l.path.clone());
+        }
+        if let Some((mode, f)) = &l.folded {
+            self.folded = Some((l.path.clone(), *mode, f.clone()));
+            self.fold_asked = Some((l.path.clone(), *mode, f.loudness.is_some()));
+        }
+        if self.pass_error.as_ref().is_some_and(|(p, _)| *p != l.path) {
+            self.pass_error = None;
         }
         self.current = Some(l);
     }
 
-    /// The preview has neither a fold nor a level of the current file yet, where it wants one.
+    fn record_of(&self, path: &Path) -> Option<&FileRecord> {
+        self.files.iter().find(|f| f.path == path)
+    }
+
+    /// The preview still lacks the fold of the current file, or the measurement its level
+    /// comes from.
     fn preview_pending(&self) -> bool {
-        let Some(cur) = self.current.as_ref().filter(|_| self.preview) else { return false };
-        let fold = self.preset.mono.is_some() && self.folded_view().is_none();
-        let level = self.previewing_level() && !self.level.as_ref().is_some_and(|(k, _)| k.0 == cur.path);
-        fold || level
+        if self.current.is_none() || !self.preview {
+            return false;
+        }
+        (self.preset.mono.is_some() && self.folded_exact().is_none()) || (self.previewing_level() && self.preview_measurement().is_none())
+    }
+
+    /// The current file folded by the preset's own downmix.
+    fn folded_exact(&self) -> Option<&Arc<Folded>> {
+        let (cur, mode) = (self.current.as_ref()?, self.preset.mono?);
+        self.folded.as_ref().filter(|(p, m, _)| *p == cur.path && *m == mode).map(|(_, _, f)| f)
+    }
+
+    /// Loudness of the current file as the preset folds it: its fold's, measured with the fold
+    /// and under another downmix while the one asked for is built, or the file's own.
+    fn preview_measurement(&self) -> Option<Loudness> {
+        let cur = self.current.as_ref()?;
+        match self.preset.mono {
+            Some(_) => self.folded.as_ref().filter(|(p, _, _)| *p == cur.path).and_then(|(_, _, f)| f.loudness),
+            None => cur.loudness.or_else(|| self.record_of(&cur.path).and_then(FileRecord::loudness)),
+        }
+    }
+
+    fn preview_level(&self) -> Option<PreviewLevel> {
+        self.preview_measurement().filter(|_| self.previewing_level()).map(|l| hark_core::export::preview_level_from(&l, &self.preset))
     }
 
     /// The selection with its fades as a clip, or the whole file without one.
@@ -753,19 +788,13 @@ impl App {
     /// Asks the worker for what the preview of the current file needs and does not have yet.
     fn request_preview(&mut self) {
         let Some(cur) = self.current.as_ref().filter(|_| self.preview) else { return };
-        if !matches!(self.preset.normalize, Normalize::None) {
-            let key = (cur.path.clone(), self.preset.mono, self.preset.normalize);
-            if self.level_asked.as_ref() != Some(&key) {
-                self.worker.preview_level(cur.path.clone(), self.preset.clone());
-                self.level_asked = Some(key);
-            }
-        }
-        if let Some(mode) = self.preset.mono {
-            let key = (cur.path.clone(), mode);
-            if self.fold_asked.as_ref() != Some(&key) {
-                self.worker.fold(cur.path.clone(), cur.source.clone(), mode);
-                self.fold_asked = Some(key);
-            }
+        let Some(mode) = self.preset.mono else { return };
+        let measure = !matches!(self.preset.normalize, Normalize::None);
+        let have = self.folded_exact().map(|f| f.loudness.is_some() || !measure).unwrap_or(false);
+        let asked = |m: bool| self.fold_asked.as_ref() == Some(&(cur.path.clone(), mode, m));
+        if !have && !asked(true) && !asked(measure) {
+            self.worker.fold(cur.path.clone(), cur.source.clone(), mode, measure);
+            self.fold_asked = Some((cur.path.clone(), mode, measure));
         }
     }
 
@@ -780,17 +809,7 @@ impl App {
         if !self.previewing_level() {
             return self.gain_db as f64;
         }
-        match (&self.level, &self.current) {
-            (Some((key, l)), Some(cur)) if key.0 == cur.path => l.gain_db.unwrap_or(0.0),
-            _ => 0.0,
-        }
-    }
-
-    /// The current file folded as the preview hears it; under another downmix while the one
-    /// asked for is built.
-    fn folded_view(&self) -> Option<Arc<Folded>> {
-        let cur = self.current.as_ref().filter(|_| self.preview && self.preset.mono.is_some())?;
-        self.folded.as_ref().filter(|(p, _, _)| *p == cur.path).map(|(_, _, f)| f.clone())
+        self.preview_level().and_then(|l| l.gain_db).unwrap_or(0.0)
     }
 
     fn play(&mut self, from_secs: Option<f64>) {
@@ -1018,10 +1037,11 @@ impl App {
 
     fn record_loudness(&mut self, path: &Path, loudness: Option<Loudness>) {
         let Some(ld) = loudness else { return };
-        let _ = self.db.set_loudness(path, ld.integrated_lufs, ld.true_peak_dbfs);
+        let _ = self.db.set_loudness(path, &ld);
         if let Some(i) = self.files.iter().position(|f| f.path == path) {
             self.files[i].lufs = Some(ld.integrated_lufs);
             self.files[i].true_peak_dbfs = Some(ld.true_peak_dbfs);
+            self.files[i].sample_peak_dbfs = Some(ld.sample_peak_dbfs);
         }
     }
 
@@ -1049,32 +1069,48 @@ impl App {
                         Err(e) => self.set_status(format!("{}: {e}", path.display()), true),
                     }
                 }
-                Done::Analyzed(path, Err(e)) => self.set_status(format!("{}: {e}", path.display()), true),
-                Done::Analyzed(path, Ok((peaks, loudness))) => {
-                    self.record_loudness(&path, loudness);
-                    if let Some(old) = self.cache.get(&path) {
-                        let l = Arc::new(Loaded { path: old.path.clone(), source_rate: old.source_rate, channels: old.channels, duration_secs: old.duration_secs, source: old.source.clone(), peaks: Some(peaks), loudness, prepared: old.prepared.clone() });
-                        self.cache.insert(path.clone(), l.clone());
-                        if self.current.as_ref().map(|c| c.path == path).unwrap_or(false) {
-                            self.current = Some(l);
+                Done::Analyzed(path, result) => {
+                    self.building.retain(|b| b.mode.is_some());
+                    match result {
+                        Ok((peaks, loudness)) => {
+                            self.record_loudness(&path, loudness);
+                            let current = self.current.clone().filter(|c| c.path == path);
+                            if let Some(old) = self.cache.get(&path).cloned().or(current) {
+                                let l = Arc::new(Loaded { path: old.path.clone(), source_rate: old.source_rate, channels: old.channels, duration_secs: old.duration_secs, source: old.source.clone(), peaks: Some(peaks), loudness, folded: old.folded.clone() });
+                                if self.cache.contains_key(&path) {
+                                    self.cache.insert(path.clone(), l.clone());
+                                }
+                                if self.current.as_ref().is_some_and(|c| c.path == path) {
+                                    self.current = Some(l);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.set_status(format!("{}: {e}", path.display()), true);
+                            self.pass_error = Some((path, e));
                         }
                     }
                 }
-                Done::Level { path, preset, result } => {
-                    let key = (path.clone(), preset.mono, preset.normalize);
-                    if self.level_asked.as_ref() == Some(&key) {
-                        let level = result.unwrap_or_else(|e| {
-                            self.set_status(format!("Preview level of {}: {e}", path.display()), true);
-                            PreviewLevel::default()
-                        });
-                        self.level = Some((key, level));
-                    }
-                }
-                Done::Folded { path, mode, result } => {
-                    if self.fold_asked.as_ref() == Some(&(path.clone(), mode)) {
+                Done::Folded { path, mode, measure, result } => {
+                    self.building.retain(|b| b.mode.is_none());
+                    if self.fold_asked.as_ref() == Some(&(path.clone(), mode, measure)) {
                         match result {
                             Ok(f) => self.folded = Some((path, mode, Arc::new(f))),
-                            Err(e) => self.set_status(format!("Preview of {}: {e}", path.display()), true),
+                            Err(e) => {
+                                self.set_status(format!("Preview of {}: {e}", path.display()), true);
+                                self.pass_error = Some((path, e));
+                            }
+                        }
+                    }
+                }
+                Done::Partial { path, mode, from, sample_rate, bins } => {
+                    if from == 0 {
+                        self.building.retain(|b| b.mode.is_some() != mode.is_some());
+                        let channels = bins.len() as u16;
+                        self.building.push(Building { path, mode, peaks: Peaks { sample_rate, channels, bin_frames: Peaks::DEFAULT_BIN, total_frames: 0, bins } });
+                    } else if let Some(b) = self.building.iter_mut().find(|b| b.path == path && b.mode == mode && b.peaks.bins.first().map(|c| c.len()) == Some(from)) {
+                        for (have, new) in b.peaks.bins.iter_mut().zip(bins) {
+                            have.extend(new);
                         }
                     }
                 }
@@ -1931,10 +1967,6 @@ impl App {
                     meta.push_str("  ·  streaming");
                 }
                 ui.add(egui::Label::new(RichText::new(meta).color(self.theme.muted)).truncate());
-                if c.peaks.is_none() {
-                    ui.spinner();
-                    ui.label(RichText::new("Analysing").color(self.theme.muted));
-                }
                 if self.selected.is_some() {
                     if ui.available_width() >= chips_w {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.tag_chips(ui, true));
@@ -1942,13 +1974,6 @@ impl App {
                         chips_below = true;
                     }
                 }
-            } else if let Some(i) = self.selected {
-                if self.pending.contains(&self.files[i].path) {
-                    ui.spinner();
-                    ui.label(RichText::new("Loading").color(self.theme.muted));
-                }
-            } else {
-                ui.label(RichText::new("No file").color(self.theme.muted));
             }
         });
         if chips_below {
@@ -1960,23 +1985,47 @@ impl App {
         // The transport row wraps at narrow widths; the waveform leaves it the height it took on
         // the last frame.
         let wave_h = (ui.available_height() - self.transport_h - ui.spacing().item_spacing.y).max(80.0);
-        let pending = self.preview_pending();
-        let placeholder = match &self.current {
-            None => "no file",
-            Some(_) if pending => "Loading preview",
-            Some(_) => "Reading waveform",
+        // Whatever the wave still waits on is written across it, over the envelope as far as
+        // its pass has got, dimmed.
+        let mut status: Option<(String, bool)> = None;
+        let mut partial = None;
+        let (peaks, samples) = match &self.current {
+            None => {
+                let loading = self.selected.and_then(|i| self.files.get(i)).is_some_and(|f| self.pending.contains(&f.path));
+                status = Some(if loading { ("Loading".into(), true) } else { ("No file".into(), false) });
+                (None, None)
+            }
+            Some(c) => {
+                let fold = self.preset.mono.filter(|_| self.preview);
+                let done = match fold {
+                    Some(_) => self.folded_exact().map(|f| (f.peaks.clone(), f.samples.clone())),
+                    None => c.peaks.clone().map(|p| {
+                        let samples = match &c.source {
+                            Source::Whole(p) => Some(p.clone()),
+                            Source::File { .. } => None,
+                        };
+                        (p, samples)
+                    }),
+                };
+                match done {
+                    Some((p, s)) => (Some(p), s),
+                    None => {
+                        status = Some((if fold.is_some() { "Building preview" } else { "Analysing" }.into(), true));
+                        partial = self.building.iter().position(|b| b.path == c.path && b.mode == fold);
+                        let other_fold = self.folded.as_ref().filter(|(p, _, _)| fold.is_some() && *p == c.path).map(|(_, _, f)| f.peaks.clone());
+                        (other_fold.filter(|_| partial.is_none()), None)
+                    }
+                }
+            }
         };
-        let (peaks, samples) = match self.folded_view() {
-            _ if pending => (None, None),
-            Some(f) => (Some(f.peaks.clone()), f.samples.clone()),
-            None => (
-                self.current.as_ref().and_then(|c| c.peaks.clone()),
-                self.current.as_ref().and_then(|c| match &c.source {
-                    Source::Whole(p) => Some(p.clone()),
-                    Source::File { .. } => None,
-                }),
-            ),
-        };
+        if status.is_none() && self.preview_pending() {
+            status = Some(("Measuring level".into(), true));
+        }
+        if let (Some(c), Some((p, e))) = (&self.current, &self.pass_error) {
+            if *p == c.path && status.as_ref().is_some_and(|(_, busy)| *busy) {
+                status = Some((e.clone(), false));
+            }
+        }
         let colors = waveform::WaveColors {
             peak: self.theme.accent.gamma_multiply(0.55),
             rms: self.theme.accent.gamma_multiply(0.95),
@@ -1995,11 +2044,9 @@ impl App {
         if let Some(p) = self.player.as_ref().filter(|p| p.gain() != self.wave.gain) {
             p.set_gain(self.wave.gain);
         }
-        let level_hint = match &self.level {
-            Some((k, _)) if self.level_asked.as_ref() != Some(k) => "Previewing the preset's level: measuring the file".to_string(),
-            Some((_, l)) => std::iter::once("Previewing the preset's level".to_string()).chain(l.warnings.iter().cloned()).collect::<Vec<_>>().join("\n"),
-            None if self.level_asked.is_some() => "Previewing the preset's level: measuring the file".to_string(),
-            None => "Previewing the preset's level".to_string(),
+        let level_hint = match self.preview_level() {
+            Some(l) => std::iter::once("Previewing the preset's level".to_string()).chain(l.warnings).collect::<Vec<_>>().join("\n"),
+            None => "Previewing the preset's level: measuring the file".to_string(),
         };
         let mut event = WaveEvent::None;
         let mut wave_resp = None;
@@ -2007,7 +2054,9 @@ impl App {
             ui.spacing_mut().item_spacing.x = 8.0;
             let wave_w = ui.available_width() - FADER_W - 8.0;
             ui.allocate_ui_with_layout(egui::vec2(wave_w, wave_h), egui::Layout::top_down(egui::Align::Min), |ui| {
-                let (ev, resp) = waveform::show(ui, &mut self.wave, peaks.as_deref(), samples.as_deref(), duration, playhead, wave_h, placeholder, &colors);
+                let peaks = partial.map(|i| &self.building[i].peaks).or(peaks.as_deref());
+                let status = status.as_ref().map(|(text, busy)| (text.as_str(), *busy));
+                let (ev, resp) = waveform::show(ui, &mut self.wave, peaks, samples.as_deref(), duration, playhead, wave_h, status, &colors);
                 event = ev;
                 wave_resp = Some(resp);
             });
