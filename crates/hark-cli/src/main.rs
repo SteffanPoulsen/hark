@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use hark_core::audition::{Clip, Source};
-use hark_core::config::Root;
+use hark_core::config::{Normalize, Root};
 use hark_core::export::{ExportRequest, Selection};
 use hark_core::library::{ChannelClass, Query, Sort, SortKey};
 use hark_core::{Config, Db};
@@ -342,7 +342,6 @@ struct PresetValues {
 
 impl PresetValues {
     fn apply(&self, p: &mut hark_core::ExportPreset) -> Result<()> {
-        use hark_core::config::Normalize;
         if let Some(f) = self.format {
             p.format = f;
         }
@@ -614,7 +613,11 @@ fn run() -> Result<()> {
                     let Some(i) = config.roots().iter().position(|r| r.name == name) else { return Err(anyhow!("no folder {name}")) };
                     config.roots_mut().remove(i);
                     config.save_target()?;
-                    println!("removed {name}");
+                    if json {
+                        print_json(&config.roots())?;
+                    } else {
+                        println!("removed {name}");
+                    }
                 }
             }
         }
@@ -757,7 +760,11 @@ fn run() -> Result<()> {
             let db = open_db(&project)?;
             let hash = db.ensure_hash(&file)?;
             db.set_favorite(&hash, !off)?;
-            println!("{}: {}", file.display(), if off { "unmarked" } else { "★" });
+            if json {
+                print_json(&db.get(&file)?)?;
+            } else {
+                println!("{}: {}", file.display(), if off { "unmarked" } else { "★" });
+            }
         }
         Cmd::Tags { cmd } => {
             let mut config = load(&project)?;
@@ -844,7 +851,11 @@ fn run() -> Result<()> {
                     let a = find(&action)?;
                     config.keys.set(a, &chord).map_err(|e| anyhow!("{e}"))?;
                     config.save()?;
-                    println!("{} = {}", a.id(), config.keys.chord(a));
+                    if json {
+                        print_json(&serde_json::json!({ "action": a.id(), "label": a.label(), "chord": config.keys.chord(a), "default": a.default_chord() }))?;
+                    } else {
+                        println!("{} = {}", a.id(), config.keys.chord(a));
+                    }
                 }
                 KeysCmd::Reset { action } => {
                     match action {
@@ -864,13 +875,17 @@ fn run() -> Result<()> {
                     } else {
                         for (name, p) in &config.presets {
                             println!(
-                                "{:<10} {} {}bit {} {} {:?} → {}{}",
+                                "{:<10} {} {}bit {} {} {} → {}{}",
                                 name,
                                 p.format.extension(),
                                 p.bits,
                                 p.sample_rate.map(|r| format!("{r} Hz")).unwrap_or_else(|| "keep rate".into()),
                                 if p.mono.is_some() { "mono" } else { "keep ch" },
-                                p.normalize,
+                                match p.normalize {
+                                    Normalize::None => "keep level".to_string(),
+                                    Normalize::Peak { target_dbfs } => format!("peak {target_dbfs} dBFS"),
+                                    Normalize::Lufs { target_lufs, true_peak_ceiling_dbfs } => format!("{target_lufs} LUFS, ceiling {true_peak_ceiling_dbfs} dBTP"),
+                                },
                                 p.path_template,
                                 if name == &config.default_preset { "  (default)" } else { "" }
                             );
