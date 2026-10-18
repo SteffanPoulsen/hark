@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 pub enum Action {
     Play,
     PlayFromStart,
-    Stop,
     Favorite,
     Loop,
     Autoplay,
@@ -29,10 +28,9 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 15] = [
+    pub const ALL: [Action; 14] = [
         Action::Play,
         Action::PlayFromStart,
-        Action::Stop,
         Action::Favorite,
         Action::Loop,
         Action::Autoplay,
@@ -52,7 +50,6 @@ impl Action {
         match self {
             Action::Play => "play",
             Action::PlayFromStart => "play_from_start",
-            Action::Stop => "stop",
             Action::Favorite => "favorite",
             Action::Loop => "loop",
             Action::Autoplay => "autoplay",
@@ -76,7 +73,6 @@ impl Action {
         match self {
             Action::Play => "Play",
             Action::PlayFromStart => "Play from the start",
-            Action::Stop => "Stop",
             Action::Favorite => "Favorite",
             Action::Loop => "Loop",
             Action::Autoplay => "Autoplay",
@@ -96,7 +92,6 @@ impl Action {
         match self {
             Action::Play => "Play the selection or the whole file; stop when playing. With Shift, play again.",
             Action::PlayFromStart => "Play the file from its start.",
-            Action::Stop => "Stop playback.",
             Action::Favorite => "Toggle the file's favorite mark.",
             Action::Loop => "Toggle looping.",
             Action::Autoplay => "Toggle playing a file when it is selected.",
@@ -116,7 +111,6 @@ impl Action {
         match self {
             Action::Play => "Space",
             Action::PlayFromStart => "Enter",
-            Action::Stop => "Escape",
             Action::Favorite => "F",
             Action::Loop => "L",
             Action::Autoplay => "A",
@@ -127,7 +121,7 @@ impl Action {
             Action::NextTake => "ArrowRight",
             Action::Trim => "T",
             Action::Zoom => "Z",
-            Action::ClearSelection => "Delete",
+            Action::ClearSelection => "Escape",
             Action::Export => "E",
         }
     }
@@ -176,9 +170,18 @@ impl std::fmt::Display for Chord {
 }
 
 /// The chords that differ from the defaults.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct Keymap(BTreeMap<Action, String>);
+
+/// A binding of an action hark no longer has is dropped, so a config written by an older
+/// version still loads.
+impl<'de> Deserialize<'de> for Keymap {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Keymap, D::Error> {
+        let raw = BTreeMap::<String, String>::deserialize(d)?;
+        Ok(Keymap(raw.into_iter().filter_map(|(id, chord)| Some((Action::from_id(&id)?, chord))).collect()))
+    }
+}
 
 impl Keymap {
     pub fn chord(&self, action: Action) -> &str {
@@ -216,5 +219,18 @@ impl Keymap {
     pub fn conflicts(&self, action: Action) -> Vec<Action> {
         let chord = self.chord(action);
         Action::ALL.into_iter().filter(|&a| a != action && self.chord(a) == chord).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A config that binds an action since retired still loads, keeping its other bindings.
+    #[test]
+    fn retired_actions_are_dropped() {
+        let keys: Keymap = serde_json::from_str(r#"{"stop": "S", "export": "Ctrl+E"}"#).unwrap();
+        assert_eq!(keys.chord(Action::Export), "Ctrl+E");
+        assert_eq!(serde_json::to_string(&keys).unwrap(), r#"{"export":"Ctrl+E"}"#);
     }
 }

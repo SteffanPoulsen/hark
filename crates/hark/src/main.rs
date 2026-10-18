@@ -1478,7 +1478,7 @@ impl App {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() || self.key_capture.is_some() {
             return;
         }
         let n = self.files.len();
@@ -1526,9 +1526,6 @@ impl App {
         if fired(Action::PlayFromStart) {
             self.play(Some(0.0));
         }
-        if fired(Action::Stop) {
-            self.stop();
-        }
         if fired(Action::Favorite) {
             self.toggle_favorite();
         }
@@ -1552,7 +1549,8 @@ impl App {
         if fired(Action::Trim) {
             self.trim_selection();
         }
-        if fired(Action::ClearSelection) {
+        // Escape closes an open menu first; egui sees to that, and the selection stays.
+        if fired(Action::ClearSelection) && !egui::Popup::is_any_open(ctx) {
             self.wave.selection = None;
             self.wave.fade_in = 0.0;
             self.wave.fade_out = 0.0;
