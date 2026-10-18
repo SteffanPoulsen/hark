@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "hark"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2369,7 +2369,7 @@ dependencies = [
 
 [[package]]
 name = "hark-cli"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -2380,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "hark-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "blake3",
