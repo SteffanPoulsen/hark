@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ExportPreset;
-use crate::decode::{is_audio_extension, probe, AudioInfo};
+use crate::decode::{is_audio_extension, probe, AudioInfo, NoDecoder};
 use crate::loudness::Loudness;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -467,17 +467,18 @@ impl Db {
         Ok(self.conn.query_row("SELECT count(*) FROM files WHERE dir = ?1", params![dir.to_string_lossy()], |r| r.get::<_, i64>(0))? as usize)
     }
 
-    /// Walks `root`, probes new and changed files, and drops rows whose file is gone. A root
-    /// that cannot be reached is an error, not an empty folder: its rows stay as they are.
+    /// Walks `root`, probes new, changed and failed files, and drops rows whose file is gone or
+    /// has a codec hark cannot decode. A root that cannot be reached is an error, not an empty
+    /// folder: its rows stay as they are.
     pub fn scan(&mut self, root: &Path, mut progress: impl FnMut(&Path, usize)) -> Result<ScanReport> {
         if !root.is_dir() {
             anyhow::bail!("{} is not reachable; its files are kept as last seen", root.display());
         }
         let mut report = ScanReport::default();
         let (lo, hi) = below(root);
-        let mut known: std::collections::HashMap<String, (u64, i64)> = {
-            let mut stmt = self.conn.prepare("SELECT path, size, mtime_ns FROM files WHERE path >= ?1 AND path < ?2")?;
-            let rows = stmt.query_map(params![lo, hi], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?))))?;
+        let mut known: std::collections::HashMap<String, (u64, i64, bool)> = {
+            let mut stmt = self.conn.prepare("SELECT path, size, mtime_ns, error IS NOT NULL FROM files WHERE path >= ?1 AND path < ?2")?;
+            let rows = stmt.query_map(params![lo, hi], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?, r.get::<_, bool>(3)?))))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
         let tx = self.conn.transaction()?;
@@ -502,18 +503,30 @@ impl Db {
             let size = meta.len();
             let mtime_ns = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos() as i64).unwrap_or(0);
             let key = path.to_string_lossy().into_owned();
-            match known.remove(&key) {
-                Some((s, m)) if s == size && m == mtime_ns => continue,
-                Some(_) => report.updated += 1,
-                None => report.added += 1,
+            let row = known.remove(&key);
+            // A file that failed is probed again, in case this build reads it or knows to skip it.
+            if row.is_some_and(|(s, m, failed)| s == size && m == mtime_ns && !failed) {
+                continue;
             }
             let (info, error) = match probe(path) {
                 Ok(i) => (Some(i), None),
+                Err(e) if e.is::<NoDecoder>() => {
+                    if row.is_some() {
+                        tx.execute("DELETE FROM files WHERE path = ?1", params![key])?;
+                        report.removed += 1;
+                    }
+                    continue;
+                }
                 Err(e) => {
                     report.errors.push((path.to_path_buf(), format!("{e:#}")));
                     (None, Some(format!("{e:#}")))
                 }
             };
+            match row {
+                Some((s, m, _)) if s != size || m != mtime_ns => report.updated += 1,
+                Some(_) => {}
+                None => report.added += 1,
+            }
             let dir = path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             tx.execute(

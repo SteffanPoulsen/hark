@@ -61,17 +61,26 @@ fn open(path: &Path) -> Result<Opened> {
     Ok(Opened { track_id: track.id, time_base: track.time_base, frames: track.num_frames, reader, params, container })
 }
 
+/// A file whose codec hark has no decoder for: not audio as far as the library goes, so a
+/// scan passes over it.
+#[derive(Debug, thiserror::Error)]
+#[error("no decoder for {0}")]
+pub struct NoDecoder(pub String);
+
 fn codec_name(params: &symphonia::core::codecs::audio::AudioCodecParameters) -> String {
     symphonia::default::get_codecs()
         .get_audio_decoder(params.codec)
         .map(|d| d.codec.info.short_name.to_string())
-        .unwrap_or_else(|| format!("{}", params.codec))
+        .unwrap_or_else(|| format!("codec {}", params.codec))
 }
 
 /// Reads the header only. Duration comes from the container when it states one and from a
 /// full decode otherwise, which happens for MP3 streams without a length tag.
 pub fn probe(path: &Path) -> Result<AudioInfo> {
     let opened = open(path)?;
+    if symphonia::default::get_codecs().get_audio_decoder(opened.params.codec).is_none() {
+        return Err(NoDecoder(codec_name(&opened.params)).into());
+    }
     let sample_rate = opened.params.sample_rate.unwrap_or(0);
     let channels = opened.params.channels.as_ref().map(|c| c.count() as u16).unwrap_or(0);
     let duration_secs = match (opened.frames, sample_rate) {
