@@ -267,10 +267,15 @@ impl<'a> Check<'a> {
     }
 }
 
+/// What a menu check row adds to its text's width: the box, the gap and the insets.
+pub const CHECK_ROW_W: f32 = CHECK_BOX + CHECK_GAP + 2.0 * MENU_INSET;
+const CHECK_BOX: f32 = 18.0;
+const CHECK_GAP: f32 = 8.0;
+
 impl egui::Widget for Check<'_> {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
-        const BOX: f32 = 18.0;
-        const GAP: f32 = 8.0;
+        const BOX: f32 = CHECK_BOX;
+        const GAP: f32 = CHECK_GAP;
         let galley = self.text.into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, TextStyle::Button);
         let text_w = if galley.is_empty() { 0.0 } else { galley.size().x + GAP };
         let inset = if self.menu_row { MENU_INSET } else { 0.0 };
