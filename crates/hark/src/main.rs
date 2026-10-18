@@ -78,6 +78,12 @@ const TOP_BAR_H: f32 = 32.0;
 const MUTED: &str = "Every channel is muted; unmute one beside the wave";
 /// The channel strip's width; the transport starts past it, level with the wave.
 const STRIP_W: f32 = 22.0;
+/// The transport starts level with the wave, past the channel strip.
+const TRANSPORT_INDENT: f32 = STRIP_W + 8.0;
+const TRANSPORT_GROUPS: usize = 3;
+const TRANSPORT_ROW_GAP: f32 = 6.0;
+/// The wave gives way to the transport's rows down to this height.
+const WAVE_MIN_H: f32 = 120.0;
 /// Height of every control in the top bar and the transport row, so each reads as one line.
 const CONTROL_H: f32 = 28.0;
 /// Search results are cut here so typing stays quick; folder and favorites views are whole.
@@ -98,6 +104,30 @@ type ConfigStamp = (Option<std::time::SystemTime>, Option<std::time::SystemTime>
 fn config_stamp(config: &Config) -> ConfigStamp {
     let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     (modified(&hark_core::paths::config_file()), config.active.as_ref().and_then(|a| modified(&a.path)))
+}
+
+fn transport_button(ui: &mut egui::Ui, icon: &str, on: bool) -> egui::Response {
+    ui.add(egui::Button::new(theme::icon(icon).size(15.0)).selected(on).min_size(egui::vec2(CONTROL_H + 4.0, CONTROL_H)))
+}
+
+/// The transport's groups in rows of `width`: a group moves down whole, and one wider than a
+/// row has the row to itself.
+fn transport_rows(widths: [f32; TRANSPORT_GROUPS], sep: f32, width: f32) -> Vec<Vec<usize>> {
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0;
+    for (g, &w) in widths.iter().enumerate() {
+        match rows.last_mut() {
+            Some(row) if used + sep + w <= width => {
+                row.push(g);
+                used += sep + w;
+            }
+            _ => {
+                rows.push(vec![g]);
+                used = w;
+            }
+        }
+    }
+    rows
 }
 
 /// A path for display, with the home directory as `~`.
@@ -382,9 +412,15 @@ struct App {
     building: Vec<Building>,
     /// A whole-file pass that failed, shown in the wave until another file is chosen.
     pass_error: Option<(PathBuf, String)>,
-    transport_h: f32,
+    /// Widths the transport's groups took on the last frame, which place them in rows, and the
+    /// width of the separator between two groups on a row.
+    transport_w: [f32; TRANSPORT_GROUPS],
+    transport_sep_w: f32,
     /// Height the export card's content took on the last frame; the bottom panel is sized to it.
     export_card_h: f32,
+    /// Least height the wave card takes on the last frame: its header, the shortest wave and the
+    /// transport's rows. The bottom panel goes no lower, so the card never outgrows it.
+    wave_card_h: f32,
     /// What the export button reports: the write under way, or how the last one went.
     export_state: ExportState,
     /// Panel sizes and column widths go back to their defaults on the next frame.
@@ -513,8 +549,10 @@ impl App {
             fields_dragging: false,
             building: Vec::new(),
             pass_error: None,
-            transport_h: 34.0,
+            transport_w: [300.0, 380.0, 300.0],
+            transport_sep_w: 2.0 * theme::GAP,
             export_card_h: 380.0,
+            wave_card_h: 0.0,
             export_state: ExportState::Idle,
             reset_layout: false,
             zoom_pending: None,
@@ -2677,7 +2715,10 @@ impl App {
         let card = egui::Frame::new().fill(self.theme.surface).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(theme::CARD_PAD));
         // The gap between the cards is split between the two panels, so the resize handle on
         // the export panel's edge sits in the middle of it.
-        let export_max = (ui.available_width() - 420.0).max(EXPORT_CARD_W);
+        // The wave card stays wide enough for the transport's widest group.
+        let widest = self.transport_w.iter().copied().fold(0.0, f32::max);
+        let wave_card_min = TRANSPORT_INDENT + widest + 2.0 * theme::CARD_PAD as f32 + (theme::PAD / 2) as f32;
+        let export_max = (ui.available_width() - wave_card_min.max(420.0)).max(320.0);
         egui::Panel::right("export").resizable(true).default_size(EXPORT_CARD_W).size_range(320.0..=export_max).show_separator_line(false).frame(egui::Frame::new().inner_margin(Margin { left: theme::PAD / 2, right: 0, top: 0, bottom: 0 })).show(ui, |ui| {
             card.show(ui, |ui| {
                 ui.set_min_height(ui.available_height());
@@ -2749,9 +2790,17 @@ impl App {
         }
 
         ui.add_space(4.0);
-        // The transport row wraps at narrow widths; the waveform leaves it the height it took on
-        // the last frame.
-        let wave_h = (ui.available_height() - self.transport_h - ui.spacing().item_spacing.y).max(80.0);
+        // The transport's rows are settled before the wave, from this frame's width, so the wave
+        // gives them the room and the card keeps the panel's height.
+        let rows = transport_rows(self.transport_w, self.transport_sep_w, ui.available_width() - TRANSPORT_INDENT);
+        let transport_h = rows.len() as f32 * CONTROL_H + (rows.len() - 1) as f32 * TRANSPORT_ROW_GAP;
+        let above = ui.cursor().top() - ui.min_rect().top();
+        let wave_card_h = above + WAVE_MIN_H + ui.spacing().item_spacing.y + transport_h;
+        if (wave_card_h - self.wave_card_h).abs() > 0.5 {
+            self.wave_card_h = wave_card_h;
+            ui.ctx().request_repaint();
+        }
+        let wave_h = (ui.available_height() - transport_h - ui.spacing().item_spacing.y).max(WAVE_MIN_H);
         // Whatever the wave still waits on is written across it, over the envelope as far as
         // its pass has got, dimmed.
         let mut status: Option<(String, bool)> = None;
@@ -2939,19 +2988,11 @@ impl App {
             }
             WaveEvent::None => {}
         }
-        let row = ui
-            .horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.add_space(STRIP_W + 8.0);
-                ui.vertical(|ui| self.ui_transport(ui, playing, playhead, duration));
-            })
-            .response
-            .rect
-            .height();
-        if (row - self.transport_h).abs() > 0.5 {
-            self.transport_h = row;
-            ui.ctx().request_repaint();
-        }
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(TRANSPORT_INDENT);
+            ui.vertical(|ui| self.ui_transport(ui, &rows, playing, playhead, duration));
+        });
     }
 
     /// A toggle per channel of the file beside the wave, each level with its channel's lane:
@@ -3053,95 +3094,127 @@ impl App {
         }
     }
 
-    fn ui_transport(&mut self, ui: &mut egui::Ui, playing: bool, playhead: Option<f64>, duration: f64) {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().interact_size = egui::vec2(CONTROL_H, CONTROL_H);
-            ui.spacing_mut().button_padding = egui::vec2(8.0, 5.0);
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let icon_btn = |ui: &mut egui::Ui, icon: &str, on: bool| ui.add(egui::Button::new(theme::icon(icon).size(15.0)).selected(on).min_size(egui::vec2(CONTROL_H + 4.0, CONTROL_H)));
-            let group = |ui: &mut egui::Ui| {
-                ui.add_space(theme::GAP - ui.spacing().item_spacing.x);
-                ui.separator();
-                ui.add_space(theme::GAP - ui.spacing().item_spacing.x);
-            };
-            let play = if playing { icons::STOP } else { icons::PLAY };
-            if icon_btn(ui, play, false).on_hover_text("Play / stop (Space)").clicked() {
-                if playing {
-                    self.stop();
-                } else {
-                    self.play(None);
+    /// The transport under the wave, a group to a stretch of `rows` as `transport_rows` placed
+    /// them: playback, the selection and the fades.
+    fn ui_transport(&mut self, ui: &mut egui::Ui, rows: &[Vec<usize>], playing: bool, playhead: Option<f64>, duration: f64) {
+        ui.spacing_mut().item_spacing.y = TRANSPORT_ROW_GAP;
+        for row in rows {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().interact_size = egui::vec2(CONTROL_H, CONTROL_H);
+                ui.spacing_mut().button_padding = egui::vec2(8.0, 5.0);
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let mut right = None;
+                for &g in row {
+                    if let Some(right) = right {
+                        ui.add_space(theme::GAP - ui.spacing().item_spacing.x);
+                        ui.separator();
+                        ui.add_space(theme::GAP - ui.spacing().item_spacing.x);
+                        self.transport_sep_w = ui.cursor().left() - right;
+                    }
+                    // A group keeps its id on any row, so a field being dragged or typed in
+                    // carries on when the group moves.
+                    let rect = ui
+                        .push_id(("transport", g), |ui| {
+                            ui.horizontal(|ui| match g {
+                                0 => self.transport_playback(ui, playing, playhead),
+                                1 => self.transport_selection(ui, duration),
+                                _ => self.transport_fades(ui, duration),
+                            })
+                        })
+                        .response
+                        .rect;
+                    right = Some(rect.right());
+                    if (rect.width() - self.transport_w[g]).abs() > 0.5 {
+                        self.transport_w[g] = rect.width();
+                        ui.ctx().request_repaint();
+                    }
                 }
+            });
+        }
+    }
+
+    fn transport_playback(&mut self, ui: &mut egui::Ui, playing: bool, playhead: Option<f64>) {
+        let play = if playing { icons::STOP } else { icons::PLAY };
+        if transport_button(ui, play, false).on_hover_text("Play / stop (Space)").clicked() {
+            if playing {
+                self.stop();
+            } else {
+                self.play(None);
             }
-            if icon_btn(ui, icons::REPEAT, self.config.looping).on_hover_text(format!("Loop ({})", self.key_of(Action::Loop))).clicked() {
-                self.config.looping = !self.config.looping;
-                let _ = self.config.save();
-            }
-            if ui.add(egui::Button::new("Auto").selected(self.config.autoplay).min_size(egui::vec2(0.0, CONTROL_H))).on_hover_text(format!("Autoplay on selection ({})", self.key_of(Action::Autoplay))).clicked() {
-                self.config.autoplay = !self.config.autoplay;
-                let _ = self.config.save();
-            }
-            if icon_btn(ui, icons::EAR, self.preview).on_hover_text(format!("Preview export: hear and see the card's channels and level ({})", self.key_of(Action::Preview))).clicked() {
-                self.preview = !self.preview;
-            }
-            if icon_btn(ui, icons::ARROWS_LEFT_RIGHT, self.wave.reverse).on_hover_text(format!("Reverse the file ({}): heard, drawn and exported backwards; the selection stays on the same sound", self.key_of(Action::Reverse))).clicked() {
-                self.toggle_reverse();
-            }
-            let t = playhead.unwrap_or(0.0);
-            ui.add_sized(egui::vec2(52.0, CONTROL_H), egui::Label::new(RichText::new(waveform::fmt_time(t)).monospace().color(if playing { self.theme.text } else { self.theme.muted })));
-            group(ui);
-            ui.label(RichText::new("Sel").color(self.theme.muted));
-            let mut sel = self.wave.selection.unwrap_or((0.0, 0.0));
-            let had = self.wave.selection.is_some();
-            let a = ui.add(secs_field(&mut sel.0, duration));
-            let b = ui.add(secs_field(&mut sel.1, duration));
-            self.fields_dragging = a.dragged() || b.dragged();
-            if (a.changed() || b.changed()) && (had || sel.1 > sel.0) {
-                self.wave.selection = if sel.1 > sel.0 { Some(sel) } else { None };
-            }
-            if icon_btn(ui, icons::CARET_LEFT, false).on_hover_text(format!("Previous take ({})", self.key_of(Action::PreviousTake))).clicked() {
-                self.step_take(-1);
-            }
-            if icon_btn(ui, icons::CARET_RIGHT, false).on_hover_text(format!("Next take ({})", self.key_of(Action::NextTake))).clicked() {
-                self.step_take(1);
-            }
-            if icon_btn(ui, icons::ARROWS_IN_LINE_HORIZONTAL, false).on_hover_text(format!("Trim the selection to the sound ({}): what sits {} dB under its peak goes", self.key_of(Action::Trim), hark_core::pcm::TRIM_BELOW_PEAK_DB)).clicked() {
-                self.trim_selection();
-            }
-            if icon_btn(ui, icons::MAGNIFYING_GLASS_PLUS, false).on_hover_text(format!("Zoom to selection ({})", self.key_of(Action::Zoom))).clicked() {
-                self.wave.zoom_to_selection(duration);
-            }
-            if icon_btn(ui, icons::X, false).on_hover_text(format!("Clear the selection and its fades ({})", self.key_of(Action::ClearSelection))).clicked() {
-                self.clear_selection();
-            }
-            group(ui);
-            ui.label(RichText::new("Fade").color(self.theme.muted));
-            let fade_in = ui.add(secs_field(&mut self.wave.fade_in, duration));
-            if fade_in.changed() {
-                self.wave.touch_fade(waveform::Fade::In);
-            }
-            let fade_out = ui.add(secs_field(&mut self.wave.fade_out, duration));
-            if fade_out.changed() {
-                self.wave.touch_fade(waveform::Fade::Out);
-            }
-            self.fields_dragging |= fade_in.dragged() || fade_out.dragged();
-            egui::ComboBox::from_id_salt("fade-shape")
-                .width(64.0)
-                .selected_text(match self.wave.fade_shape {
-                    hark_core::pcm::FadeShape::EqualPower => "Eq",
-                    hark_core::pcm::FadeShape::Linear => "Lin",
-                    hark_core::pcm::FadeShape::Logarithmic => "Log",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::EqualPower, "Equal power");
-                    ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::Linear, "Linear");
-                    ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::Logarithmic, "Logarithmic");
-                });
-            if icon_btn(ui, icons::X, false).on_hover_text("Clear fades").clicked() {
-                self.wave.fade_in = 0.0;
-                self.wave.fade_out = 0.0;
-            }
-            self.wave.clamp_fades(duration);
-        });
+        }
+        if transport_button(ui, icons::REPEAT, self.config.looping).on_hover_text(format!("Loop ({})", self.key_of(Action::Loop))).clicked() {
+            self.config.looping = !self.config.looping;
+            let _ = self.config.save();
+        }
+        if ui.add(egui::Button::new("Auto").selected(self.config.autoplay).min_size(egui::vec2(0.0, CONTROL_H))).on_hover_text(format!("Autoplay on selection ({})", self.key_of(Action::Autoplay))).clicked() {
+            self.config.autoplay = !self.config.autoplay;
+            let _ = self.config.save();
+        }
+        if transport_button(ui, icons::EAR, self.preview).on_hover_text(format!("Preview export: hear and see the card's channels and level ({})", self.key_of(Action::Preview))).clicked() {
+            self.preview = !self.preview;
+        }
+        if transport_button(ui, icons::ARROWS_LEFT_RIGHT, self.wave.reverse).on_hover_text(format!("Reverse the file ({}): heard, drawn and exported backwards; the selection stays on the same sound", self.key_of(Action::Reverse))).clicked() {
+            self.toggle_reverse();
+        }
+        let t = playhead.unwrap_or(0.0);
+        ui.add_sized(egui::vec2(52.0, CONTROL_H), egui::Label::new(RichText::new(waveform::fmt_time(t)).monospace().color(if playing { self.theme.text } else { self.theme.muted })));
+    }
+
+    fn transport_selection(&mut self, ui: &mut egui::Ui, duration: f64) {
+        ui.label(RichText::new("Sel").color(self.theme.muted));
+        let mut sel = self.wave.selection.unwrap_or((0.0, 0.0));
+        let had = self.wave.selection.is_some();
+        let a = ui.add(secs_field(&mut sel.0, duration));
+        let b = ui.add(secs_field(&mut sel.1, duration));
+        self.fields_dragging = a.dragged() || b.dragged();
+        if (a.changed() || b.changed()) && (had || sel.1 > sel.0) {
+            self.wave.selection = if sel.1 > sel.0 { Some(sel) } else { None };
+        }
+        if transport_button(ui, icons::CARET_LEFT, false).on_hover_text(format!("Previous take ({})", self.key_of(Action::PreviousTake))).clicked() {
+            self.step_take(-1);
+        }
+        if transport_button(ui, icons::CARET_RIGHT, false).on_hover_text(format!("Next take ({})", self.key_of(Action::NextTake))).clicked() {
+            self.step_take(1);
+        }
+        if transport_button(ui, icons::ARROWS_IN_LINE_HORIZONTAL, false).on_hover_text(format!("Trim the selection to the sound ({}): what sits {} dB under its peak goes", self.key_of(Action::Trim), hark_core::pcm::TRIM_BELOW_PEAK_DB)).clicked() {
+            self.trim_selection();
+        }
+        if transport_button(ui, icons::MAGNIFYING_GLASS_PLUS, false).on_hover_text(format!("Zoom to selection ({})", self.key_of(Action::Zoom))).clicked() {
+            self.wave.zoom_to_selection(duration);
+        }
+        if transport_button(ui, icons::X, false).on_hover_text(format!("Clear the selection and its fades ({})", self.key_of(Action::ClearSelection))).clicked() {
+            self.clear_selection();
+        }
+    }
+
+    fn transport_fades(&mut self, ui: &mut egui::Ui, duration: f64) {
+        ui.label(RichText::new("Fade").color(self.theme.muted));
+        let fade_in = ui.add(secs_field(&mut self.wave.fade_in, duration));
+        if fade_in.changed() {
+            self.wave.touch_fade(waveform::Fade::In);
+        }
+        let fade_out = ui.add(secs_field(&mut self.wave.fade_out, duration));
+        if fade_out.changed() {
+            self.wave.touch_fade(waveform::Fade::Out);
+        }
+        self.fields_dragging |= fade_in.dragged() || fade_out.dragged();
+        egui::ComboBox::from_id_salt("fade-shape")
+            .width(64.0)
+            .selected_text(match self.wave.fade_shape {
+                hark_core::pcm::FadeShape::EqualPower => "Eq",
+                hark_core::pcm::FadeShape::Linear => "Lin",
+                hark_core::pcm::FadeShape::Logarithmic => "Log",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::EqualPower, "Equal power");
+                ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::Linear, "Linear");
+                ui.selectable_value(&mut self.wave.fade_shape, hark_core::pcm::FadeShape::Logarithmic, "Logarithmic");
+            });
+        if transport_button(ui, icons::X, false).on_hover_text("Clear fades").clicked() {
+            self.wave.fade_in = 0.0;
+            self.wave.fade_out = 0.0;
+        }
+        self.wave.clamp_fades(duration);
     }
 
     /// Inside the export card: the preset and its values, where the file goes, the button.
@@ -3847,9 +3920,9 @@ impl eframe::App for App {
         egui::Panel::bottom("status").frame(egui::Frame::new().fill(self.theme.bg_deep).inner_margin(Margin::symmetric(pad, 4))).show(ui, |ui| {
             self.ui_status(ui);
         });
-        // The export card's natural height is the least the bottom panel can be; dragging it
+        // The taller card's least height is the least the bottom panel can be; dragging it
         // taller gives the waveform the room.
-        let bottom_min = self.export_card_h + 2.0 * (theme::CARD_PAD + pad) as f32;
+        let bottom_min = self.export_card_h.max(self.wave_card_h) + 2.0 * (theme::CARD_PAD + pad) as f32;
         let bottom_max = (ui.available_rect_before_wrap().height() - LIST_MIN_H).max(bottom_min);
         egui::Panel::bottom("bottom").resizable(true).default_size(bottom_min).size_range(bottom_min..=bottom_max).frame(egui::Frame::new().fill(self.theme.bg).inner_margin(Margin::same(pad))).show(ui, |ui| {
             self.ui_bottom(ui);
