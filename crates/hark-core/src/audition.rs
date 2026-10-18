@@ -329,18 +329,43 @@ struct Voice {
     pos: usize,
     /// Frames rendered since the voice started, for the declick ramp in.
     age: usize,
+    /// The gain heard when the bounds last moved and the frames left to glide from it to the
+    /// new envelope, so an edit never steps the level under the playhead.
+    glide: Option<(f32, usize)>,
 }
 
 impl Voice {
-    fn sample_gain(&self, declick: usize) -> f32 {
+    /// The gain the bounds give at the position: the fades, and the declick ramp before an
+    /// end that does not loop.
+    fn envelope(&self, declick: usize) -> f32 {
         let mut g = self.bounds.envelope(self.pos);
-        if self.age < declick {
-            g *= self.age as f32 / declick as f32;
-        }
         if !self.bounds.looped && self.pos + declick > self.bounds.end {
             g *= (self.bounds.end - self.pos) as f32 / declick as f32;
         }
+        match self.glide {
+            Some((from, left)) => g + (from - g) * left as f32 / declick as f32,
+            None => g,
+        }
+    }
+
+    fn sample_gain(&self, declick: usize) -> f32 {
+        let g = self.envelope(declick);
+        if self.age < declick {
+            return g * self.age as f32 / declick as f32;
+        }
         g
+    }
+
+    /// Frames of a ramp out that start from the gain the voice is heard at, which is below
+    /// full while it is still ramping in.
+    fn ramp_out(&self, declick: usize) -> usize {
+        self.age.min(declick)
+    }
+
+    fn step(&mut self) {
+        self.pos += 1;
+        self.age += 1;
+        self.glide = self.glide.and_then(|(from, left)| (left > 1).then_some((from, left - 1)));
     }
 }
 
@@ -360,7 +385,8 @@ impl Mixer {
     fn retire(&mut self) {
         if let Some(v) = self.voice.take() {
             if v.pos < v.bounds.end {
-                self.dying = Some((v, self.declick));
+                let left = v.ramp_out(self.declick);
+                self.dying = Some((v, left));
             }
         }
     }
@@ -372,7 +398,7 @@ impl Mixer {
                     self.retire();
                     let bounds = bounds.within(&feed);
                     let pos = from.clamp(bounds.start, bounds.end);
-                    self.voice = Some(Voice { feed, bounds, pos, age: 0 });
+                    self.voice = Some(Voice { feed, bounds, pos, age: 0, glide: None });
                     self.shared.playing.store(true, Ordering::Relaxed);
                 }
                 Cmd::Stop => {
@@ -389,16 +415,23 @@ impl Mixer {
                 }
                 // The position stays where it is: a voice below a moved start runs on to the
                 // end and loops from the new start, and one past a moved end wraps at once.
-                // A changed fold, pick or direction crossfades: the voice as it was ramps out
-                // beside the reshaped one.
+                // A changed fold, pick or direction, or that wrap, crossfades: the voice as it
+                // was ramps out beside the changed one. Any other move glides to the new fades.
                 Cmd::Bounds(bounds) => {
                     if let Some(v) = &mut self.voice {
                         if let Feed::Whole(p) = &v.feed {
-                            if v.bounds.reshapes(&bounds) {
-                                self.dying = Some((Voice { feed: Feed::Whole(p.clone()), bounds: v.bounds, pos: v.pos, age: v.age }, self.declick));
+                            let bounds = bounds.within(&v.feed);
+                            if v.bounds.reshapes(&bounds) || v.pos >= bounds.end {
+                                self.dying = Some((Voice { feed: Feed::Whole(p.clone()), bounds: v.bounds, pos: v.pos, age: v.age, glide: v.glide }, v.ramp_out(self.declick)));
                                 v.age = 0;
+                                v.glide = None;
+                                if v.pos >= bounds.end {
+                                    v.pos = if bounds.looped { bounds.start } else { bounds.end };
+                                }
+                            } else {
+                                v.glide = Some((v.envelope(self.declick), self.declick));
                             }
-                            v.bounds = bounds.within(&v.feed);
+                            v.bounds = bounds;
                         }
                     }
                 }
@@ -419,12 +452,12 @@ impl Mixer {
                 if *left == 0 || v.pos >= v.bounds.end {
                     break;
                 }
-                let g = gain(n) * v.bounds.envelope(v.pos) * (*left as f32 / self.declick as f32);
+                let g = gain(n) * v.envelope(self.declick) * (*left as f32 / self.declick as f32);
                 if !v.feed.mix_frame(v.pos, &mut take, g, &v.bounds, frame) {
                     starved = true;
                     break;
                 }
-                v.pos += 1;
+                v.step();
                 *left -= 1;
             }
             v.feed.commit(&take);
@@ -454,8 +487,7 @@ impl Mixer {
                 }
                 break;
             }
-            v.pos += 1;
-            v.age += 1;
+            v.step();
         }
         v.feed.commit(&take);
         self.shared.position.store(v.pos, Ordering::Relaxed);
@@ -1026,6 +1058,33 @@ mod tests {
         let mut out = vec![0.0f32; 512 * 2];
         b.mixer.fill(&mut out);
         assert!(out.chunks(2).enumerate().skip(1).all(|(k, f)| (f[0] - expected(48_000, len - 1 - start - k)).abs() < 1e-6));
+    }
+
+    /// A playing loop whose end is dragged out under its fade, then back past the playhead,
+    /// never steps the output.
+    #[test]
+    fn moving_the_end_of_a_playing_loop_never_steps() {
+        let mut b = Bench::new(48_000);
+        b.mixer.declick = 240;
+        let faded = |end| Bounds { fade_out: 2_400, ..bounds(0, end, true) };
+        b.tx.send(Cmd::Play(Feed::Whole(Arc::new(tone(48_000, 1.0))), faded(31_200), 30_000)).unwrap();
+        let mut out = vec![0.0f32; 512 * 2];
+        let mut left = Vec::new();
+        for k in 0..12 {
+            if (1..=4).contains(&k) {
+                b.tx.send(Cmd::Bounds(faded(31_200 + 800 * k))).unwrap();
+            }
+            if k == 6 {
+                let pos = b.mixer.shared.position.load(Ordering::Relaxed);
+                b.tx.send(Cmd::Bounds(faded(pos - 3_000))).unwrap();
+            }
+            b.mixer.fill(&mut out);
+            left.extend(out.chunks(2).map(|f| f[0]));
+        }
+        let slope = (2.0 * std::f64::consts::PI * TONE_HZ / 48_000.0) as f32 * AMP * 1.5;
+        for (k, w) in left.windows(2).enumerate() {
+            assert!((w[1] - w[0]).abs() < slope, "jump at frame {}: {} -> {}", k + 1, w[0], w[1]);
+        }
     }
 
     #[test]
