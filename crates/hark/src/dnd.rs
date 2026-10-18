@@ -63,7 +63,7 @@ impl DragOut {
             let wayland = match (display, window) {
                 (Ok(RawDisplayHandle::Wayland(d)), Ok(RawWindowHandle::Wayland(w))) => {
                     // SAFETY: winit's live wl_display and the window's wl_surface; both outlive
-                    // the app, which is created once for the process.
+                    // the dragger, which `shutdown` ends from the app's `on_exit`.
                     match unsafe { wayland::Dragger::new(d.display.as_ptr(), w.surface.as_ptr(), missed.clone()) } {
                         Ok(d) => Some(d),
                         Err(e) => {
@@ -142,6 +142,15 @@ impl DragOut {
         #[cfg(any(windows, target_os = "macos"))]
         {
             self.wait_cursor = None;
+        }
+    }
+
+    /// Lets go of the Wayland connection while winit's display is still live; called once,
+    /// as the app exits.
+    pub fn shutdown(&mut self) {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(d) = self.wayland.take() {
+            d.shutdown();
         }
     }
 

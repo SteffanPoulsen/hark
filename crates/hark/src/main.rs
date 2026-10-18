@@ -3714,6 +3714,10 @@ fn reveal(path: &Path) -> std::io::Result<()> {
 
 /// Two lines: what the file becomes, and what is done to the signal on the way.
 impl eframe::App for App {
+    fn on_exit(&mut self) {
+        self.drag.shutdown();
+    }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         if std::mem::take(&mut self.drag_took_release) {
             let (pos, modifiers) = ctx.input(|i| (i.pointer.interact_pos(), i.modifiers));

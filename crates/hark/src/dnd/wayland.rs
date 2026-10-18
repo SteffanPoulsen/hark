@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use wayland_client::backend::{Backend, ObjectId};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::wl_data_device_manager::DndAction;
-use wayland_client::protocol::{wl_buffer, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
+use wayland_client::protocol::{wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
 use wayland_client::{event_created_child, Connection, Dispatch, Proxy, QueueHandle, WEnum};
 
 use super::Image;
@@ -36,6 +36,8 @@ pub struct Dragger {
     dragging: Arc<AtomicBool>,
     entered: Entered,
     cursor: Mutex<Cursor>,
+    stop: Arc<AtomicBool>,
+    queue_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 /// The pointer picture `show_cursor` sets.
@@ -88,11 +90,34 @@ impl Dragger {
         }
         let id = unsafe { ObjectId::from_ptr(wl_surface::WlSurface::interface(), surface.cast()) }.map_err(|e| e.to_string())?;
         let surface = wl_surface::WlSurface::from_id(&conn, id).map_err(|e| e.to_string())?;
-        std::thread::Builder::new()
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let queue_thread = std::thread::Builder::new()
             .name("wl-drag".into())
-            .spawn(move || while queue.blocking_dispatch(&mut state).is_ok() {})
+            .spawn(move || {
+                while !stopping.load(Ordering::Acquire) {
+                    if queue.blocking_dispatch(&mut state).is_err() {
+                        // winit disconnected the display, which frees it, before `shutdown`:
+                        // the queue holds the connection, whose drop would destroy proxies on it.
+                        std::mem::forget((queue, state));
+                        return;
+                    }
+                }
+            })
             .map_err(|e| e.to_string())?;
-        Ok(Dragger { conn, qh, manager, compositor, shm, device, surface, press, dragging, entered, cursor: Mutex::default() })
+        Ok(Dragger { conn, qh, manager, compositor, shm, device, surface, press, dragging, entered, cursor: Mutex::default(), stop, queue_thread: Some(queue_thread) })
+    }
+
+    /// Ends the queue thread while the display is still live, so the connection goes with it
+    /// and not after winit has freed the display. A sync wakes the thread's blocking dispatch.
+    pub fn shutdown(mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.conn.display().sync(&self.qh, ());
+        if self.conn.flush().is_ok() {
+            if let Some(t) = self.queue_thread.take() {
+                let _ = t.join();
+            }
+        }
     }
 
     /// Drags `paths` from the window. The compositor only starts a drag for the press it is
@@ -187,6 +212,10 @@ impl Dragger {
         }
         Ok((surface, buffer))
     }
+}
+
+impl Dispatch<wl_callback::WlCallback, ()> for State {
+    fn event(_: &mut Self, _: &wl_callback::WlCallback, _: wl_callback::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
