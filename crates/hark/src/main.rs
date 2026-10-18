@@ -811,11 +811,14 @@ impl App {
         Some(Span { path: cur.path.clone(), secs: w.bounds(cur.duration_secs), fades, fold: self.preset.mono })
     }
 
-    /// The preset's level of the preview's span, once measured.
+    /// The level the preview's span has: the preset's level of it once measured, and until
+    /// then that of the measured span it is an edit of, so a drag and the measurement after
+    /// it change nothing until the result lands. `None` is the file's own level.
     fn selection_level(&self) -> Option<PreviewLevel> {
         let span = self.preview_span().filter(|_| self.previewing_level())?;
         let (measured, result) = self.span_level.as_ref()?;
-        (*measured == span).then(|| result.as_ref().ok()).flatten().map(|l| hark_core::export::preview_level_from(l, &self.preset))
+        let edit_of = measured.path == span.path && measured.fold == span.fold && measured.secs.0 < span.secs.1 && span.secs.0 < measured.secs.1;
+        (*measured == span || edit_of).then(|| result.as_ref().ok()).flatten().map(|l| hark_core::export::preview_level_from(l, &self.preset))
     }
 
     /// How the wave draws the selection: at its own level once measured, as far as the
@@ -823,25 +826,13 @@ impl App {
     /// the preview's level is off.
     fn wave_selection_level(&self) -> SelectionLevel {
         let Some(span) = self.preview_span().filter(|_| self.previewing_level() && self.wave.selection.is_some()) else { return SelectionLevel::Same };
-        let gain_of = |l: &Loudness| hark_core::pcm::db_to_gain(hark_core::export::preview_level_from(l, &self.preset).gain_db.unwrap_or(0.0));
-        let last = self.span_level.as_ref().filter(|(s, _)| s.path == span.path);
-        if let Some((s, result)) = last {
-            if *s == span {
-                return match result {
-                    Ok(l) => SelectionLevel::Gain(gain_of(l)),
-                    Err(_) => SelectionLevel::Same,
-                };
-            }
-        }
-        // Until this span is measured the selection keeps the level it had: an edit of the
-        // measured selection keeps that one's, a selection drawn elsewhere has the file's.
-        // Nothing shows through a drag or a measurement quick enough to land unseen; only one
-        // still running after `MEASURING_SHOWS_AFTER` shows itself.
-        let overlaps = |s: &Span| s.secs.0 < span.secs.1 && span.secs.0 < s.secs.1;
-        let kept = last.filter(|(s, _)| overlaps(s)).and_then(|(_, r)| r.as_ref().ok()).map(gain_of).unwrap_or(hark_core::pcm::db_to_gain(self.file_level_db()));
+        // The selection draws at the level it plays at. Nothing shows through a drag or a
+        // measurement quick enough to land unseen; only one still running after
+        // `MEASURING_SHOWS_AFTER` shows itself.
+        let gain = hark_core::pcm::db_to_gain(self.clip_level_db());
         match self.span_asked.as_ref().filter(|a| a.span == span && a.since.elapsed() >= MEASURING_SHOWS_AFTER) {
-            Some(_) => SelectionLevel::Measuring { gain: kept },
-            None => SelectionLevel::Gain(kept),
+            Some(_) => SelectionLevel::Measuring { gain },
+            None => SelectionLevel::Gain(gain),
         }
     }
 
@@ -2181,8 +2172,8 @@ impl App {
         if !self.editing() {
             self.wave.clip_fades = self.wave_clip_fades();
         }
-        if let Some(a) = self.span_asked.as_ref().filter(|a| a.since.elapsed() < MEASURING_SHOWS_AFTER) {
-            ui.ctx().request_repaint_after(MEASURING_SHOWS_AFTER - a.since.elapsed());
+        if let Some(left) = self.span_asked.as_ref().map(|a| MEASURING_SHOWS_AFTER.saturating_sub(a.since.elapsed())).filter(|left| !left.is_zero()) {
+            ui.ctx().request_repaint_after(left);
         }
         let play_gain = hark_core::pcm::db_to_gain(level_db);
         if let Some(p) = self.player.as_ref().filter(|p| p.gain() != play_gain) {
@@ -2190,11 +2181,12 @@ impl App {
         }
         let with_warnings = |head: &str, l: PreviewLevel| std::iter::once(head.to_string()).chain(l.warnings).collect::<Vec<_>>().join("\n");
         let of = if self.wave.selection.is_some() { "the selection" } else { "the file under its fades" };
-        let level_hint = match (self.preview_span().is_some(), self.selection_level(), self.preview_level()) {
-            (true, Some(l), _) => with_warnings(&format!("Previewing the preset's level of {of}"), l),
-            (true, None, _) => format!("Previewing the preset's level: measuring {of}"),
-            (false, _, Some(l)) => with_warnings("Previewing the preset's level", l),
-            (false, _, None) => "Previewing the preset's level: measuring the file".to_string(),
+        let settled = self.preview_span().is_some_and(|s| self.span_level.as_ref().is_some_and(|(m, _)| *m == s));
+        let level_hint = match (self.preview_span().is_some(), settled, self.selection_level(), self.preview_level()) {
+            (true, true, Some(l), _) => with_warnings(&format!("Previewing the preset's level of {of}"), l),
+            (true, _, _, _) => format!("Previewing the preset's level: measuring {of}"),
+            (false, _, _, Some(l)) => with_warnings("Previewing the preset's level", l),
+            (false, _, _, None) => "Previewing the preset's level: measuring the file".to_string(),
         };
         let mut event = WaveEvent::None;
         let mut wave_resp = None;

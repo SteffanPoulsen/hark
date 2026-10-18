@@ -17,6 +17,9 @@ pub struct Loudness {
     pub range_lu: Option<f64>,
 }
 
+/// The shortest material EBU R128 gates: one momentary block.
+const GATING_BLOCK_SECS: f64 = 0.4;
+
 /// An EBU R128 meter fed interleaved audio in any chunking.
 pub struct Meter {
     meter: EbuR128,
@@ -51,8 +54,18 @@ impl Meter {
 }
 
 pub fn measure(pcm: &Pcm) -> Result<Loudness> {
+    measure_with(pcm, &|| false)
+}
+
+/// `measure`, giving up between seconds of audio as soon as `abort` says so.
+pub fn measure_with(pcm: &Pcm, abort: &dyn Fn() -> bool) -> Result<Loudness> {
     let mut meter = Meter::new(pcm.channels, pcm.sample_rate)?;
-    meter.push(&pcm.samples)?;
+    for second in pcm.samples.chunks((pcm.sample_rate as usize * pcm.channels as usize).max(1)) {
+        meter.push(second)?;
+        if abort() {
+            anyhow::bail!("superseded");
+        }
+    }
     match meter.finish() {
         Some(l) => Ok(l),
         None => {
@@ -74,14 +87,20 @@ pub fn measure_file(path: &Path, span: Option<(f64, f64)>, fades: Fades, fold: O
         Some((a, b)) if rate > 0.0 => ((a.max(0.0) * rate).round() as u64, (b.max(0.0) * rate).round() as u64),
         _ => (0, u64::MAX),
     };
-    // A fade-out needs the clip's length; a file whose header does not state it gets none.
-    let total = if end == u64::MAX { reader.frames } else { Some(end - start) }.map(|n| n as usize).unwrap_or(usize::MAX);
+    // A fade-out needs the clip's length: the span's, cut to the length the header states, as
+    // an export's decode of it is; a header that states no length leaves the fade-out out.
+    let total = match (reader.frames, end) {
+        (Some(n), end) => end.min(n).saturating_sub(start) as usize,
+        (None, u64::MAX) => usize::MAX,
+        (None, end) => (end - start) as usize,
+    };
     // A seek may land late in some codecs, so it aims a second early and the frames before
     // the span are dropped, as `decode_span` does.
     let mut counted = if start > 0 { reader.seek(start.saturating_sub(reader.sample_rate as u64))? } else { 0 };
     let mut chunk = Vec::new();
     let mut shaped = Vec::new();
     let mut meter = None;
+    let mut pushed = 0u64;
     while reader.next_chunk(&mut chunk)? {
         let frames = (chunk.len() / channels.max(1)) as u64;
         let pos = reader.chunk_start.unwrap_or(counted);
@@ -112,13 +131,20 @@ pub fn measure_file(path: &Path, span: Option<(f64, f64)>, fades: Fades, fold: O
             None => meter.insert(Meter::new(if fold.is_some() { 1 } else { reader.channels }, reader.sample_rate)?),
         };
         m.push(samples)?;
+        pushed += (to - from) as u64;
         chunk.clear();
         if abort() {
             anyhow::bail!("superseded");
         }
     }
-    match meter.and_then(|m| m.finish()) {
+    match meter.as_ref().and_then(|m| m.finish()) {
         Some(l) => Ok(l),
+        // Long enough to gate and nothing above the gate: silence, read as `measure` reads it,
+        // without decoding a span that may be hours long.
+        None if pushed as f64 >= GATING_BLOCK_SECS * rate => {
+            let (true_peak_dbfs, sample_peak_dbfs) = meter.as_ref().map(Meter::peaks).unwrap_or((f64::NEG_INFINITY, f64::NEG_INFINITY));
+            Ok(Loudness { integrated_lufs: -70.0, momentary: true, true_peak_dbfs, sample_peak_dbfs, range_lu: None })
+        }
         None => {
             let mut pcm = match span {
                 Some((a, b)) => crate::decode::decode_span(path, a, b)?,
@@ -185,5 +211,17 @@ mod tests {
         let cut = measure(&cut).unwrap();
         assert!((faded.integrated_lufs - cut.integrated_lufs).abs() < 0.05, "faded: {} vs {} LUFS", faded.integrated_lufs, cut.integrated_lufs);
         assert!(plain.integrated_lufs - faded.integrated_lufs > 0.5, "the fades must take something off the level");
+    }
+
+    /// A silent span long enough to gate reads as `measure` reads silence, from the stream.
+    #[test]
+    fn silent_span_reads_as_silence() {
+        let pcm = Pcm { sample_rate: 48_000, channels: 2, samples: vec![0.0; 48_000 * 2 * 3] };
+        let path = std::env::temp_dir().join(format!("hark-silent-{}.wav", std::process::id()));
+        crate::wav::write(&path, &pcm, 24, false, b"{}", &Default::default()).unwrap();
+        let streamed = measure_file(&path, Some((0.5, 2.5)), Fades::default(), None, &|| false);
+        let _ = std::fs::remove_file(&path);
+        let (streamed, whole) = (streamed.unwrap(), measure(&pcm).unwrap());
+        assert_eq!((streamed.integrated_lufs, streamed.momentary), (whole.integrated_lufs, whole.momentary));
     }
 }

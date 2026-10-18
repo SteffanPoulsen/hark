@@ -415,7 +415,7 @@ fn measure_span(span: &Span, held: Option<Arc<Pcm>>, abort: &dyn Fn() -> bool) -
     if let Some(pcm) = held {
         let mut cut = pcm.slice_frames(pcm.frame_at(a), pcm.frame_at(b));
         span.fades.apply(&mut cut);
-        return hark_core::loudness::measure(&cut);
+        return hark_core::loudness::measure_with(&cut, abort);
     }
     hark_core::loudness::measure_file(&span.path, Some((a, b)), span.fades, span.fold, abort)
 }
