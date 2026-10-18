@@ -179,6 +179,20 @@ struct Asked {
     level: promise::Promise<Option<Level>>,
 }
 
+/// A copy being written: `span` of `source`, or all of it, bound for `output`.
+struct Writing {
+    source: PathBuf,
+    span: Option<(f64, f64)>,
+    output: PathBuf,
+}
+
+struct DeferredDrag {
+    output: PathBuf,
+    image: Option<dnd::Image>,
+    ready: Option<dnd::Ready>,
+    what: String,
+}
+
 /// How many span measurements the window keeps; each is a few hundred bytes.
 const RECENT_LEVELS: usize = 64;
 
@@ -313,6 +327,11 @@ struct App {
     /// Spans measured lately, newest first, so coming back to a file or a selection does not
     /// measure it again.
     recent_levels: VecDeque<Level>,
+    /// Copies being written, for the drag or the clipboard.
+    writing: Vec<Writing>,
+    /// A drag out of the selection asked for and not started yet: the frames it waits are
+    /// left, then the drag.
+    drag_deferred: Option<(u8, DeferredDrag)>,
     /// A selection or fade number field is being dragged, which edits the clip as a drag on
     /// the wave does.
     fields_dragging: bool,
@@ -434,6 +453,8 @@ impl App {
             span_level: None,
             span_asked: None,
             recent_levels: VecDeque::new(),
+            writing: Vec::new(),
+            drag_deferred: None,
             fields_dragging: false,
             building: Vec::new(),
             pass_error: None,
@@ -855,15 +876,33 @@ impl App {
     /// measurement has got until then, and as the rest of the file when nothing is selected or
     /// the preview's level is off.
     fn wave_selection_level(&self) -> SelectionLevel {
+        let gain = hark_core::pcm::db_to_gain(self.clip_level_db());
+        if self.wave.selection.is_some() && self.exporting(self.wave.selection) {
+            return SelectionLevel::Busy { gain, what: "Exporting" };
+        }
         let Some(span) = self.preview_span().filter(|_| self.previewing_level() && self.wave.selection.is_some()) else { return SelectionLevel::Same };
         // The selection draws at the level it plays at. Nothing shows through a drag or a
         // measurement quick enough to land unseen; only one still running after
         // `MEASURING_SHOWS_AFTER` shows itself.
-        let gain = hark_core::pcm::db_to_gain(self.clip_level_db());
         match self.span_asked.as_ref().filter(|a| a.span == span && a.since.elapsed() >= MEASURING_SHOWS_AFTER) {
-            Some(_) => SelectionLevel::Measuring { gain },
+            Some(_) => SelectionLevel::Busy { gain, what: "Measuring level" },
             None => SelectionLevel::Gain(gain),
         }
+    }
+
+    /// Flashes what was just written on the wave, when it is of the file on it.
+    fn flash_written(&mut self, source: &Path, span: Option<(f64, f64)>) {
+        if let Some(cur) = self.current.as_ref().filter(|c| c.path == source) {
+            self.wave.flash(span.unwrap_or((0.0, cur.duration_secs)));
+        }
+    }
+
+    /// Whether a copy or an export of `span` of the current file, or of all of it, is being
+    /// written.
+    fn exporting(&self, span: Option<(f64, f64)>) -> bool {
+        let Some(cur) = self.current.as_ref() else { return false };
+        let export = matches!(&self.export_state, ExportState::Writing { source, span: s } if *source == cur.path && *s == span);
+        export || self.writing.iter().any(|w| w.source == cur.path && w.span == span)
     }
 
     /// The selection with its fades as a clip, or the whole file without one.
@@ -1095,9 +1134,8 @@ impl App {
         }
         match self.export_request() {
             Some(Ok(req)) => {
-                let duration = self.current.as_ref().map(|c| c.duration_secs).unwrap_or(0.0);
-                let span = req.selection.map(|s| (s.start_secs, s.end_secs)).unwrap_or((0.0, duration));
-                self.export_state = ExportState::Writing { span };
+                let span = req.selection.map(|s| (s.start_secs, s.end_secs));
+                self.export_state = ExportState::Writing { source: req.source.clone(), span };
                 self.set_status(format!("Exporting {}", req.output_path().display()), false);
                 self.worker.send(Job::Export(Box::new(req)));
             }
@@ -1134,28 +1172,53 @@ impl App {
             Ok(plan) if plan.pending.is_none() => self.copy_out(vec![plan.output]),
             Ok(plan) => {
                 self.set_status(format!("Copying {}", tilde(&plan.output)), false);
-                self.worker.copy(plan, None, self.measuring());
+                self.write_copy(&req, plan, None);
             }
             Err(e) => self.set_status(format!("Copy: {e:#}"), true),
         }
     }
 
-    /// Starts dragging the selection out at once, the path decided; the file follows from the
-    /// worker, and the drop waits for it.
+    /// Queues a planned copy and shows it under way on the wave until it is written.
+    fn write_copy(&mut self, req: &CopyRequest, plan: hark_core::copies::Plan, ready: Option<dnd::Ready>) {
+        let span = req.selection.map(|s| (s.start_secs, s.end_secs));
+        self.writing.push(Writing { source: req.source.clone(), span, output: plan.output.clone() });
+        self.worker.copy(plan, ready, self.measuring());
+    }
+
+    /// Starts dragging the selection out, the path decided; the file follows from the worker,
+    /// and the drop waits for it.
     fn drag_selection(&mut self, image: Option<dnd::Image>) {
         let Some(req) = self.copy_request() else { return };
         let plan = match req.plan() {
             Ok(p) => p,
             Err(e) => return self.set_status(format!("Copy: {e:#}"), true),
         };
-        let ready = plan.pending.as_ref().map(|_| dnd::Ready::new());
         let what = tilde(&plan.output);
         let output = plan.output.clone();
-        // Windows waits for the file inside the drag call, so the job must already be queued.
-        if plan.pending.is_some() {
-            self.worker.copy(plan, ready.clone(), self.measuring());
+        if plan.pending.is_none() {
+            return self.drag_out(vec![output], image, None, &what);
         }
-        self.drag_out(vec![output], image, ready, &what);
+        let ready = Some(dnd::Ready::new());
+        // Windows waits for the file inside the drag call, so the job must already be queued.
+        self.write_copy(&req, plan, ready.clone());
+        // The drag waits two frames: one drawing the export under way and one showing it,
+        // since the native drag loop may keep the window from painting until the drop.
+        self.drag_deferred = Some((2, DeferredDrag { output, image, ready, what }));
+    }
+
+    /// Starts the drag `drag_selection` deferred once its frames have passed, if the button
+    /// that began it is still down.
+    fn start_deferred_drag(&mut self, ctx: &egui::Context) {
+        let Some((left, drag)) = self.drag_deferred.take() else { return };
+        if !ctx.input(|i| i.pointer.primary_down()) {
+            return;
+        }
+        if left > 0 {
+            self.drag_deferred = Some((left - 1, drag));
+            ctx.request_repaint();
+            return;
+        }
+        self.drag_out(vec![drag.output], drag.image, drag.ready, &drag.what);
     }
 
     /// Hands `paths` to the drop target of the drag the pointer is in the middle of.
@@ -1290,14 +1353,23 @@ impl App {
                         self.span_level = Some((span, result));
                     }
                 }
-                Done::Copied { result, dragged } => match result {
-                    Ok(_) if dragged => {}
-                    Ok(r) => self.copy_out(vec![r.output]),
-                    Err(e) => self.set_status(format!("Copy failed: {e}"), true),
-                },
+                Done::Copied { output, result, dragged } => {
+                    let written = self.writing.iter().position(|w| w.output == output).map(|i| self.writing.remove(i));
+                    match result {
+                        Ok(r) => {
+                            if let Some(w) = written {
+                                self.flash_written(&w.source, w.span);
+                            }
+                            if !dragged {
+                                self.copy_out(vec![r.output]);
+                            }
+                        }
+                        Err(e) => self.set_status(format!("Copy failed: {e}"), true),
+                    }
+                }
                 Done::Exported(result) => {
-                    let span = match std::mem::replace(&mut self.export_state, ExportState::Idle) {
-                        ExportState::Writing { span } => Some(span),
+                    let written = match std::mem::replace(&mut self.export_state, ExportState::Idle) {
+                        ExportState::Writing { source, span } => Some((source, span)),
                         _ => None,
                     };
                     match result {
@@ -1310,8 +1382,8 @@ impl App {
                             let shown = self.config.output_root().and_then(|root| r.output.strip_prefix(root).ok()).unwrap_or(&r.output);
                             self.set_status(format!("Exported {}  ·  {gain}", shown.display()), false);
                             self.export_state = ExportState::Done { at: Instant::now() };
-                            if let Some(span) = span {
-                                self.wave.flash(span);
+                            if let Some((source, span)) = written {
+                                self.flash_written(&source, span);
                             }
                         }
                         Err(e) => {
@@ -2194,6 +2266,9 @@ impl App {
                 }
             }
         };
+        if status.is_none() && self.wave.selection.is_none() && self.exporting(None) {
+            status = Some(("Exporting".into(), true));
+        }
         if status.is_none() && self.preview_pending() {
             status = Some(("Measuring level".into(), true));
         }
@@ -2877,7 +2952,8 @@ fn secs_field(v: &mut f64, max: f64) -> egui::DragValue<'_> {
 
 enum ExportState {
     Idle,
-    Writing { span: (f64, f64) },
+    /// `span` of `source`, or all of it.
+    Writing { source: PathBuf, span: Option<(f64, f64)> },
     Done { at: Instant },
     Failed { at: Instant },
 }
@@ -3026,6 +3102,7 @@ impl eframe::App for App {
             self.config.ui_zoom = zoom;
             let _ = self.config.save();
         }
+        self.start_deferred_drag(&ctx);
         self.handle_done();
         self.expire_status(&ctx);
         if self.list_dirty {

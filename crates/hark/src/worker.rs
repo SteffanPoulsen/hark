@@ -117,7 +117,7 @@ pub enum Done {
     Exported(Result<ExportResult, String>),
     /// `dragged` when the copy was for a drag, which is handed over by itself; otherwise the
     /// clipboard still wants it.
-    Copied { result: Result<ExportResult, String>, dragged: bool },
+    Copied { output: PathBuf, result: Result<ExportResult, String>, dragged: bool },
     /// One result per root, by name; a root that could not be scanned carries the reason.
     Scanned(Vec<(String, Result<ScanReport, String>)>),
     Folded { path: PathBuf, mode: DownmixMode, measure: bool, result: Result<Folded, String> },
@@ -282,7 +282,7 @@ impl Worker {
                         r.set(result.is_ok());
                     }
                     copying.add(-1);
-                    if done_tx.send(Done::Copied { result, dragged: ready.is_some() }).is_err() {
+                    if done_tx.send(Done::Copied { output: plan.output, result, dragged: ready.is_some() }).is_err() {
                         return;
                     }
                     ctx.request_repaint();

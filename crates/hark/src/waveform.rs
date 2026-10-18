@@ -72,8 +72,9 @@ pub enum SelectionLevel {
     /// The file's gain.
     Same,
     Gain(f32),
-    /// Being measured: drawn dimmed at `gain`, the level it had, until the result lands.
-    Measuring { gain: f32 },
+    /// Being measured or exported: drawn dimmed at `gain`, the level it had, with `what` is
+    /// under way, until the work is done.
+    Busy { gain: f32, what: &'static str },
 }
 
 /// The fades the clip draws under, and the span they belong to.
@@ -456,7 +457,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
             segments.push((v0, a, state.gain, false, false));
             match level {
                 SelectionLevel::Gain(g) => segments.push((a, b, g, false, true)),
-                SelectionLevel::Measuring { gain } => segments.push((a, b, gain, true, true)),
+                SelectionLevel::Busy { gain, .. } => segments.push((a, b, gain, true, true)),
                 SelectionLevel::Same => {}
             }
             segments.push((b, v1, state.gain, false, false));
@@ -501,11 +502,10 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
             painter.rect_filled(Rect::from_min_size(at, length.size()).expand2(Vec2::new(4.0, 1.0)), 2.0, visuals.faint_bg_color);
             painter.galley(at, length, colors.fade);
         }
-        // A measurement under way reads like the whole wave's status, inside the selection;
-        // one too narrow for the words gets the spinner alone.
-        if matches!(state.selection_level, SelectionLevel::Measuring { .. }) && status.is_none() {
+        // Work under way on the selection reads like the whole wave's status, inside the
+        // selection; one too narrow for the words gets the spinner alone.
+        if let (SelectionLevel::Busy { what: text, .. }, None) = (state.selection_level, status) {
             const SPINNER: f32 = 14.0;
-            let text = "Measuring level";
             let needed = SPINNER + 8.0 + painter.layout_no_wrap(text.to_string(), FontId::proportional(14.0), Color32::WHITE).size().x;
             if xb - xa >= needed + 8.0 {
                 draw_status(ui, &painter, Rect::from_min_max(Pos2::new(xa, rect.top()), Pos2::new(xb, rect.bottom())), text, true);
