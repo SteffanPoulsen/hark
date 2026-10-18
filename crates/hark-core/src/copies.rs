@@ -106,7 +106,16 @@ impl CopyRequest {
         let name = self.file_name();
         let mut output = self.folder.join(&name);
         let mut n = 2;
-        while output.exists() || part_of(&output).exists() {
+        // Creating the part file claims the name, so a second plan made before this one is
+        // written takes the next.
+        loop {
+            if !output.exists() {
+                match std::fs::OpenOptions::new().write(true).create_new(true).open(part_of(&output)) {
+                    Ok(_) => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e).with_context(|| format!("create {}", part_of(&output).display())),
+                }
+            }
             output = self.folder.join(format!("{} {n}.{}", name.trim_end_matches(self.extension()).trim_end_matches('.'), self.extension()));
             n += 1;
         }
@@ -154,7 +163,9 @@ pub fn finish(plan: &Plan) -> Result<ExportResult> {
             Ok(ExportResult { output: plan.output.clone(), origin, warnings: Vec::new() })
         }
         Some(export) => {
-            let result = crate::export::run(export)?;
+            let result = crate::export::run(export).inspect_err(|_| {
+                let _ = std::fs::remove_file(part_of(&plan.output));
+            })?;
             std::fs::rename(&result.output, &plan.output).with_context(|| format!("move {} to {}", result.output.display(), plan.output.display()))?;
             Ok(ExportResult { output: plan.output.clone(), ..result })
         }
@@ -197,4 +208,48 @@ pub fn clear(folder: &Path) -> Result<usize> {
         std::fs::remove_file(f).with_context(|| format!("remove {}", f.display()))?;
     }
     Ok(files.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two recipes for one span planned before either is written, as a drag that follows a
+    /// copy is, land under different names, and neither writes over the other.
+    #[test]
+    fn plans_in_flight_take_their_own_names() {
+        let dir = std::env::temp_dir().join(format!("hark-copies-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("hit.wav");
+        let pcm = crate::pcm::Pcm { sample_rate: 48_000, channels: 1, samples: (0..48_000).map(|i| (i as f32 * 0.05).sin() * 0.5).collect() };
+        crate::wav::write(&source, &pcm, 24, false, b"{}", &Default::default()).unwrap();
+        let request = |gain_db: f64| CopyRequest {
+            source: source.clone(),
+            root: None,
+            selection: Some(Selection { start_secs: 0.1, end_secs: 0.6 }),
+            fade_in_secs: 0.0,
+            fade_out_secs: 0.0,
+            preset: ExportPreset::default(),
+            gain_db,
+            tags: Vec::new(),
+            favorite: false,
+            folder: dir.join("copies"),
+            source_hash: None,
+        };
+        let quiet = request(-6.0).plan().unwrap();
+        let loud = request(0.0).plan().unwrap();
+        assert_ne!(quiet.output, loud.output);
+        finish(&quiet).unwrap();
+        finish(&loud).unwrap();
+        let gain_of = |p: &Path| crate::origin::read(p).unwrap().unwrap().gain_db;
+        assert_eq!((gain_of(&quiet.output), gain_of(&loud.output)), (-6.0, 0.0));
+
+        let mut missing = request(-3.0);
+        missing.source = dir.join("gone.wav");
+        let plan = missing.plan().unwrap();
+        assert!(finish(&plan).is_err());
+        assert!(!part_of(&plan.output).exists(), "a failed copy keeps its name claimed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
