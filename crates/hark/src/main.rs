@@ -179,6 +179,9 @@ struct Asked {
     level: promise::Promise<Option<Level>>,
 }
 
+/// How many span measurements the window keeps; each is a few hundred bytes.
+const RECENT_LEVELS: usize = 64;
+
 /// A measurement still running this long after it was asked for shows in the selection; a
 /// shorter one lands before anyone would see it.
 const MEASURING_SHOWS_AFTER: Duration = Duration::from_millis(150);
@@ -307,6 +310,9 @@ struct App {
     /// in flight.
     span_level: Option<(Span, Result<Level, String>)>,
     span_asked: Option<Asked>,
+    /// Spans measured lately, newest first, so coming back to a file or a selection does not
+    /// measure it again.
+    recent_levels: VecDeque<Level>,
     /// A selection or fade number field is being dragged, which edits the clip as a drag on
     /// the wave does.
     fields_dragging: bool,
@@ -427,6 +433,7 @@ impl App {
             fold_asked: None,
             span_level: None,
             span_asked: None,
+            recent_levels: VecDeque::new(),
             fields_dragging: false,
             building: Vec::new(),
             pass_error: None,
@@ -832,11 +839,16 @@ impl App {
     /// Every measurement held of the current file, for an export or a copy to take the one
     /// of exactly its audio instead of measuring it again.
     fn levels_held(&self) -> Vec<Level> {
-        let cur = self.current.as_ref();
-        let span = self.span_level.as_ref().and_then(|(_, r)| r.as_ref().ok());
+        let Some(cur) = self.current.as_ref() else { return Vec::new() };
         let folded = self.folded.as_ref().and_then(|(_, _, f)| f.loudness.as_ref());
-        let file = cur.and_then(|c| c.loudness.as_ref());
-        [span, folded, file].into_iter().flatten().filter(|l| cur.is_some_and(|c| c.path == l.span.path)).cloned().collect()
+        let file = cur.loudness.as_ref();
+        self.recent_levels.iter().chain(folded).chain(file).filter(|l| l.span.path == cur.path).cloned().collect()
+    }
+
+    /// A span measured lately, of the file as it is loaded now.
+    fn recent_level(&self, span: &Span) -> Option<&Level> {
+        let cur = self.current.as_ref()?;
+        self.recent_levels.iter().find(|l| l.span == *span && l.stamp == cur.stamp)
     }
 
     /// How the wave draws the selection: at its own level once measured, as far as the
@@ -886,6 +898,10 @@ impl App {
         let measured = self.span_level.as_ref().is_some_and(|(s, _)| *s == span);
         let asked = self.span_asked.as_ref().is_some_and(|a| a.span == span);
         if measured || asked {
+            return;
+        }
+        if let Some(level) = self.recent_level(&span).cloned() {
+            self.span_level = Some((span, Ok(level)));
             return;
         }
         // Samples in hand are the export's own only at the file's rate; otherwise the span is
@@ -1261,6 +1277,11 @@ impl App {
                     }
                 }
                 Done::SpanMeasured(span, result) => {
+                    if let Ok(level) = &result {
+                        self.recent_levels.retain(|l| l.span != level.span);
+                        self.recent_levels.push_front(level.clone());
+                        self.recent_levels.truncate(RECENT_LEVELS);
+                    }
                     if self.span_asked.as_ref().is_some_and(|a| a.span == span) {
                         self.span_asked = None;
                         if let Err(e) = &result {
