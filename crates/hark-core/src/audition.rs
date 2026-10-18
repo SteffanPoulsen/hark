@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -281,11 +281,16 @@ struct Shared {
 
 pub struct Player {
     _stream: cpal::Stream,
-    tx: Sender<Cmd>,
+    /// Bounded, so the channel's storage is allocated once here: the unbounded channel frees
+    /// its blocks on the receiving side, which is the callback.
+    tx: SyncSender<Cmd>,
     shared: Arc<Shared>,
     /// Set before the stream drops: cpal's PipeWire host reports a stream pinned to a node
     /// as "Device disconnected" when the stream itself closes.
     closing: Arc<AtomicBool>,
+    /// Every decoded file played, kept until the callback has let go of it, so the callback
+    /// never holds the last reference and never frees one.
+    held: std::sync::Mutex<Vec<Arc<Pcm>>>,
     pub sample_rate: u32,
     pub channels: u16,
     pub device_name: String,
@@ -469,6 +474,9 @@ fn device_name(device: &cpal::Device) -> String {
     device.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "output".into())
 }
 
+/// Commands the window can have queued for the callback; a full queue drops the newest.
+const COMMANDS: usize = 256;
+
 impl Player {
     /// Opens `device` by the id `outputs` lists, or the system default when it is `None` or
     /// not present, at `preferred_rate` when the device supports it.
@@ -492,7 +500,7 @@ impl Player {
             gain: AtomicU32::new(1.0f32.to_bits()),
             underruns: AtomicUsize::new(0),
         });
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(COMMANDS);
         let mixer = Mixer {
             rx,
             shared: shared.clone(),
@@ -516,6 +524,7 @@ impl Player {
             tx,
             shared,
             closing,
+            held: std::sync::Mutex::new(Vec::new()),
             sample_rate: config.sample_rate,
             channels: config.channels,
             device_name: format!("{device_name} ({host_name})"),
@@ -532,31 +541,50 @@ impl Player {
     pub fn play_from(&self, clip: Clip, from: usize) {
         let bounds = Bounds::of(&clip);
         let from = from.clamp(bounds.start, bounds.end);
+        self.release();
         let feed = match clip.source {
-            Source::Whole(pcm) => Feed::Whole(pcm),
+            Source::Whole(pcm) => {
+                self.hold(&pcm);
+                Feed::Whole(pcm)
+            }
             Source::File { path, source_rate, channels, .. } => Feed::Stream(start_stream(path, source_rate, channels, self.sample_rate, bounds, from)),
         };
         // Playing from the moment the command is sent, so a reader on this thread sees the
         // state it asked for before the callback has drained the channel.
         self.shared.playing.store(true, Ordering::Relaxed);
-        let _ = self.tx.send(Cmd::Play(feed, bounds, from));
+        let _ = self.tx.try_send(Cmd::Play(feed, bounds, from));
     }
 
     /// Gives the playing voice the clip's bounds and fades where it is, when its source is a
     /// whole `Pcm`. A streamed voice's bounds are fixed in its decoder: play it again instead.
     pub fn set_bounds(&self, clip: &Clip) {
-        let _ = self.tx.send(Cmd::Bounds(Bounds::of(clip)));
+        let _ = self.tx.try_send(Cmd::Bounds(Bounds::of(clip)));
     }
 
     pub fn stop(&self) {
         self.shared.playing.store(false, Ordering::Relaxed);
-        let _ = self.tx.send(Cmd::Stop);
+        let _ = self.tx.try_send(Cmd::Stop);
+        self.release();
+    }
+
+    /// Keeps `pcm` alive on this side while the callback may hold it, and lets go of files
+    /// the callback has finished with, which frees them here rather than there.
+    fn hold(&self, pcm: &Arc<Pcm>) {
+        let mut held = self.held.lock().unwrap();
+        held.retain(|p| Arc::strong_count(p) > 1);
+        if !held.iter().any(|p| Arc::ptr_eq(p, pcm)) {
+            held.push(pcm.clone());
+        }
+    }
+
+    fn release(&self) {
+        self.held.lock().unwrap().retain(|p| Arc::strong_count(p) > 1);
     }
 
     /// Moves a whole clip's playhead. A streamed clip seeks by `play_from`, which restarts its
     /// decoder at the new frame.
     pub fn seek(&self, frame: usize) {
-        let _ = self.tx.send(Cmd::Seek(frame));
+        let _ = self.tx.try_send(Cmd::Seek(frame));
     }
 
     pub fn set_gain(&self, gain: f32) {
@@ -754,7 +782,14 @@ fn build<T>(device: &cpal::Device, config: &cpal::StreamConfig, mut mixer: Mixer
 where
     T: SizedSample + FromSample<f32>,
 {
-    let mut scratch: Vec<f32> = Vec::new();
+    // Sized up front so the first callback does not allocate. The device's block is not
+    // promised anywhere, so this covers PipeWire's default quantum limit twice over; a block
+    // larger still grows it.
+    let block = match config.buffer_size {
+        cpal::BufferSize::Fixed(n) => n as usize,
+        cpal::BufferSize::Default => 16384,
+    };
+    let mut scratch: Vec<f32> = Vec::with_capacity(block * config.channels as usize);
     let stream = device.build_output_stream(
         *config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
@@ -799,7 +834,7 @@ mod tests {
 
     struct Bench {
         mixer: Mixer,
-        tx: Sender<Cmd>,
+        tx: SyncSender<Cmd>,
         device_rate: u32,
     }
 
@@ -811,7 +846,7 @@ mod tests {
                 gain: AtomicU32::new(1.0f32.to_bits()),
                 underruns: AtomicUsize::new(0),
             });
-            let (tx, rx) = channel();
+            let (tx, rx) = sync_channel(COMMANDS);
             let mixer = Mixer { rx, shared, voice: None, dying: None, channels: 2, declick: 1, gain: 1.0 };
             Bench { mixer, tx, device_rate }
         }
