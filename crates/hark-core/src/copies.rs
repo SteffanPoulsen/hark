@@ -16,12 +16,14 @@ use serde::Serialize;
 use crate::config::{Config, ExportPreset, Root};
 use crate::export::{ExportRequest, ExportResult, Selection};
 use crate::loudness::Level;
+use crate::pcm::Channels;
 
 #[derive(Clone, Debug)]
 pub struct CopyRequest {
     pub source: PathBuf,
     pub root: Option<Root>,
     pub selection: Option<Selection>,
+    pub channels: Option<Channels>,
     pub fade_in_secs: f64,
     pub fade_out_secs: f64,
     /// What the copy is written through; the path template is not used.
@@ -43,6 +45,7 @@ impl CopyRequest {
             source: source.to_path_buf(),
             root: config.root_of(source).cloned(),
             selection: None,
+            channels: None,
             fade_in_secs: 0.0,
             fade_out_secs: 0.0,
             preset,
@@ -59,8 +62,8 @@ impl CopyRequest {
         self.preset.format.extension()
     }
 
-    /// A copy already in the folder made from this very recipe: same source, selection, fades
-    /// and gain. The origin inside each candidate says; the source matches by content hash
+    /// A copy already in the folder made from this very recipe: same source, selection,
+    /// channels, fades and gain. The origin inside each candidate says; the source matches by content hash
     /// when one is known, else by path and size.
     pub fn existing(&self) -> Option<PathBuf> {
         let stem = self.file_name();
@@ -79,6 +82,7 @@ impl CopyRequest {
             };
             same_source
                 && o.selection.map(|s| (s.start_secs, s.end_secs)) == self.selection.map(|s| (s.start_secs, s.end_secs))
+                && o.channels == self.channels
                 && o.fade_in_secs == self.fade_in_secs
                 && o.fade_out_secs == self.fade_out_secs
                 && o.gain_db == self.gain_db
@@ -92,21 +96,24 @@ impl CopyRequest {
         self.source == other.source
             && self.folder == other.folder
             && self.selection == other.selection
+            && self.channels == other.channels
             && self.fade_in_secs == other.fade_in_secs
             && self.fade_out_secs == other.fade_out_secs
             && self.gain_db == other.gain_db
             && self.preset.clone().effective() == other.preset.clone().effective()
     }
 
-    /// `<stem> <in>-<out>.<ext>`, or `<stem>.<ext>` for the whole file; times in seconds,
-    /// since a colon is not a file name character everywhere.
+    /// `<stem> <in>-<out> ch<n>.<ext>`: the span, when there is one, in seconds, since a
+    /// colon is not a file name character everywhere; the channels kept, when not all are.
     pub fn file_name(&self) -> String {
-        let stem = self.source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "copy".into());
-        let ext = self.extension();
-        match self.selection {
-            Some(s) => format!("{stem} {:.3}-{:.3}.{ext}", s.start_secs, s.end_secs),
-            None => format!("{stem}.{ext}"),
+        let mut name = self.source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "copy".into());
+        if let Some(s) = self.selection {
+            name.push_str(&format!(" {:.3}-{:.3}", s.start_secs, s.end_secs));
         }
+        if let Some(c) = self.channels {
+            name.push_str(&format!(" ch{}", c.label()));
+        }
+        format!("{name}.{}", self.extension())
     }
 
     /// Where this copy lands, and the export that writes it unless a copy from the same recipe
@@ -139,6 +146,7 @@ impl CopyRequest {
             source: self.source.clone(),
             root: self.root.clone(),
             selection: self.selection,
+            channels: self.channels,
             trim: false,
             fade_in_secs: self.fade_in_secs,
             fade_out_secs: self.fade_out_secs,
@@ -254,6 +262,7 @@ mod tests {
             source: source.clone(),
             root: None,
             selection: Some(Selection { start_secs: 0.1, end_secs: 0.6 }),
+            channels: None,
             fade_in_secs: 0.0,
             fade_out_secs: 0.0,
             preset: ExportPreset::default(),

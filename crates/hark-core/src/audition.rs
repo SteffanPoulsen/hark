@@ -18,7 +18,7 @@ use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler};
 
 use crate::decode::Reader;
-use crate::pcm::{DownmixMode, FadeShape, Pcm};
+use crate::pcm::{Channels, DownmixMode, FadeShape, Pcm};
 
 const DECLICK_SECS: f64 = 0.005;
 /// How far ahead of the callback a stream is decoded; also the ring's capacity.
@@ -78,6 +78,8 @@ pub struct Clip {
     pub fade_in: usize,
     pub fade_out: usize,
     pub fade_shape: FadeShape,
+    /// The source's channels heard; `None` is all of them.
+    pub channels: Option<Channels>,
     /// Heard folded to one channel, as an export through a mono preset would be.
     pub fold: Option<DownmixMode>,
 }
@@ -85,7 +87,7 @@ pub struct Clip {
 impl Clip {
     pub fn whole(pcm: Arc<Pcm>) -> Clip {
         let end = pcm.frames();
-        Clip { source: Source::Whole(pcm), start: 0, end, looped: false, fade_in: 0, fade_out: 0, fade_shape: FadeShape::EqualPower, fold: None }
+        Clip { source: Source::Whole(pcm), start: 0, end, looped: false, fade_in: 0, fade_out: 0, fade_shape: FadeShape::EqualPower, channels: None, fold: None }
     }
 }
 
@@ -97,12 +99,19 @@ struct Bounds {
     fade_in: usize,
     fade_out: usize,
     fade_shape: FadeShape,
+    channels: Option<Channels>,
     fold: Option<DownmixMode>,
 }
 
 impl Bounds {
     fn of(clip: &Clip) -> Bounds {
-        Bounds { start: clip.start, end: clip.end, looped: clip.looped, fade_in: clip.fade_in, fade_out: clip.fade_out, fade_shape: clip.fade_shape, fold: clip.fold }
+        Bounds { start: clip.start, end: clip.end, looped: clip.looped, fade_in: clip.fade_in, fade_out: clip.fade_out, fade_shape: clip.fade_shape, channels: clip.channels, fold: clip.fold }
+    }
+
+    /// Whether going from `self` to `other` changes what is heard at the same position, which
+    /// a voice crosses over rather than steps.
+    fn reshapes(&self, other: &Bounds) -> bool {
+        self.fold != other.fold || self.channels != other.channels
     }
 
     /// Kept inside a whole source: the window may send the bounds of the file it now shows to
@@ -201,11 +210,12 @@ impl Feed {
         }
     }
 
-    /// Mixes the frame at `pos` (whole) or the next ring frame (stream) into `out` at gain
-    /// `g`, folded to every output channel alike when `fold` is set; `false` when the stream
-    /// has nothing for it yet.
-    fn mix_frame(&self, pos: usize, take: &mut Take, g: f32, fold: Option<DownmixMode>, out: &mut [f32]) -> bool {
+    /// Mixes the kept channels of the frame at `pos` (whole) or of the next ring frame
+    /// (stream) into `out` at gain `g`, folded to every output channel alike when `fold` is
+    /// set; `false` when the stream has nothing for it yet.
+    fn mix_frame(&self, pos: usize, take: &mut Take, g: f32, bounds: &Bounds, out: &mut [f32]) -> bool {
         let mut ring_frame = [0.0f32; MAX_STREAM_CHANNELS];
+        let mut picked = [0.0f32; Channels::MAX];
         let src: &[f32] = match self {
             Feed::Whole(p) => {
                 let ic = p.channels as usize;
@@ -224,7 +234,11 @@ impl Feed {
                 &ring_frame[..ic]
             }
         };
-        match fold {
+        let src = match bounds.channels.map(|c| c.take(src, &mut picked)) {
+            Some(n) if n > 0 => &picked[..n],
+            _ => src,
+        };
+        match bounds.fold {
             Some(mode) => {
                 let v = mode.fold(src) * g;
                 for o in out.iter_mut() {
@@ -368,11 +382,12 @@ impl Mixer {
                 }
                 // The position stays where it is: a voice below a moved start runs on to the
                 // end and loops from the new start, and one past a moved end wraps at once.
-                // A changed fold crossfades: the voice as it was ramps out beside the refolded one.
+                // A changed fold or pick crossfades: the voice as it was ramps out beside the
+                // reshaped one.
                 Cmd::Bounds(bounds) => {
                     if let Some(v) = &mut self.voice {
                         if let Feed::Whole(p) = &v.feed {
-                            if bounds.fold != v.bounds.fold {
+                            if v.bounds.reshapes(&bounds) {
                                 self.dying = Some((Voice { feed: Feed::Whole(p.clone()), bounds: v.bounds, pos: v.pos, age: v.age }, self.declick));
                                 v.age = 0;
                             }
@@ -398,7 +413,7 @@ impl Mixer {
                     break;
                 }
                 let g = gain(n) * v.bounds.envelope(v.pos) * (*left as f32 / self.declick as f32);
-                if !v.feed.mix_frame(v.pos, &mut take, g, v.bounds.fold, frame) {
+                if !v.feed.mix_frame(v.pos, &mut take, g, &v.bounds, frame) {
                     starved = true;
                     break;
                 }
@@ -424,7 +439,7 @@ impl Mixer {
                 }
             }
             let g = gain(n) * v.sample_gain(self.declick);
-            if !v.feed.mix_frame(v.pos, &mut take, g, v.bounds.fold, frame) {
+            if !v.feed.mix_frame(v.pos, &mut take, g, &v.bounds, frame) {
                 if v.feed.exhausted(&take) {
                     done = true;
                 } else if v.feed.ready() {
@@ -911,7 +926,7 @@ mod tests {
     }
 
     fn bounds(start: usize, end: usize, looped: bool) -> Bounds {
-        Bounds { start, end, looped, fade_in: 0, fade_out: 0, fade_shape: FadeShape::Linear, fold: None }
+        Bounds { start, end, looped, fade_in: 0, fade_out: 0, fade_shape: FadeShape::Linear, channels: None, fold: None }
     }
 
     #[test]
@@ -972,6 +987,24 @@ mod tests {
         }
         assert_eq!(b.mixer.shared.underruns.load(Ordering::Relaxed), 0);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// A clip that keeps one channel plays that channel on every output, and nothing of the
+    /// channel left out.
+    #[test]
+    fn a_picked_channel_plays_alone() {
+        let mut b = Bench::new(48_000);
+        let frames = 4_096;
+        let pcm = Arc::new(Pcm { sample_rate: 48_000, channels: 2, samples: (0..frames).flat_map(|f| [expected(48_000, f), 0.25]).collect() });
+        let pick = |kept: usize| Bounds { channels: Channels::pick([kept], 2), ..bounds(0, frames, false) };
+        let mut out = vec![0.0f32; 512 * 2];
+        b.tx.send(Cmd::Play(Feed::Whole(pcm.clone()), pick(1), 0)).unwrap();
+        b.mixer.fill(&mut out);
+        assert!(out[2..].iter().all(|s| *s == 0.25), "the right channel alone should reach both outputs");
+        b.tx.send(Cmd::Play(Feed::Whole(pcm), pick(0), 0)).unwrap();
+        b.mixer.fill(&mut out);
+        b.mixer.fill(&mut out);
+        assert!(out.chunks(2).enumerate().all(|(k, f)| f[0] == f[1] && (f[0] - expected(48_000, 512 + k)).abs() < 1e-6), "the left channel alone should reach both outputs");
     }
 
     #[test]

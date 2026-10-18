@@ -5,7 +5,7 @@
 
 use egui::epaint::{Mesh, Vertex, WHITE_UV};
 use egui::{Align2, Color32, CursorIcon, FontId, PointerButton, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
-use hark_core::pcm::{FadeShape, Fades};
+use hark_core::pcm::{Channels, FadeShape, Fades};
 use hark_core::peaks::sample_columns;
 use hark_core::{Pcm, Peaks};
 
@@ -42,6 +42,9 @@ pub struct WaveState {
     pub fade_in: f64,
     pub fade_out: f64,
     pub fade_shape: FadeShape,
+    /// The file's channels kept, picked beside the wave; the lanes of the rest draw dimmed.
+    /// `None` keeps them all.
+    pub channels: Option<Channels>,
     /// Linear gain the drawing is scaled by, so the picture follows the playback volume.
     pub gain: f32,
     /// How the selection draws against the rest of the file.
@@ -130,7 +133,7 @@ impl WaveState {
 
 impl Default for WaveState {
     fn default() -> Self {
-        WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), gain: 1.0, selection_level: SelectionLevel::Same, clip_fades: None, drag: None, flash: None, last_edge: None, last_fade: None }
+        WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), channels: None, gain: 1.0, selection_level: SelectionLevel::Same, clip_fades: None, drag: None, flash: None, last_edge: None, last_fade: None }
     }
 }
 
@@ -140,6 +143,7 @@ impl WaveState {
         self.selection = None;
         self.fade_in = 0.0;
         self.fade_out = 0.0;
+        self.channels = None;
         self.drag = None;
         self.last_edge = None;
         self.last_fade = None;
@@ -311,15 +315,30 @@ fn draw_lane_dividers(painter: &egui::Painter, rect: Rect, channels: usize, colo
     }
 }
 
+/// The wave's colours faded back, for a lane or a span that is not what will be heard.
+fn dimmed(c: &WaveColors) -> WaveColors {
+    WaveColors { peak: c.peak.gamma_multiply(0.2), rms: c.rms.gamma_multiply(0.2), ..*c }
+}
+
+/// The colours of lane `ch`: dimmed when `kept` leaves its channel out.
+fn lane_colors(colors: &WaveColors, kept: Option<Channels>, ch: usize) -> WaveColors {
+    if kept.is_some_and(|k| !k.contains(ch)) {
+        dimmed(colors)
+    } else {
+        *colors
+    }
+}
+
 /// With `samples`, the columns come from them instead of the peaks' bins. `gain_at` scales a
 /// column by the gain at its time, so the picture follows the level and the fades.
 #[allow(clippy::too_many_arguments)]
-fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, samples: Option<&Pcm>, rect: Rect, v0: f64, v1: f64, gain_at: &dyn Fn(f64) -> f32, colors: &WaveColors) {
+fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, samples: Option<&Pcm>, rect: Rect, v0: f64, v1: f64, gain_at: &dyn Fn(f64) -> f32, colors: &WaveColors, kept: Option<Channels>) {
     let channels = peaks.channels.max(1) as usize;
     let lane_h = rect.height() / channels as f32;
     let cols = rect.width().max(1.0) as usize;
     let gains: Vec<f32> = (0..cols).map(|i| gain_at(v0 + (i as f64 + 0.5) / cols as f64 * (v1 - v0))).collect();
     for ch in 0..channels {
+        let colors = &lane_colors(colors, kept, ch);
         let mid = rect.top() + lane_h * (ch as f32 + 0.5);
         let amp = lane_h * 0.46;
         painter.hline(rect.x_range(), mid, Stroke::new(1.0, colors.axis));
@@ -342,7 +361,8 @@ fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, samples: Option<&Pcm>, 
     draw_lane_dividers(painter, rect, channels, colors);
 }
 
-fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64, gain_at: &dyn Fn(f64) -> f32, colors: &WaveColors) {
+#[allow(clippy::too_many_arguments)]
+fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64, gain_at: &dyn Fn(f64) -> f32, colors: &WaveColors, kept: Option<Channels>) {
     let channels = pcm.channels.max(1) as usize;
     let lane_h = rect.height() / channels as f32;
     let rate = pcm.sample_rate as f64;
@@ -354,6 +374,7 @@ fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64
     let frames_per_px = (f1 - f0) as f64 / rect.width().max(1.0) as f64;
     let gains: Vec<f32> = (f0..f1).map(|f| gain_at(f as f64 / rate)).collect();
     for ch in 0..channels {
+        let colors = &lane_colors(colors, kept, ch);
         let mid = rect.top() + lane_h * (ch as f32 + 0.5);
         let amp = lane_h * 0.46;
         painter.hline(rect.x_range(), mid, Stroke::new(1.0, colors.axis));
@@ -446,8 +467,10 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
 
     // The wave itself.
     let frames_per_px = span * peaks.sample_rate as f64 / rect.width().max(1.0) as f64;
-    let dimmed = |c: &WaveColors| WaveColors { peak: c.peak.gamma_multiply(0.2), rms: c.rms.gamma_multiply(0.2), ..*c };
     let wave = if status.is_some() { dimmed(colors) } else { *colors };
+    // A folded wave is one lane, the fold of the kept channels, so only a wave of the file's
+    // own lanes dims the ones left out.
+    let kept = state.channels.filter(|_| peaks.channels > 1);
     // The wave goes down in segments when the selection has a gain of its own: the file at
     // its gain either side, the selection at its, dimmed while a measurement of it runs.
     // Each segment is the span, its gain, whether it is dimmed, and whether it is the clip,
@@ -475,8 +498,8 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
         let fades = state.clip_fades.filter(|_| clip);
         let gain_at = |t: f64| gain * fades.map_or(1.0, |f| f.gain(t));
         match samples {
-            Some(pcm) if frames_per_px * (pcm.sample_rate as f64 / peaks.sample_rate as f64) <= SAMPLE_VIEW_FRAMES_PER_PX => draw_samples(&painter, pcm, seg, s0, s1, &gain_at, &wave),
-            _ => draw_envelope(&painter, peaks, samples.filter(|_| frames_per_px < peaks.bin_frames as f64), seg, s0, s1, &gain_at, &wave),
+            Some(pcm) if frames_per_px * (pcm.sample_rate as f64 / peaks.sample_rate as f64) <= SAMPLE_VIEW_FRAMES_PER_PX => draw_samples(&painter, pcm, seg, s0, s1, &gain_at, &wave, kept),
+            _ => draw_envelope(&painter, peaks, samples.filter(|_| frames_per_px < peaks.bin_frames as f64), seg, s0, s1, &gain_at, &wave, kept),
         }
     }
     if let Some((text, busy)) = status {
@@ -665,9 +688,10 @@ pub struct GhostColors {
     pub hatch: Option<Color32>,
 }
 
-/// The drag picture: the span's envelope, all channels folded into one, on a rounded
-/// translucent card of 200 by 56 logical pixels, drawn at `scale` buffer pixels per logical.
-pub fn ghost(peaks: &Peaks, span: (f64, f64), gain_at: &dyn Fn(f64) -> f32, colors: &GhostColors, scale: i32) -> crate::dnd::Image {
+/// The drag picture: the span's envelope, its `kept` channels (all with `None`) folded into
+/// one, on a rounded translucent card of 200 by 56 logical pixels, drawn at `scale` buffer
+/// pixels per logical.
+pub fn ghost(peaks: &Peaks, span: (f64, f64), kept: Option<Channels>, gain_at: &dyn Fn(f64) -> f32, colors: &GhostColors, scale: i32) -> crate::dnd::Image {
     let (w, h) = (200 * scale as usize, 56 * scale as usize);
     let radius = 6.0 * scale as f32;
     let mut rgba = vec![0u8; w * h * 4];
@@ -689,7 +713,7 @@ pub fn ghost(peaks: &Peaks, span: (f64, f64), gain_at: &dyn Fn(f64) -> f32, colo
     let inset = 4 * scale as usize;
     let cols = w - 2 * inset;
     let mut merged = vec![hark_core::peaks::Bin { min: 0.0, max: 0.0, rms: 0.0 }; cols];
-    for ch in 0..peaks.channels as usize {
+    for ch in (0..peaks.channels as usize).filter(|&ch| kept.is_none_or(|k| k.contains(ch))) {
         for (m, b) in merged.iter_mut().zip(peaks.columns(ch, span.0, span.1, cols)) {
             m.min = m.min.min(b.min);
             m.max = m.max.max(b.max);

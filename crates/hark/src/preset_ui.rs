@@ -8,7 +8,7 @@ use hark_core::ExportPreset;
 
 pub const CONTROL_H: f32 = 26.0;
 const RATES: [u32; 5] = [22_050, 44_100, 48_000, 96_000, 192_000];
-const DOWNMIX: [DownmixMode; 4] = [DownmixMode::Average, DownmixMode::SumMinus3, DownmixMode::Left, DownmixMode::Right];
+const DOWNMIX: [DownmixMode; 2] = [DownmixMode::Average, DownmixMode::SumMinus3];
 const SHAPES: [FadeShape; 3] = [FadeShape::EqualPower, FadeShape::Linear, FadeShape::Logarithmic];
 
 pub fn rate_label(rate: Option<u32>) -> String {
@@ -80,6 +80,19 @@ pub fn channels(ui: &mut egui::Ui, id: &str, p: &mut ExportPreset) -> bool {
             changed |= pick(ui, &mut p.mono, Some(m), m.name());
         }
     });
+    changed
+}
+
+/// Whether the kept channels fold to one, by `law` when turned on; the preset editor sets
+/// the law.
+pub fn mono(ui: &mut egui::Ui, p: &mut ExportPreset, law: DownmixMode) -> bool {
+    let mut on = p.mono.is_some();
+    let how = p.mono.unwrap_or(law).name().trim_start_matches("Mono, ").to_string();
+    let hint = format!("Fold the channels kept to one: {how}. The presets in Settings set how.");
+    let changed = ui.add(crate::theme::Check::new(&mut on, RichText::new("Mono").size(13.0))).on_hover_text(hint).changed();
+    if changed {
+        p.mono = on.then_some(law);
+    }
     changed
 }
 

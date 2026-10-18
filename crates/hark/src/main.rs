@@ -20,7 +20,7 @@ use egui_phosphor::regular as icons;
 use hark_core::audition::{Clip, Player, Source};
 use hark_core::config::Normalize;
 use hark_core::export::{ExportRequest, PreviewLevel, Selection};
-use hark_core::pcm::{DownmixMode, Fades};
+use hark_core::pcm::{Channels, DownmixMode, Fades};
 use hark_core::library::{CardState, ChannelClass, Query, Sort, SortKey};
 use hark_core::copies::CopyRequest;
 use hark_core::keys::Action;
@@ -29,7 +29,7 @@ use hark_core::{Config, Db, ExportPreset, FileRecord, Loudness, Peaks};
 use theme::Theme;
 use waveform::{ClipFades, SelectionLevel, WaveEvent, WaveState};
 use hark_core::loudness::{Level, Span};
-use worker::{Done, Folded, Job, LoadRequest, Loaded, ScanPhase, Worker};
+use worker::{Done, Fold, Folded, Job, LoadRequest, Loaded, ScanPhase, Worker};
 
 /// Twenty minutes of stereo at 48 kHz, decoded audio and peaks together.
 const CACHE_BYTES: usize = 48_000 * 60 * 20 * 2 * 4;
@@ -115,6 +115,7 @@ fn main() -> eframe::Result {
             "--out" => region.end = secs(&mut args),
             "--fade-in" => region.fade_in = secs(&mut args).unwrap_or(0.0),
             "--fade-out" => region.fade_out = secs(&mut args).unwrap_or(0.0),
+            "--channels" => region.channels = args.next().and_then(|c| c.parse().ok()),
             "--settings" => {
                 settings = Some(match args.next().as_deref() {
                     Some("tags") => settings::Page::Tags,
@@ -129,7 +130,7 @@ fn main() -> eframe::Result {
                 })
             }
             "-h" | "--help" => {
-                println!("hark [--open <audio file or folder>] [--in <secs>] [--out <secs>] [--fade-in <secs>] [--fade-out <secs>] [--project <file.hark>] [--settings [general|tags|presets]]");
+                println!("hark [--open <audio file or folder>] [--in <secs>] [--out <secs>] [--fade-in <secs>] [--fade-out <secs>] [--channels <1,2,…>] [--project <file.hark>] [--settings [general|tags|presets]]");
                 return Ok(());
             }
             other => open = Some(PathBuf::from(other)),
@@ -169,10 +170,10 @@ fn main() -> eframe::Result {
     )
 }
 
-type ClipKey = (usize, usize, bool, usize, usize, hark_core::pcm::FadeShape, Option<DownmixMode>);
+type ClipKey = (usize, usize, bool, usize, usize, hark_core::pcm::FadeShape, Option<Channels>, Option<DownmixMode>);
 
 fn clip_key(c: &Clip) -> ClipKey {
-    (c.start, c.end, c.looped, c.fade_in, c.fade_out, c.fade_shape, c.fold)
+    (c.start, c.end, c.looped, c.fade_in, c.fade_out, c.fade_shape, c.channels, c.fold)
 }
 
 /// A span's measurement in flight, when it was asked for, and the level it promises.
@@ -217,21 +218,30 @@ const RECENT_LEVELS: usize = 64;
 /// shorter one lands before anyone would see it.
 const MEASURING_SHOWS_AFTER: Duration = Duration::from_millis(150);
 
-/// An envelope a whole-file pass is building: the analysis of `path` (`mode` `None`) or its
+/// An envelope a whole-file pass is building: the analysis of `path` (`fold` `None`) or its
 /// fold.
 struct Building {
     path: PathBuf,
-    mode: Option<DownmixMode>,
+    fold: Option<Fold>,
     peaks: Peaks,
 }
 
-/// A selection and fades asked for on the command line, applied once the opened file loads.
+/// The takes of a file, found in the channels kept.
+struct Takes {
+    path: PathBuf,
+    channels: Option<Channels>,
+    spans: Vec<(f64, f64)>,
+}
+
+/// A selection, fades and channels asked for on the command line, applied once the opened
+/// file loads.
 #[derive(Default, Clone, Copy)]
 struct OpenRegion {
     start: Option<f64>,
     end: Option<f64>,
     fade_in: f64,
     fade_out: f64,
+    channels: Option<Channels>,
 }
 
 enum ProjectAction {
@@ -325,8 +335,8 @@ struct App {
     current: Option<Arc<Loaded>>,
     wave: WaveState,
     open_region: Option<(PathBuf, OpenRegion)>,
-    /// The takes of the file they were found in, kept for the arrow keys.
-    takes: Option<(PathBuf, Vec<(f64, f64)>)>,
+    /// The takes last found, kept for the arrow keys.
+    takes: Option<Takes>,
     /// Hear and see the file as the export card would write it: its channels and its level.
     preview: bool,
     /// The card as the database last stored it for this project.
@@ -335,8 +345,8 @@ struct App {
     analysis_asked: Option<PathBuf>,
     /// The last file folded as the preview hears it, and the last fold asked for, with whether
     /// it was to measure.
-    folded: Option<(PathBuf, DownmixMode, Arc<Folded>)>,
-    fold_asked: Option<(PathBuf, DownmixMode, bool)>,
+    folded: Option<(PathBuf, Fold, Arc<Folded>)>,
+    fold_asked: Option<(PathBuf, Fold, bool)>,
     /// The selection's level under the preview: the last span measured, and the measurement
     /// in flight.
     span_level: Option<(Span, Result<Level, String>)>,
@@ -397,6 +407,8 @@ struct App {
     /// The bounds the voice was given when it was last played from the selection, which it
     /// follows while it plays; `None` after a play outside the selection.
     synced: Option<ClipKey>,
+    /// The clip played from outside the selection, which keeps its own bounds.
+    outside: Option<Clip>,
     /// Playback was running when the device was reopened; resume once the file reloads.
     play_on_load: bool,
     /// Output file name for the next export; empty takes the preset's template.
@@ -463,6 +475,7 @@ impl App {
             wave: WaveState::default(),
             open_region: None,
             synced: None,
+            outside: None,
             takes: None,
             preview: true,
             card_saved: None,
@@ -578,11 +591,12 @@ impl App {
             self.set_status("Takes need the file decoded whole; this one streams", true);
             return;
         };
-        if self.takes.as_ref().map(|(p, _)| *p != cur.path).unwrap_or(true) {
-            self.takes = Some((cur.path.clone(), pcm.takes()));
+        let kept = self.wave.channels;
+        if self.takes.as_ref().is_none_or(|t| t.path != cur.path || t.channels != kept) {
+            self.takes = Some(Takes { path: cur.path.clone(), channels: kept, spans: pcm.takes(kept) });
         }
         let duration = cur.duration_secs;
-        let takes = &self.takes.as_ref().expect("just found").1;
+        let takes = &self.takes.as_ref().expect("just found").spans;
         let eps = 1e-3;
         let next = match (self.wave.selection, dir > 0) {
             (None, true) => takes.first().copied(),
@@ -610,7 +624,7 @@ impl App {
             return;
         };
         let (start, end) = self.wave.selection.unwrap_or((0.0, cur.duration_secs));
-        match pcm.sound_span(start, end) {
+        match pcm.sound_span(start, end, self.wave.channels) {
             Some(span) => self.wave.selection = Some(span),
             None => self.set_status("Silent; nothing to trim to", true),
         }
@@ -791,6 +805,7 @@ impl App {
             }
             self.wave.fade_in = r.fade_in.max(0.0);
             self.wave.fade_out = r.fade_out.max(0.0);
+            self.wave.channels = r.channels.and_then(|c| Channels::pick(c.iter(), l.channels));
         }
         let recorded = self.record_of(&l.path).and_then(FileRecord::loudness).is_some();
         if l.loudness.is_some() && !recorded {
@@ -801,9 +816,9 @@ impl App {
             self.worker.analyze(l.path.clone(), l.peaks.clone());
             self.analysis_asked = Some(l.path.clone());
         }
-        if let Some((mode, f)) = &l.folded {
-            self.folded = Some((l.path.clone(), *mode, f.clone()));
-            self.fold_asked = Some((l.path.clone(), *mode, f.loudness.is_some()));
+        if let Some((fold, f)) = &l.folded {
+            self.folded = Some((l.path.clone(), *fold, f.clone()));
+            self.fold_asked = Some((l.path.clone(), *fold, f.loudness.is_some()));
         }
         if self.pass_error.as_ref().is_some_and(|(p, _)| *p != l.path) {
             self.pass_error = None;
@@ -821,7 +836,12 @@ impl App {
         if self.current.is_none() || !self.preview {
             return false;
         }
-        (self.preset.mono.is_some() && self.folded_exact().is_none()) || (self.previewing_level() && self.preview_measurement().is_none())
+        (self.preview_fold().is_some() && self.folded_exact().is_none()) || (self.previewing_level() && self.preview_measurement().is_none())
+    }
+
+    /// What the card folds the current file to: its kept channels, by the preset's downmix.
+    fn preview_fold(&self) -> Option<Fold> {
+        self.preset.mono.map(|mode| Fold { mode, channels: self.wave.channels })
     }
 
     /// The clip is being edited by a drag, on the wave or on a number field: what follows an
@@ -830,19 +850,26 @@ impl App {
         self.wave.dragging() || self.fields_dragging
     }
 
-    /// The current file folded by the preset's own downmix.
+    /// The current file's kept channels folded by the preset's own downmix.
     fn folded_exact(&self) -> Option<&Arc<Folded>> {
-        let (cur, mode) = (self.current.as_ref()?, self.preset.mono?);
-        self.folded.as_ref().filter(|(p, m, _)| *p == cur.path && *m == mode).map(|(_, _, f)| f)
+        let (cur, fold) = (self.current.as_ref()?, self.preview_fold()?);
+        self.folded.as_ref().filter(|(p, f, _)| *p == cur.path && *f == fold).map(|(_, _, f)| f)
     }
 
-    /// Loudness of the current file as the preset folds it: its fold's, measured with the fold
-    /// and under another downmix while the one asked for is built, or the file's own.
+    /// Loudness of the current file's kept channels as the preset folds them: its fold's,
+    /// measured with the fold and under another downmix while the one asked for is built; with
+    /// some channels muted and no fold, the whole file's measured with them muted; or the
+    /// file's own. Never a measurement of other channels.
     fn preview_measurement(&self) -> Option<Loudness> {
         let cur = self.current.as_ref()?;
-        match self.preset.mono {
-            Some(_) => self.folded.as_ref().filter(|(p, _, _)| *p == cur.path).and_then(|(_, _, f)| f.loudness.as_ref()).map(|l| l.loudness),
-            None => cur.loudness.as_ref().map(|l| l.loudness).or_else(|| self.record_of(&cur.path).and_then(FileRecord::loudness)),
+        let kept = self.wave.channels;
+        match (self.preset.mono, kept) {
+            (Some(_), _) => self.folded.as_ref().filter(|(p, f, _)| *p == cur.path && f.channels == kept).and_then(|(_, _, f)| f.loudness.as_ref()).map(|l| l.loudness),
+            (None, Some(_)) => {
+                let whole = |s: &Span| s.path == cur.path && s.secs.is_none() && s.channels == kept && s.fold.is_none() && s.fades.is_zero();
+                self.recent_levels.iter().find(|l| whole(&l.span) && l.stamp == cur.stamp).map(|l| l.loudness)
+            }
+            (None, None) => cur.loudness.as_ref().map(|l| l.loudness).or_else(|| self.record_of(&cur.path).and_then(FileRecord::loudness)),
         }
     }
 
@@ -851,14 +878,14 @@ impl App {
     }
 
     /// What the preview's level is of when the passes over the whole file cannot give it: the
-    /// selection, the whole file under its fades, or the whole file at a rate the preset
-    /// resamples it to; shaped as an export shapes it.
+    /// selection, the file's kept channels, the whole file under its fades, or the whole file
+    /// at a rate the preset resamples it to; shaped as an export shapes it.
     fn preview_span(&self) -> Option<Span> {
         let cur = self.current.as_ref()?;
         let w = &self.wave;
         let fades = Fades { in_secs: w.fade_in, out_secs: w.fade_out, shape: w.fade_shape };
-        let span = Span::new(&cur.path, w.selection, fades, self.preset.mono, self.preset.sample_rate, cur.source_rate);
-        (span.secs.is_some() || !fades.is_zero() || span.rate.is_some()).then_some(span)
+        let span = Span::new(&cur.path, w.selection, fades, self.preset.mono, self.preset.sample_rate, cur.source_rate).picking(w.channels);
+        (span.secs.is_some() || span.channels.is_some() || !fades.is_zero() || span.rate.is_some()).then_some(span)
     }
 
     /// Where a span starts and ends in seconds.
@@ -873,7 +900,7 @@ impl App {
         let span = self.preview_span().filter(|_| self.previewing_level())?;
         let (measured, result) = self.span_level.as_ref()?;
         let ((a, b), (c, d)) = (self.span_bounds(measured), self.span_bounds(&span));
-        let edit_of = measured.path == span.path && measured.fold == span.fold && measured.rate == span.rate && a < d && c < b;
+        let edit_of = measured.path == span.path && measured.channels == span.channels && measured.fold == span.fold && measured.rate == span.rate && a < d && c < b;
         (*measured == span || edit_of).then(|| result.as_ref().ok()).flatten().map(|l| hark_core::export::preview_level_from(&l.loudness, &self.preset))
     }
 
@@ -936,19 +963,20 @@ impl App {
             None => (0, total),
         };
         let fold = if self.preview { self.preset.mono } else { None };
-        Some(Clip { source: cur.source.clone(), start, end: end.max(start), looped: self.config.looping, fade_in: frames(self.wave.fade_in), fade_out: frames(self.wave.fade_out), fade_shape: self.wave.fade_shape, fold })
+        let w = &self.wave;
+        Some(Clip { source: cur.source.clone(), start, end: end.max(start), looped: self.config.looping, fade_in: frames(w.fade_in), fade_out: frames(w.fade_out), fade_shape: w.fade_shape, channels: w.channels, fold })
     }
 
     /// Asks the worker for what the preview of the current file needs and does not have yet.
     fn request_preview(&mut self) {
         let Some(cur) = self.current.as_ref().filter(|_| self.preview) else { return };
-        if let Some(mode) = self.preset.mono {
+        if let Some(fold) = self.preview_fold() {
             let measure = !matches!(self.preset.normalize, Normalize::None);
             let have = self.folded_exact().map(|f| f.loudness.is_some() || !measure).unwrap_or(false);
-            let asked = |m: bool| self.fold_asked.as_ref() == Some(&(cur.path.clone(), mode, m));
+            let asked = |m: bool| self.fold_asked.as_ref() == Some(&(cur.path.clone(), fold, m));
             if !have && !asked(true) && !asked(measure) {
-                self.worker.fold(cur, mode, measure);
-                self.fold_asked = Some((cur.path.clone(), mode, measure));
+                self.worker.fold(cur, fold, measure);
+                self.fold_asked = Some((cur.path.clone(), fold, measure));
             }
         }
         // The span's level waits for the selection and fades to rest: a drag would replace
@@ -964,10 +992,12 @@ impl App {
             return;
         }
         // Samples in hand are the export's own only at the file's rate; otherwise the span is
-        // read from the file as an export reads it.
+        // read from the file as an export reads it. A fold in hand is of the kept channels;
+        // the file's own samples are of them all.
         let held = match (&cur.source, span.fold) {
             (Source::Whole(pcm), _) if pcm.sample_rate != cur.source_rate || span.rate.is_some() => None,
             (Source::File { .. }, _) => None,
+            (Source::Whole(_), None) if span.channels.is_some() => None,
             (Source::Whole(pcm), None) => Some(pcm.clone()),
             (Source::Whole(_), Some(_)) => match self.folded_exact() {
                 Some(f) => f.samples.clone(),
@@ -1032,31 +1062,46 @@ impl App {
         let inside = from >= clip.start && from < clip.end;
         let clip = if inside { clip } else { Clip { start: from, end: total, fade_in: 0, fade_out: 0, ..clip } };
         self.synced = inside.then(|| clip_key(&clip));
+        self.outside = (!inside).then(|| clip.clone());
         player.play_from(clip, from);
     }
 
     /// A playing selection follows its edits: new bounds, fades and loop state reach the
-    /// voice as they are made. A streamed voice starts again where it is instead, once the
+    /// voice as they are made. Playback outside the selection keeps its bounds and follows the
+    /// channels kept and the fold. A streamed voice starts again where it is instead, once the
     /// drag that moved it ends.
     fn sync_clip(&mut self) {
-        let Some(key) = self.synced else { return };
         if !self.is_playing() {
             return;
         }
-        let (Some(player), Some(clip)) = (&self.player, self.selection_clip()) else { return };
-        let new = clip_key(&clip);
-        if new == key {
-            return;
-        }
+        let clip = match self.synced {
+            Some(key) => match self.selection_clip() {
+                Some(clip) if clip_key(&clip) != key => clip,
+                _ => return,
+            },
+            None => {
+                let Some(mut clip) = self.outside.clone() else { return };
+                let shape = (self.wave.channels, self.preset.mono.filter(|_| self.preview));
+                if (clip.channels, clip.fold) == shape {
+                    return;
+                }
+                (clip.channels, clip.fold) = shape;
+                clip
+            }
+        };
+        let Some(player) = &self.player else { return };
         if clip.source.is_streamed() {
             if self.editing() {
                 return;
             }
-            player.play_from(clip, player.position());
+            player.play_from(clip.clone(), player.position());
         } else {
             player.set_bounds(&clip);
         }
-        self.synced = Some(new);
+        match self.synced {
+            Some(_) => self.synced = Some(clip_key(&clip)),
+            None => self.outside = Some(clip),
+        }
     }
 
     fn stop(&self) {
@@ -1119,6 +1164,7 @@ impl App {
         req.preset = self.preset.clone();
         req.preset_name = self.preset_name.clone();
         req.selection = self.wave.selection.map(|(a, b)| Selection { start_secs: a, end_secs: b });
+        req.channels = self.wave.channels;
         req.fade_in_secs = self.wave.fade_in;
         req.fade_out_secs = self.wave.fade_out;
         req.gain_db = self.gain_db as f64;
@@ -1140,7 +1186,7 @@ impl App {
         let secs = req.selection.map(|s| s.end_secs - s.start_secs).unwrap_or(info.duration_secs);
         let mut out = format!("{} s", waveform::fmt_time(secs));
         if preset.format == hark_core::config::OutputFormat::Wav {
-            let channels = if preset.mono.is_some() { 1 } else { info.channels };
+            let channels = if preset.mono.is_some() { 1 } else { req.channels.map_or(info.channels, |c| c.count() as u16) };
             let rate = preset.sample_rate.unwrap_or(info.sample_rate);
             let bytes = secs * rate as f64 * channels as f64 * preset.bits as f64 / 8.0;
             out.push_str(&if bytes >= 1e6 { format!("  ·  ≈ {:.1} MB", bytes / 1e6) } else { format!("  ·  ≈ {:.0} KB", bytes / 1e3) });
@@ -1170,6 +1216,7 @@ impl App {
         let mut req = CopyRequest::from_config(&self.config, &f.path, self.preset.clone(), f.tags.clone(), f.favorite);
         req.source_hash = f.hash.clone();
         req.selection = self.wave.selection.map(|(a, b)| Selection { start_secs: a, end_secs: b });
+        req.channels = self.wave.channels;
         req.fade_in_secs = self.wave.fade_in;
         req.fade_out_secs = self.wave.fade_out;
         req.preset.fade_shape = self.wave.fade_shape;
@@ -1279,19 +1326,19 @@ impl App {
 
     /// The picture under the pointer while a span of a file is dragged out: its envelope on a
     /// translucent card, at the display's scale.
-    fn ghost(&self, ctx: &egui::Context, peaks: &hark_core::Peaks, span: (f64, f64), gain_at: &dyn Fn(f64) -> f32) -> dnd::Image {
+    fn ghost(&self, ctx: &egui::Context, peaks: &hark_core::Peaks, span: (f64, f64), kept: Option<Channels>, gain_at: &dyn Fn(f64) -> f32) -> dnd::Image {
         let scale = ctx.pixels_per_point().round().max(1.0) as i32;
         let colors = waveform::GhostColors { card: self.theme.bg_deep, peak: self.theme.accent.gamma_multiply(0.7), rms: self.theme.accent, hatch: None };
-        waveform::ghost(peaks, span, gain_at, &colors, scale)
+        waveform::ghost(peaks, span, kept, gain_at, &colors, scale)
     }
 
     /// The pointer while a drag waits for its file: the drag's picture greyed on a striped
     /// card, hanging from the pointer as the drag's own does.
-    fn pending_ghost(&self, ctx: &egui::Context, peaks: &hark_core::Peaks, span: (f64, f64), gain_at: &dyn Fn(f64) -> f32) -> dnd::Image {
+    fn pending_ghost(&self, ctx: &egui::Context, peaks: &hark_core::Peaks, span: (f64, f64), kept: Option<Channels>, gain_at: &dyn Fn(f64) -> f32) -> dnd::Image {
         // AppKit takes a cursor's pixels as points.
         let scale = if cfg!(target_os = "macos") { 1 } else { ctx.pixels_per_point().round().max(1.0) as i32 };
         let colors = waveform::GhostColors { card: self.theme.bg_deep, peak: self.theme.muted.gamma_multiply(0.5), rms: self.theme.muted, hatch: Some(self.theme.line) };
-        waveform::ghost(peaks, span, gain_at, &colors, scale)
+        waveform::ghost(peaks, span, kept, gain_at, &colors, scale)
     }
 
     fn copy_out(&mut self, paths: Vec<PathBuf>) {
@@ -1349,7 +1396,7 @@ impl App {
                     }
                 }
                 Done::Analyzed(path, result) => {
-                    self.building.retain(|b| b.mode.is_some());
+                    self.building.retain(|b| b.fold.is_some());
                     match result {
                         Ok((peaks, loudness)) => {
                             self.record_loudness(&path, loudness.as_ref().map(|l| l.loudness));
@@ -1370,11 +1417,11 @@ impl App {
                         }
                     }
                 }
-                Done::Folded { path, mode, measure, result } => {
-                    self.building.retain(|b| b.mode.is_none());
-                    if self.fold_asked.as_ref() == Some(&(path.clone(), mode, measure)) {
+                Done::Folded { path, fold, measure, result } => {
+                    self.building.retain(|b| b.fold.is_none());
+                    if self.fold_asked.as_ref() == Some(&(path.clone(), fold, measure)) {
                         match result {
-                            Ok(f) => self.folded = Some((path, mode, Arc::new(f))),
+                            Ok(f) => self.folded = Some((path, fold, Arc::new(f))),
                             Err(e) => {
                                 self.set_status(format!("Preview of {}: {e}", path.display()), true);
                                 self.pass_error = Some((path, e));
@@ -1382,12 +1429,12 @@ impl App {
                         }
                     }
                 }
-                Done::Partial { path, mode, from, sample_rate, bins } => {
+                Done::Partial { path, fold, from, sample_rate, bins } => {
                     if from == 0 {
-                        self.building.retain(|b| b.mode.is_some() != mode.is_some());
+                        self.building.retain(|b| b.fold.is_some() != fold.is_some());
                         let channels = bins.len() as u16;
-                        self.building.push(Building { path, mode, peaks: Peaks { sample_rate, channels, bin_frames: Peaks::DEFAULT_BIN, total_frames: 0, bins } });
-                    } else if let Some(b) = self.building.iter_mut().find(|b| b.path == path && b.mode == mode && b.peaks.bins.first().map(|c| c.len()) == Some(from)) {
+                        self.building.push(Building { path, fold, peaks: Peaks { sample_rate, channels, bin_frames: Peaks::DEFAULT_BIN, total_frames: 0, bins } });
+                    } else if let Some(b) = self.building.iter_mut().find(|b| b.path == path && b.fold == fold && b.peaks.bins.first().map(|c| c.len()) == Some(from)) {
                         for (have, new) in b.peaks.bins.iter_mut().zip(bins) {
                             have.extend(new);
                         }
@@ -2197,7 +2244,7 @@ impl App {
         if let Some(i) = dragged {
             let path = self.files[i].path.clone();
             let what = self.files[i].name.clone();
-            let image = self.cache.get(&path).and_then(|l| l.peaks.clone()).map(|p| self.ghost(ui.ctx(), &p, (0.0, p.duration_secs()), &|_| 1.0));
+            let image = self.cache.get(&path).and_then(|l| l.peaks.clone()).map(|p| self.ghost(ui.ctx(), &p, (0.0, p.duration_secs()), None, &|_| 1.0));
             self.drag_out(vec![path], image, &what);
         } else if let Some(i) = double {
             self.select(i, true);
@@ -2325,7 +2372,7 @@ impl App {
                 (None, None)
             }
             Some(c) => {
-                let fold = self.preset.mono.filter(|_| self.preview);
+                let fold = self.preview_fold().filter(|_| self.preview);
                 let done = match fold {
                     Some(_) => self.folded_exact().map(|f| (f.peaks.clone(), f.samples.clone())),
                     None => c.peaks.clone().map(|p| {
@@ -2340,7 +2387,7 @@ impl App {
                     Some((p, s)) => (Some(p), s),
                     None => {
                         status = Some((if fold.is_some() { "Building preview" } else { "Analysing" }.into(), true));
-                        partial = self.building.iter().position(|b| b.path == c.path && b.mode == fold);
+                        partial = self.building.iter().position(|b| b.path == c.path && b.fold == fold);
                         let other_fold = self.folded.as_ref().filter(|(p, _, _)| fold.is_some() && *p == c.path).map(|(_, _, f)| f.peaks.clone());
                         (other_fold.filter(|_| partial.is_none()), None)
                     }
@@ -2402,8 +2449,12 @@ impl App {
         };
         let mut event = WaveEvent::None;
         let mut wave_resp = None;
+        let source_channels = self.current.as_ref().map_or(1, |c| c.channels);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
+            if source_channels > 1 {
+                self.channel_strip(ui, source_channels, wave_h);
+            }
             let wave_w = ui.available_width() - FADER_W - 8.0;
             ui.allocate_ui_with_layout(egui::vec2(wave_w, wave_h), egui::Layout::top_down(egui::Align::Min), |ui| {
                 let peaks = partial.map(|i| &self.building[i].peaks).or(peaks.as_deref());
@@ -2483,8 +2534,10 @@ impl App {
                 let fades = self.wave.clip_fades;
                 let gain_at = |t: f64| gain * fades.map_or(1.0, |f| f.gain(t));
                 let bounds = self.wave.bounds(duration);
-                let image = peaks.as_ref().map(|p| self.ghost(ui.ctx(), p, bounds, &gain_at));
-                let pending = peaks.as_ref().map(|p| self.pending_ghost(ui.ctx(), p, bounds, &gain_at));
+                // A folded envelope is already of the kept channels alone.
+                let kept = |p: &Peaks| self.wave.channels.filter(|_| p.channels > 1);
+                let image = peaks.as_ref().map(|p| self.ghost(ui.ctx(), p, bounds, kept(p), &gain_at));
+                let pending = peaks.as_ref().map(|p| self.pending_ghost(ui.ctx(), p, bounds, kept(p), &gain_at));
                 self.drag_selection(ui.ctx(), image, pending);
             }
             WaveEvent::None => {}
@@ -2493,6 +2546,62 @@ impl App {
         if (row - self.transport_h).abs() > 0.5 {
             self.transport_h = row;
             ui.ctx().request_repaint();
+        }
+    }
+
+    /// A toggle per channel of the file beside the wave, each level with its channel's lane:
+    /// a click mutes or unmutes the channel, an Alt-click hears it alone, or all of them again
+    /// when it already was. What is kept is heard, drawn and exported; the last channel kept
+    /// stays.
+    fn channel_strip(&mut self, ui: &mut egui::Ui, channels: u16, height: f32) {
+        const STRIP_W: f32 = 22.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(STRIP_W, height), Sense::hover());
+        let n = (channels as usize).min(Channels::MAX);
+        let lanes = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.top() + waveform::LANE_H), rect.max);
+        let lane_h = lanes.height() / n as f32;
+        let button_h = (lane_h - 4.0).clamp(4.0, 22.0);
+        let kept = |c: usize| self.wave.channels.is_none_or(|k| k.contains(c));
+        let mut next: Option<Vec<usize>> = None;
+        for c in 0..n {
+            let name = match (channels, c) {
+                (2, 0) => "L".to_string(),
+                (2, _) => "R".to_string(),
+                _ => (c + 1).to_string(),
+            };
+            let center = egui::pos2(lanes.center().x, lanes.top() + lane_h * (c as f32 + 0.5));
+            let button = egui::Rect::from_center_size(center, egui::vec2(STRIP_W, button_h));
+            let what = match (channels, c) {
+                (2, 0) => "The left channel".to_string(),
+                (2, _) => "The right channel".to_string(),
+                _ => format!("Channel {}", c + 1),
+            };
+            let resp = ui.interact(button, ui.id().with(("channel", c)), Sense::click()).on_hover_text(format!("{what}: click mutes or unmutes it; Alt-click hears it alone"));
+            let on = kept(c);
+            let fill = match (on, resp.hovered()) {
+                (true, true) => self.theme.accent2.gamma_multiply(0.45),
+                (true, false) => self.theme.accent2.gamma_multiply(0.3),
+                (false, true) => self.theme.select,
+                (false, false) => Color32::TRANSPARENT,
+            };
+            let stroke = Stroke::new(1.0, if on { self.theme.accent2.gamma_multiply(0.9) } else { self.theme.line });
+            let p = ui.painter();
+            p.rect(button, CornerRadius::same(4), fill, stroke, StrokeKind::Inside);
+            if button_h >= 12.0 {
+                p.text(center, egui::Align2::CENTER_CENTER, name, FontId::new(11.0, egui::FontFamily::Name(theme::MEDIUM.into())), if on { self.theme.text } else { self.theme.muted });
+            }
+            if resp.clicked() {
+                let now: Vec<usize> = (0..n).filter(|&k| kept(k)).collect();
+                next = Some(if ui.input(|i| i.modifiers.alt) {
+                    if now == [c] { (0..n).collect() } else { vec![c] }
+                } else if on {
+                    now.into_iter().filter(|&k| k != c).collect()
+                } else {
+                    now.into_iter().chain([c]).collect()
+                });
+            }
+        }
+        if let Some(next) = next.filter(|k| !k.is_empty()) {
+            self.wave.channels = Channels::pick(next, channels);
         }
     }
 
@@ -2650,6 +2759,8 @@ impl App {
         rule(ui);
 
         let mut edited = false;
+        // Mono turned on folds as the preset the card came from does, or by average.
+        let law = self.preset_name.as_deref().and_then(|n| self.config.preset(n)).and_then(|p| p.mono).unwrap_or_default();
         let p = &mut self.preset;
         egui::Grid::new("export-preset").num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
             key(ui, "Format");
@@ -2663,7 +2774,7 @@ impl App {
             edited |= preset_ui::sample_rate(ui, "card", p);
             ui.end_row();
             key(ui, "Channels");
-            edited |= preset_ui::channels(ui, "card", p);
+            edited |= preset_ui::mono(ui, p, law);
             ui.end_row();
             key(ui, "Level");
             ui.horizontal(|ui| edited |= preset_ui::normalize(ui, "card", p));

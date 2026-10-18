@@ -6,7 +6,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::config::ExportPreset;
-use crate::pcm::FadeShape;
+use crate::pcm::{Channels, FadeShape};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SourceRef {
@@ -58,6 +58,9 @@ pub struct Origin {
     pub source: SourceRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<SelectionRef>,
+    /// The source's channels kept, numbered from 1; absent when all were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<Channels>,
     pub fade_in_secs: f64,
     pub fade_out_secs: f64,
     /// Hand-set level in dB; zero when the preset normalised instead.
@@ -90,10 +93,31 @@ impl Origin {
             Some(r) => format!("{}:{}", r, self.source.path.strip_prefix(self.source.root_path.as_deref().unwrap_or(Path::new(""))).unwrap_or(&self.source.path).display()),
             None => self.source.path.display().to_string(),
         };
-        match self.selection {
-            Some(s) => format!("hark: {} [{:.3}s-{:.3}s]", src, s.start_secs, s.end_secs),
-            None => format!("hark: {}", src),
+        let mut line = format!("hark: {src}");
+        if let Some(s) = self.selection {
+            line.push_str(&format!(" [{:.3}s-{:.3}s]", s.start_secs, s.end_secs));
         }
+        if let Some(c) = self.channels {
+            line.push_str(&format!(" ch {}", c.label()));
+        }
+        line
+    }
+}
+
+/// An origin written before channels were picked per file, whose preset kept one side as its
+/// downmix, keeps that side as its pick: re-exported, it makes the same audio.
+fn upgrade(origin: &mut serde_json::Value) {
+    let Some(mono) = origin.pointer_mut("/preset/mono") else { return };
+    let side = match mono.as_str() {
+        Some("left") => 1,
+        Some("right") => 2,
+        _ => return,
+    };
+    *mono = "average".into();
+    // A mono source had only the one side to keep.
+    let channels = origin.pointer("/source/channels").and_then(|c| c.as_u64()).unwrap_or(0);
+    if let Some(o) = origin.as_object_mut().filter(|_| channels > 1) {
+        o.entry("channels").or_insert(serde_json::json!([side]));
     }
 }
 
@@ -104,8 +128,8 @@ pub fn read(path: &Path) -> Result<Option<Origin>> {
         Some("flac") => crate::flac::read_application_block(path, crate::flac::HARK_APP_ID)?,
         _ => None,
     };
-    match bytes {
-        Some(b) => Ok(Some(serde_json::from_slice(&b)?)),
-        None => Ok(None),
-    }
+    let Some(bytes) = bytes else { return Ok(None) };
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    upgrade(&mut value);
+    Ok(Some(serde_json::from_value(value)?))
 }

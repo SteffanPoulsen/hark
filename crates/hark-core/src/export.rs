@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{Config, ExportPreset, Normalize, OutputFormat, Root};
 use crate::loudness::{self, Level, Loudness, Span};
 use crate::origin::{Measured, Origin, OutputRef, SelectionRef, SourceRef};
-use crate::pcm::{db_to_gain, gain_to_db, Fades, Pcm};
+use crate::pcm::{db_to_gain, gain_to_db, Channels, Fades, Pcm};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Selection {
@@ -22,7 +22,9 @@ pub struct ExportRequest {
     pub source: PathBuf,
     pub root: Option<Root>,
     pub selection: Option<Selection>,
-    /// Shrink the selection, or the whole file, to its sound before anything else.
+    /// The source's channels kept, before anything else is done; `None` keeps them all.
+    pub channels: Option<Channels>,
+    /// Shrink the selection, or the whole file, to the sound in its kept channels.
     pub trim: bool,
     pub fade_in_secs: f64,
     pub fade_out_secs: f64,
@@ -69,6 +71,7 @@ impl ExportRequest {
             source: source.to_path_buf(),
             root: config.root_of(source).cloned(),
             selection: None,
+            channels: None,
             trim: false,
             fade_in_secs: 0.0,
             fade_out_secs: 0.0,
@@ -151,14 +154,20 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
         Some(s) => crate::decode::decode_span(&req.source, s.start_secs, s.end_secs)?,
         None => crate::decode::decode(&req.source)?,
     };
+    if let Some(pick) = req.channels {
+        if !pick.fits(info.channels) {
+            return Err(anyhow!("{} has {} channels; it has no channel {}", req.source.display(), info.channels, pick.label()));
+        }
+        source = source.pick(pick);
+    }
     if req.trim {
-        let (a, b) = source.sound_span(0.0, source.duration_secs()).ok_or_else(|| anyhow!("silent; nothing to trim to"))?;
+        let (a, b) = source.sound_span(0.0, source.duration_secs(), None).ok_or_else(|| anyhow!("silent; nothing to trim to"))?;
         let base = req.selection.map(|s| s.start_secs).unwrap_or(0.0);
         req.selection = Some(Selection { start_secs: base + a, end_secs: base + b });
         source = source.slice_frames(source.frame_at(a), source.frame_at(b));
     }
     let req = &req;
-    let span = Span::new(&req.source, req.selection.map(|s| (s.start_secs, s.end_secs)), req.fades(&preset), preset.mono, preset.sample_rate, source.sample_rate);
+    let span = Span::new(&req.source, req.selection.map(|s| (s.start_secs, s.end_secs)), req.fades(&preset), preset.mono, preset.sample_rate, source.sample_rate).picking(req.channels);
     let start = req.selection.map(|s| (s.start_secs.max(0.0) * source.sample_rate as f64).round() as u64).unwrap_or(0);
     let frames = (start, start + source.frames() as u64);
     let stamp = loudness::Stamp::from(&source_meta);
@@ -189,6 +198,7 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
             duration_secs: info.duration_secs,
         },
         selection: req.selection.map(|s| SelectionRef { start_secs: s.start_secs, end_secs: s.end_secs }),
+        channels: req.channels,
         fade_in_secs: req.fade_in_secs,
         fade_out_secs: req.fade_out_secs,
         gain_db: req.gain_db,
@@ -312,15 +322,15 @@ pub struct PreviewLevel {
     pub warnings: Vec<String>,
 }
 
-/// The gain `preset` would give `selection` of `path`, or the whole of it, under `fades`, by
-/// the rule an export applies to the audio an export shapes. Measured in one streaming pass,
-/// so a long span is never held whole.
-pub fn preview_level(path: &Path, preset: &ExportPreset, selection: Option<Selection>, fades: Fades, abort: &dyn Fn() -> bool) -> Result<PreviewLevel> {
+/// The gain `preset` would give `selection` of `path`, or the whole of it, with `channels`
+/// kept and under `fades`, by the rule an export applies to the audio an export shapes.
+/// Measured in one streaming pass, so a long span is never held whole.
+pub fn preview_level(path: &Path, preset: &ExportPreset, selection: Option<Selection>, channels: Option<Channels>, fades: Fades, abort: &dyn Fn() -> bool) -> Result<PreviewLevel> {
     if matches!(preset.normalize, Normalize::None) {
         return Ok(PreviewLevel::default());
     }
     let source_rate = crate::decode::probe(path)?.sample_rate;
-    let span = Span::new(path, selection.map(|s| (s.start_secs, s.end_secs)), fades, preset.mono, preset.sample_rate, source_rate);
+    let span = Span::new(path, selection.map(|s| (s.start_secs, s.end_secs)), fades, preset.mono, preset.sample_rate, source_rate).picking(channels);
     Ok(preview_level_from(&loudness::measure_file(&span, abort)?.loudness, preset))
 }
 
@@ -341,6 +351,7 @@ pub fn request_from_origin(origin: &Origin, output_root: &Path, output_path: Opt
         },
         trim: false,
         selection: origin.selection.map(|s| Selection { start_secs: s.start_secs, end_secs: s.end_secs }),
+        channels: origin.channels,
         fade_in_secs: origin.fade_in_secs,
         fade_out_secs: origin.fade_out_secs,
         gain_db: origin.gain_db,
@@ -380,6 +391,7 @@ mod tests {
             source: source.clone(),
             root: None,
             selection: Some(Selection { start_secs: 0.7, end_secs: 3.1 }),
+            channels: None,
             trim: false,
             fade_in_secs: 0.25,
             fade_out_secs: 0.5,
@@ -431,5 +443,55 @@ mod tests {
         let after_cut = run(&req).unwrap().origin.measured;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(after_cut.applied_gain_db, fresh.applied_gain_db, "a level faded by the header's length was used");
+    }
+
+    /// A channel picked from a file with a dead side exports alone, the file it makes says
+    /// which, and an origin from when the preset kept that side re-exports the same audio.
+    #[test]
+    fn picked_channel_exports_alone() {
+        let dir = std::env::temp_dir().join(format!("hark-export-pick-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("dual.wav");
+        let left = |f: usize| (f as f32 * 0.03).sin() * 0.5;
+        let samples: Vec<f32> = (0..48_000).flat_map(|f| [left(f), 0.0]).collect();
+        crate::wav::write(&source, &Pcm { sample_rate: 48_000, channels: 2, samples }, 32, false, b"{}", &Default::default()).unwrap();
+        let mut req = request_from_origin(&Origin { channels: Some("1".parse().unwrap()), ..stub_origin(&source) }, &dir, Some(dir.join("left.wav")));
+        req.preset = ExportPreset { bits: 32, ..Default::default() };
+        let result = run(&req).unwrap();
+        let out = crate::decode::decode(&result.output).unwrap();
+        assert_eq!(out.channels, 1);
+        assert!(out.samples.iter().enumerate().all(|(f, s)| (s - left(f)).abs() < 1e-6), "the left channel was not what was written");
+        let written = crate::origin::read(&result.output).unwrap().unwrap();
+        assert_eq!(written.channels.map(|c| c.label()), Some("1".to_string()));
+
+        let mut legacy = serde_json::to_value(&written).unwrap();
+        legacy.as_object_mut().unwrap().remove("channels");
+        legacy["preset"]["mono"] = "left".into();
+        crate::wav::write(&dir.join("legacy.wav"), &out, 32, false, &serde_json::to_vec(&legacy).unwrap(), &Default::default()).unwrap();
+        let upgraded = crate::origin::read(&dir.join("legacy.wav")).unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((upgraded.channels, upgraded.preset.mono), (written.channels, Some(crate::pcm::DownmixMode::Average)));
+    }
+
+    fn stub_origin(source: &Path) -> Origin {
+        let info = crate::decode::probe(source).unwrap();
+        Origin {
+            hark: String::new(),
+            exported_at: String::new(),
+            source: SourceRef { path: source.to_path_buf(), root: None, root_path: None, file_name: String::new(), size: 0, blake3: String::new(), sample_rate: info.sample_rate, channels: info.channels, duration_secs: info.duration_secs },
+            selection: None,
+            channels: None,
+            fade_in_secs: 0.0,
+            fade_out_secs: 0.0,
+            gain_db: 0.0,
+            fade_shape: FadeShape::Linear,
+            preset_name: None,
+            output_subfolder: None,
+            preset: ExportPreset::default(),
+            output: OutputRef { format: "wav".into(), bits: 32, sample_rate: info.sample_rate, channels: 1, duration_secs: info.duration_secs },
+            tags: Vec::new(),
+            favorite: false,
+            measured: Measured::default(),
+        }
     }
 }

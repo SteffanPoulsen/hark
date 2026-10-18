@@ -13,7 +13,7 @@ use hark_core::copies::Plan;
 use hark_core::export::{ExportRequest, ExportResult};
 use hark_core::library::ScanReport;
 use hark_core::loudness::{Level, Span, Stamp};
-use hark_core::pcm::DownmixMode;
+use hark_core::pcm::{Channels, DownmixMode};
 use hark_core::peaks::{Bin, PeaksBuilder};
 use hark_core::{ExportPreset, Loudness, Pcm, Peaks};
 
@@ -34,7 +34,32 @@ pub struct Loaded {
     pub loudness: Option<Level>,
     /// A decoded file folded as the preset it was loaded with folds, so its preview never
     /// shows without it.
-    pub folded: Option<(DownmixMode, Arc<Folded>)>,
+    pub folded: Option<(Fold, Arc<Folded>)>,
+}
+
+/// What the preview folds to one channel: the kept channels of a file, by a downmix.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fold {
+    pub mode: DownmixMode,
+    pub channels: Option<Channels>,
+}
+
+impl Fold {
+    /// One interleaved frame of the file folded to a sample.
+    pub fn sample(self, frame: &[f32]) -> f32 {
+        let mut kept = [0f32; Channels::MAX];
+        match self.channels.map(|c| c.take(frame, &mut kept)) {
+            Some(n) if n > 0 => self.mode.fold(&kept[..n]),
+            _ => self.mode.fold(frame),
+        }
+    }
+
+    pub fn apply(self, pcm: &Pcm) -> Pcm {
+        match self.channels {
+            Some(c) => pcm.pick(c).to_mono(self.mode),
+            None => pcm.to_mono(self.mode),
+        }
+    }
 }
 
 impl Loaded {
@@ -117,10 +142,10 @@ pub enum Done {
     Copied { output: PathBuf, result: Result<ExportResult, String> },
     /// One result per root, by name; a root that could not be scanned carries the reason.
     Scanned(Vec<(String, Result<ScanReport, String>)>),
-    Folded { path: PathBuf, mode: DownmixMode, measure: bool, result: Result<Folded, String> },
-    /// Bins an analysis (`mode` `None`) or a fold of `path` closed since its last part, from
+    Folded { path: PathBuf, fold: Fold, measure: bool, result: Result<Folded, String> },
+    /// Bins an analysis (`fold` `None`) or a fold of `path` closed since its last part, from
     /// bin `from`; a part from bin 0 starts the envelope over.
-    Partial { path: PathBuf, mode: Option<DownmixMode>, from: usize, sample_rate: u32, bins: Vec<Vec<Bin>> },
+    Partial { path: PathBuf, fold: Option<Fold>, from: usize, sample_rate: u32, bins: Vec<Vec<Bin>> },
     /// The level of a span, for the preview's level of a selection.
     SpanMeasured(Span, Result<Level, String>),
 }
@@ -132,7 +157,7 @@ const PARTIAL_EVERY: Duration = Duration::from_millis(200);
 struct Parts<'a> {
     emit: &'a dyn Fn(Done),
     path: &'a Path,
-    mode: Option<DownmixMode>,
+    fold: Option<Fold>,
     sent: usize,
     last: Instant,
 }
@@ -145,7 +170,7 @@ impl Parts<'_> {
         self.last = Instant::now();
         let bins: Vec<Vec<Bin>> = builder.bins().iter().map(|ch| ch[self.sent..].to_vec()).collect();
         let from = std::mem::replace(&mut self.sent, builder.bins().first().map(|b| b.len()).unwrap_or(0));
-        (self.emit)(Done::Partial { path: self.path.to_path_buf(), mode: self.mode, from, sample_rate, bins });
+        (self.emit)(Done::Partial { path: self.path.to_path_buf(), fold: self.fold, from, sample_rate, bins });
     }
 }
 
@@ -211,7 +236,7 @@ struct FoldJob {
     source: Source,
     source_rate: u32,
     stamp: Stamp,
-    mode: DownmixMode,
+    fold: Fold,
     measure: bool,
 }
 
@@ -294,9 +319,9 @@ impl Worker {
             (!abort()).then(|| Done::Analyzed(path, result.map_err(|e| format!("{e:#}"))))
         });
         let fold = Latest::spawn(done_tx.clone(), ctx.clone(), |job: FoldJob, abort, emit| {
-            let FoldJob { path, source, source_rate, stamp, mode, measure } = job;
-            let result = fold(&path, &source, source_rate, stamp, mode, measure, abort, emit).map_err(|e| format!("{e:#}"));
-            (!abort()).then_some(Done::Folded { path, mode, measure, result })
+            let FoldJob { path, source, source_rate, stamp, fold: f, measure } = job;
+            let result = fold(&path, &source, source_rate, stamp, f, measure, abort, emit).map_err(|e| format!("{e:#}"));
+            (!abort()).then_some(Done::Folded { path, fold: f, measure, result })
         });
         let span = Latest::spawn(done_tx, ctx, |job: SpanJob, abort, _| {
             let result = measure_span(&job.span, job.held, abort).map_err(|e| format!("{e:#}"));
@@ -335,14 +360,14 @@ impl Worker {
 
     /// Asks for the file folded to one channel, for the preview's waveform, and with
     /// `measure` its loudness, for the preview's level.
-    pub fn fold(&self, file: &Loaded, mode: DownmixMode, measure: bool) {
-        self.fold.put(FoldJob { path: file.path.clone(), source: file.source.clone(), source_rate: file.source_rate, stamp: file.stamp, mode, measure });
+    pub fn fold(&self, file: &Loaded, fold: Fold, measure: bool) {
+        self.fold.put(FoldJob { path: file.path.clone(), source: file.source.clone(), source_rate: file.source_rate, stamp: file.stamp, fold, measure });
     }
 
     /// Asks for the level of `span`, for the preview's level of a selection: metered from
-    /// `held`, the file's samples at its own rate already folded as the span says, with the
-    /// stamp of the file they were read from, or streamed from the file without them. Replaces
-    /// any request still waiting. The promise is kept with the level, or with `None` when the
+    /// `held`, the file's samples at its own rate with the span's channels already picked and
+    /// folded, with the stamp of the file they were read from, or streamed from the file
+    /// without them. Replaces any request still waiting. The promise is kept with the level, or with `None` when the
     /// measurement fails or is replaced.
     pub fn measure_span(&self, span: Span, held: Option<(Arc<Pcm>, Stamp)>) -> Promise<Option<Level>> {
         let level = Promise::new();
@@ -413,13 +438,14 @@ fn load(path: &Path, device_rate: u32, stream_above_mb: f64, preview: Option<Exp
     };
     let device = Source::Whole(Arc::new(if source.sample_rate == device_rate { source.clone() } else { hark_core::resample::resample(&source, device_rate)? }));
     let measure = preview.as_ref().is_some_and(|p| !matches!(p.normalize, Normalize::None));
-    let mono = preview.and_then(|p| p.mono);
+    // A file just loaded has no channels picked yet.
+    let mono = preview.and_then(|p| p.mono).map(|mode| Fold { mode, channels: None });
     // The fold plays at the device's rate; its level is taken at the file's, from the audio
     // already in hand.
-    let folded = mono.and_then(|mode| {
-        let mut f = fold(path, &device, source.sample_rate, stamp, mode, false, &|| false, &|_| {}).ok()?;
-        f.loudness = measure.then(|| hark_core::loudness::measure(&source.to_mono(mode)).ok().map(|l| whole(path, stamp, Some(mode), source.frames(), l))).flatten();
-        Some((mode, Arc::new(f)))
+    let folded = mono.and_then(|f| {
+        let mut folded = fold(path, &device, source.sample_rate, stamp, f, false, &|| false, &|_| {}).ok()?;
+        folded.loudness = measure.then(|| hark_core::loudness::measure(&f.apply(&source)).ok().map(|l| whole(path, stamp, Some(f), source.frames(), l))).flatten();
+        Some((f, Arc::new(folded)))
     });
     let loudness = (measure && mono.is_none()).then(|| hark_core::loudness::measure(&source).ok().map(|l| whole(path, stamp, None, source.frames(), l))).flatten();
     Ok(Loaded {
@@ -437,8 +463,12 @@ fn load(path: &Path, device_rate: u32, stream_above_mb: f64, preview: Option<Exp
 
 /// The level of all of a file at its own rate, folded by `fold`, measured over `frames` of it
 /// as it was when `stamp` was taken.
-fn whole(path: &Path, stamp: Stamp, fold: Option<DownmixMode>, frames: usize, loudness: Loudness) -> Level {
-    Level { span: Span { path: path.to_path_buf(), secs: None, fades: Default::default(), fold, rate: None }, stamp, frames: (0, frames as u64), loudness }
+fn whole(path: &Path, stamp: Stamp, fold: Option<Fold>, frames: usize, loudness: Loudness) -> Level {
+    Level { span: whole_span(path, fold), stamp, frames: (0, frames as u64), loudness }
+}
+
+fn whole_span(path: &Path, fold: Option<Fold>) -> Span {
+    Span { path: path.to_path_buf(), secs: None, channels: fold.and_then(|f| f.channels), fades: Default::default(), fold: fold.map(|f| f.mode), rate: None }
 }
 
 /// One pass over a streamed file for its peaks (unless cached) and loudness, holding only a
@@ -450,7 +480,7 @@ fn analyze(path: &Path, cached: Option<Arc<Peaks>>, abort: &dyn Fn() -> bool, em
     let mut builder = None;
     let mut meter = None;
     let mut frames = 0;
-    let mut parts = Parts { emit, path, mode: None, sent: 0, last: Instant::now() };
+    let mut parts = Parts { emit, path, fold: None, sent: 0, last: Instant::now() };
     while reader.next_chunk(&mut chunk)? {
         frames += chunk.len() / (reader.channels as usize).max(1);
         if cached.is_none() {
@@ -485,13 +515,13 @@ fn analyze(path: &Path, cached: Option<Arc<Peaks>>, abort: &dyn Fn() -> bool, em
 /// its level is the file's at the file's own rate, `source_rate`. `stamp` is when a decoded
 /// file was read.
 #[allow(clippy::too_many_arguments)]
-fn fold(path: &Path, source: &Source, source_rate: u32, stamp: Stamp, mode: DownmixMode, measure: bool, abort: &dyn Fn() -> bool, emit: &dyn Fn(Done)) -> anyhow::Result<Folded> {
+fn fold(path: &Path, source: &Source, source_rate: u32, stamp: Stamp, fold: Fold, measure: bool, abort: &dyn Fn() -> bool, emit: &dyn Fn(Done)) -> anyhow::Result<Folded> {
     if let Source::Whole(pcm) = source {
-        let mono = pcm.to_mono(mode);
+        let mono = fold.apply(pcm);
         let loudness = match measure {
             false => None,
-            true if pcm.sample_rate == source_rate => Some(whole(path, stamp, Some(mode), mono.frames(), hark_core::loudness::measure(&mono)?)),
-            true => Some(hark_core::loudness::measure_file(&Span { path: path.to_path_buf(), secs: None, fades: Default::default(), fold: Some(mode), rate: None }, abort)?),
+            true if pcm.sample_rate == source_rate => Some(whole(path, stamp, Some(fold), mono.frames(), hark_core::loudness::measure(&mono)?)),
+            true => Some(hark_core::loudness::measure_file(&whole_span(path, Some(fold)), abort)?),
         };
         return Ok(Folded { peaks: Arc::new(Peaks::from_pcm(&mono, Peaks::DEFAULT_BIN)), samples: Some(Arc::new(mono)), loudness });
     }
@@ -500,14 +530,14 @@ fn fold(path: &Path, source: &Source, source_rate: u32, stamp: Stamp, mode: Down
     let channels = reader.channels as usize;
     let mut builder = PeaksBuilder::new(reader.sample_rate, 1, Peaks::DEFAULT_BIN);
     let mut meter = if measure { Some(hark_core::loudness::Meter::new(1, reader.sample_rate)?) } else { None };
-    let mut parts = Parts { emit, path, mode: Some(mode), sent: 0, last: Instant::now() };
+    let mut parts = Parts { emit, path, fold: Some(fold), sent: 0, last: Instant::now() };
     let mut chunk = Vec::new();
     let mut folded = Vec::new();
     let mut frames = 0;
     while reader.next_chunk(&mut chunk)? {
         frames += chunk.len() / channels.max(1);
         folded.clear();
-        folded.extend(chunk.chunks(channels).map(|f| mode.fold(f)));
+        folded.extend(chunk.chunks(channels).map(|f| fold.sample(f)));
         builder.push(&folded);
         parts.offer(&builder, reader.sample_rate);
         if let Some(m) = &mut meter {
@@ -518,7 +548,7 @@ fn fold(path: &Path, source: &Source, source_rate: u32, stamp: Stamp, mode: Down
             anyhow::bail!("superseded");
         }
     }
-    Ok(Folded { peaks: Arc::new(builder.finish()), samples: None, loudness: meter.and_then(|m| m.finish()).map(|l| whole(path, stamp, Some(mode), frames, l)) })
+    Ok(Folded { peaks: Arc::new(builder.finish()), samples: None, loudness: meter.and_then(|m| m.finish()).map(|l| whole(path, stamp, Some(fold), frames, l)) })
 }
 
 /// The level of a span from samples in memory, read from the file when it was as `stamp`

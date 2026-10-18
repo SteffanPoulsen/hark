@@ -7,6 +7,7 @@ use hark_core::audition::{Clip, Source};
 use hark_core::config::{Normalize, Root};
 use hark_core::export::{ExportRequest, Selection};
 use hark_core::library::{ChannelClass, Query, Sort, SortKey};
+use hark_core::pcm::Channels;
 use hark_core::{Config, Db};
 
 #[derive(Args)]
@@ -85,7 +86,12 @@ enum Cmd {
     /// Everything known about a file: probe, library record, and the origin it carries if hark exported it.
     Inspect { file: PathBuf },
     /// The spans of sound in a file, parted by silence: the takes a recording holds
-    Takes { file: PathBuf },
+    Takes {
+        file: PathBuf,
+        /// Find them in these channels alone, numbered from 1.
+        #[arg(long)]
+        channels: Option<Channels>,
+    },
     /// Measure loudness and peaks.
     Analyze {
         file: PathBuf,
@@ -183,6 +189,9 @@ enum Cmd {
         /// Start inside the selection, with the fades where they would be from `--in`.
         #[arg(long)]
         from: Option<f64>,
+        /// The channels to hear, numbered from 1: `2` for the right alone.
+        #[arg(long)]
+        channels: Option<Channels>,
         /// Repeat the selection; plays for `--for` seconds, or until interrupted.
         #[arg(long = "loop")]
         looped: bool,
@@ -318,7 +327,8 @@ struct PresetValues {
     /// Output sample rate in Hz, or "source".
     #[arg(long)]
     rate: Option<String>,
-    /// "source", or a downmix: average, sum, left, right.
+    /// "source", or a fold to mono: average, sum. Which channels there are to fold is picked
+    /// per file, with export --channels.
     #[arg(long)]
     channels: Option<String>,
     /// none, peak or lufs.
@@ -403,6 +413,10 @@ struct ExportArgs {
     /// Selection end in seconds.
     #[arg(long = "out")]
     end: Option<f64>,
+    /// The source's channels to keep, numbered from 1: `1` for the left, `1,3`. All by default;
+    /// the preset's mono folds what is kept.
+    #[arg(long)]
+    channels: Option<Channels>,
     /// Shrink the selection, or the whole file, to its sound: what sits 40 dB under its peak goes.
     #[arg(long)]
     trim: bool,
@@ -711,7 +725,7 @@ fn run() -> Result<()> {
         }
         Cmd::Analyze { file, store } => {
             let file = abs(&file)?;
-            let whole = hark_core::loudness::Span { path: file.clone(), secs: None, fades: Default::default(), fold: None, rate: None };
+            let whole = hark_core::loudness::Span { path: file.clone(), secs: None, channels: None, fades: Default::default(), fold: None, rate: None };
             let l = hark_core::loudness::measure_file(&whole, &|| false)?.loudness;
             if store {
                 open_db(&project)?.set_loudness(&file, &l)?;
@@ -722,9 +736,9 @@ fn run() -> Result<()> {
                 println!("{:.2} LUFS{} · true peak {:.2} dBTP · sample peak {:.2} dBFS{}", l.integrated_lufs, if l.momentary { " (momentary max)" } else { "" }, l.true_peak_dbfs, l.sample_peak_dbfs, l.range_lu.map(|r| format!(" · range {r:.1} LU")).unwrap_or_default());
             }
         }
-        Cmd::Takes { file } => {
+        Cmd::Takes { file, channels } => {
             let file = abs(&file)?;
-            let takes = hark_core::decode(&file)?.takes();
+            let takes = hark_core::decode(&file)?.takes(channels);
             if json {
                 print_json(&takes.iter().map(|(a, b)| serde_json::json!({ "start_secs": a, "end_secs": b })).collect::<Vec<_>>())?;
             } else {
@@ -947,6 +961,7 @@ fn run() -> Result<()> {
                     sel.end_secs = hark_core::probe(&file)?.duration_secs;
                 }
             }
+            req.channels = a.channels;
             req.trim = a.trim;
             req.fade_in_secs = a.fade_in;
             req.fade_out_secs = a.fade_out;
@@ -1111,15 +1126,18 @@ fn run() -> Result<()> {
                 }
             }
         }
-        Cmd::Play { file, start, end, from, looped, seconds, jump, stream_above, preset } => {
+        Cmd::Play { file, start, end, from, channels, looped, seconds, jump, stream_above, preset } => {
             let file = abs(&file)?;
             let config = load(&project)?;
             let player = hark_core::audition::Player::open(config.output_sample_rate, config.output_device.as_deref())?;
             let info = hark_core::probe(&file)?;
+            if let Some(c) = channels.filter(|c| !c.fits(info.channels)) {
+                return Err(anyhow!("{} has {} channels; it has no channel {}", file.display(), info.channels, c.label()));
+            }
             let preset = preset.map(|n| config.preset(&n).cloned().ok_or_else(|| anyhow!("unknown preset {n}"))).transpose()?;
             let fold = preset.as_ref().and_then(|p| p.mono);
             let selection = (start.is_some() || end.is_some()).then(|| hark_core::Selection { start_secs: start.unwrap_or(0.0), end_secs: end.unwrap_or(info.duration_secs) });
-            let level = preset.as_ref().map(|p| hark_core::export::preview_level(&file, p, selection, Default::default(), &|| false)).transpose()?.unwrap_or_default();
+            let level = preset.as_ref().map(|p| hark_core::export::preview_level(&file, p, selection, channels, Default::default(), &|| false)).transpose()?.unwrap_or_default();
             if let Some(db) = level.gain_db {
                 player.set_gain(hark_core::pcm::db_to_gain(db));
             }
@@ -1142,6 +1160,7 @@ fn run() -> Result<()> {
                 fade_in: 0,
                 fade_out: 0,
                 fade_shape: Default::default(),
+                channels,
                 fold,
             };
             let from = from.map(frame).unwrap_or(clip.start);

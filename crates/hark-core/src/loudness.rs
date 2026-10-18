@@ -5,7 +5,7 @@ use anyhow::Result;
 use ebur128::{EbuR128, Mode};
 use serde::{Deserialize, Serialize};
 
-use crate::pcm::{gain_to_db, DownmixMode, Fades, Pcm};
+use crate::pcm::{gain_to_db, Channels, DownmixMode, Fades, Pcm};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Loudness {
@@ -76,13 +76,15 @@ pub fn measure_with(pcm: &Pcm, abort: &dyn Fn() -> bool) -> Result<Loudness> {
     }
 }
 
-/// A span of a file shaped as an export shapes it before setting its level: cut, faded,
-/// folded to one channel, resampled. What a measurement of a level is of.
+/// A span of a file shaped as an export shapes it before setting its level: cut, its channels
+/// picked, faded, folded to one channel, resampled. What a measurement of a level is of.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Span {
     pub path: PathBuf,
     /// Seconds into the file; `None` is all of it.
     pub secs: Option<(f64, f64)>,
+    /// The channels kept; `None` keeps them all.
+    pub channels: Option<Channels>,
     pub fades: Fades,
     pub fold: Option<DownmixMode>,
     /// The rate it is resampled to; `None` keeps the file's own.
@@ -92,7 +94,11 @@ pub struct Span {
 impl Span {
     /// `rate` is the one a preset asks for, which resamples nothing when it is `source_rate`.
     pub fn new(path: &Path, secs: Option<(f64, f64)>, fades: Fades, fold: Option<DownmixMode>, rate: Option<u32>, source_rate: u32) -> Span {
-        Span { path: path.to_path_buf(), secs, fades, fold, rate: rate.filter(|r| *r != source_rate) }
+        Span { path: path.to_path_buf(), secs, channels: None, fades, fold, rate: rate.filter(|r| *r != source_rate) }
+    }
+
+    pub fn picking(self, channels: Option<Channels>) -> Span {
+        Span { channels, ..self }
     }
 }
 
@@ -135,6 +141,10 @@ pub fn measure_file(span: &Span, abort: &dyn Fn() -> bool) -> Result<Level> {
     let stamp = Stamp::of(path)?;
     let mut reader = crate::decode::Reader::open(path)?;
     let channels = reader.channels as usize;
+    if let Some(pick) = span.channels.filter(|c| !c.fits(reader.channels)) {
+        anyhow::bail!("{} has {channels} channels; it has no channel {}", path.display(), pick.label());
+    }
+    let kept = span.channels.map_or(channels, |c| c.count());
     let rate = reader.sample_rate as f64;
     let (start, end) = match span.secs {
         Some((a, b)) if rate > 0.0 => ((a.max(0.0) * rate).round() as u64, (b.max(0.0) * rate).round() as u64),
@@ -151,10 +161,11 @@ pub fn measure_file(span: &Span, abort: &dyn Fn() -> bool) -> Result<Level> {
     // the span are dropped, as `decode_span` does.
     let mut counted = if start > 0 { reader.seek(start.saturating_sub(reader.sample_rate as u64))? } else { 0 };
     let out_rate = span.rate.unwrap_or(reader.sample_rate);
-    let out_channels = if fold.is_some() { 1 } else { reader.channels };
+    let out_channels = if fold.is_some() { 1 } else { kept as u16 };
     let mut resampler = crate::resample::Stream::new(reader.sample_rate, out_rate, out_channels)?;
     let mut meter = Meter::new(out_channels, out_rate)?;
     let mut chunk = Vec::new();
+    let mut picked = Vec::new();
     let mut faded = Vec::new();
     let mut folded = Vec::new();
     let mut pushed = 0u64;
@@ -169,9 +180,18 @@ pub fn measure_file(span: &Span, abort: &dyn Fn() -> bool) -> Result<Level> {
         let to = (end - pos).min(frames) as usize;
         let mut samples = &chunk[from * channels..to * channels];
         let first = (pos + from as u64).saturating_sub(start) as usize;
+        if let Some(pick) = span.channels {
+            picked.clear();
+            let mut frame = [0f32; Channels::MAX];
+            for f in samples.chunks(channels) {
+                let n = pick.take(f, &mut frame);
+                picked.extend_from_slice(&frame[..n]);
+            }
+            samples = &picked;
+        }
         if !fades.is_zero() {
             faded.clear();
-            faded.extend(samples.chunks(channels).enumerate().flat_map(|(k, f)| {
+            faded.extend(samples.chunks(kept).enumerate().flat_map(|(k, f)| {
                 let g = fades.gain(first + k, total, reader.sample_rate);
                 f.iter().map(move |s| s * g)
             }));
@@ -179,7 +199,7 @@ pub fn measure_file(span: &Span, abort: &dyn Fn() -> bool) -> Result<Level> {
         }
         if let Some(mode) = fold {
             folded.clear();
-            folded.extend(samples.chunks(channels).map(|f| mode.fold(f)));
+            folded.extend(samples.chunks(kept).map(|f| mode.fold(f)));
             samples = &folded;
         }
         resampler.push(samples, &mut |s| meter.push(s))?;
@@ -208,6 +228,10 @@ pub fn measure_file(span: &Span, abort: &dyn Fn() -> bool) -> Result<Level> {
                 None => crate::decode::decode(path)?,
             };
             let frames = (start, start + pcm.frames() as u64);
+            let pcm = match span.channels {
+                Some(pick) => pcm.pick(pick),
+                None => pcm,
+            };
             Ok(Level { frames, ..level(measure(&crate::export::shape(pcm, fades, fold, span.rate)?)?) })
         }
     }
@@ -251,7 +275,7 @@ mod tests {
         crate::wav::write(&path, &pcm, 24, false, b"{}", &Default::default()).unwrap();
         let span = (1.0 + 1.0 / 3.0, 1.0 + 6.0 / 7.0);
         let fades = Fades { in_secs: 0.2, out_secs: 0.3, shape: crate::pcm::FadeShape::Linear };
-        let at = |fades| Span { path: path.clone(), secs: Some(span), fades, fold: None, rate: None };
+        let at = |fades| Span { path: path.clone(), secs: Some(span), channels: None, fades, fold: None, rate: None };
         let streamed = measure_file(&at(Fades::default()), &|| false).map(|l| l.loudness);
         let faded = measure_file(&at(fades), &|| false).map(|l| l.loudness);
         let _ = std::fs::remove_file(&path);
@@ -274,7 +298,7 @@ mod tests {
         let pcm = Pcm { sample_rate: 48_000, channels: 2, samples: vec![0.0; 48_000 * 2 * 3] };
         let path = std::env::temp_dir().join(format!("hark-silent-{}.wav", std::process::id()));
         crate::wav::write(&path, &pcm, 24, false, b"{}", &Default::default()).unwrap();
-        let streamed = measure_file(&Span { path: path.clone(), secs: Some((0.5, 2.5)), fades: Fades::default(), fold: None, rate: None }, &|| false).map(|l| l.loudness);
+        let streamed = measure_file(&Span { path: path.clone(), secs: Some((0.5, 2.5)), channels: None, fades: Fades::default(), fold: None, rate: None }, &|| false).map(|l| l.loudness);
         let _ = std::fs::remove_file(&path);
         let (streamed, whole) = (streamed.unwrap(), measure(&pcm).unwrap());
         assert_eq!((streamed.integrated_lufs, streamed.momentary), (whole.integrated_lufs, whole.momentary));
