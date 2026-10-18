@@ -1172,17 +1172,26 @@ impl App {
             Ok(plan) if plan.pending.is_none() => self.copy_out(vec![plan.output]),
             Ok(plan) => {
                 self.set_status(format!("Copying {}", tilde(&plan.output)), false);
-                self.write_copy(&req, plan, None);
+                let _ = self.write_copy(&req, plan, None);
             }
             Err(e) => self.set_status(format!("Copy: {e:#}"), true),
         }
     }
 
-    /// Queues a planned copy and shows it under way on the wave until it is written.
-    fn write_copy(&mut self, req: &CopyRequest, plan: hark_core::copies::Plan, ready: Option<dnd::Ready>) {
+    /// Queues a planned copy and shows it under way on the wave until it is written. `false`
+    /// when the copy could not be queued, which the status line then says.
+    fn write_copy(&mut self, req: &CopyRequest, plan: hark_core::copies::Plan, ready: Option<dnd::Ready>) -> bool {
         let span = req.selection.map(|s| (s.start_secs, s.end_secs));
-        self.writing.push(Writing { source: req.source.clone(), span, output: plan.output.clone() });
-        self.worker.copy(plan, ready, self.measuring());
+        let output = plan.output.clone();
+        if !self.worker.copy(plan, ready.clone(), self.measuring()) {
+            if let Some(r) = ready {
+                r.set(false);
+            }
+            self.set_status("Copy failed: the copy thread has stopped".to_string(), true);
+            return false;
+        }
+        self.writing.push(Writing { source: req.source.clone(), span, output });
+        true
     }
 
     /// Starts dragging the selection out, the path decided; the file follows from the worker,
@@ -1200,17 +1209,19 @@ impl App {
         }
         let ready = Some(dnd::Ready::new());
         // Windows waits for the file inside the drag call, so the job must already be queued.
-        self.write_copy(&req, plan, ready.clone());
+        if !self.write_copy(&req, plan, ready.clone()) {
+            return;
+        }
         // The drag waits two frames: one drawing the export under way and one showing it,
         // since the native drag loop may keep the window from painting until the drop.
         self.drag_deferred = Some((2, DeferredDrag { output, image, ready, what }));
     }
 
-    /// Starts the drag `drag_selection` deferred once its frames have passed, if the button
-    /// that began it is still down.
+    /// Starts the drag `drag_selection` deferred once its frames have passed, if the press that
+    /// began it has held throughout.
     fn start_deferred_drag(&mut self, ctx: &egui::Context) {
         let Some((left, drag)) = self.drag_deferred.take() else { return };
-        if !ctx.input(|i| i.pointer.primary_down()) {
+        if ctx.input(|i| !i.pointer.primary_down() || i.pointer.primary_released()) {
             return;
         }
         if left > 0 {

@@ -277,7 +277,11 @@ impl Worker {
                     if let (Some(export), Some(Some(level))) = (&mut plan.pending, measuring.and_then(|m| m.wait(MEASURING_WAIT))) {
                         export.levels.push(level);
                     }
-                    let result = hark_core::copies::finish(&plan).map_err(|e| format!("{e:#}"));
+                    // A panic in the pipeline fails this copy and leaves the thread for the next.
+                    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hark_core::copies::finish(&plan))) {
+                        Ok(r) => r.map_err(|e| format!("{e:#}")),
+                        Err(_) => Err("the export stopped on an internal error".to_string()),
+                    };
                     if let Some(r) = &ready {
                         r.set(result.is_ok());
                     }
@@ -316,11 +320,14 @@ impl Worker {
     /// Writes a planned copy; `ready` tells a drag in flight when the file is there.
     /// `measuring` is a measurement of the span still running, which the copy waits for
     /// rather than measuring the same audio again.
-    pub fn copy(&self, plan: Plan, ready: Option<Ready>, measuring: Option<Promise<Option<Level>>>) {
+    /// `false` when the copy thread is gone and the copy will never be written.
+    pub fn copy(&self, plan: Plan, ready: Option<Ready>, measuring: Option<Promise<Option<Level>>>) -> bool {
         self.copying.add(1);
-        if self.copy_tx.send(CopyJob { plan, ready, measuring }).is_err() {
+        let sent = self.copy_tx.send(CopyJob { plan, ready, measuring }).is_ok();
+        if !sent {
             self.copying.add(-1);
         }
+        sent
     }
 
     /// Loads the file the user is waiting on. Returns the path of a request it replaced
