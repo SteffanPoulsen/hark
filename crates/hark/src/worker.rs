@@ -57,11 +57,35 @@ pub struct LoadRequest {
 }
 
 pub enum Job {
-    Load(LoadRequest),
-    Export(ExportRequest),
-    /// Writes a planned copy; `ready` tells a drag in flight when the file is there.
-    Copy { plan: Plan, ready: Option<Ready> },
+    /// A file the user may select next; waits while a copy is queued or being written.
+    Preload(LoadRequest),
+    Export(Box<ExportRequest>),
     Scan(Vec<Root>),
+}
+
+/// How many copies are queued or being written. Preloads wait while any are, so a drop's
+/// file never shares the cores with guesses.
+#[derive(Default)]
+struct Copying {
+    count: Mutex<usize>,
+    idle: Condvar,
+}
+
+impl Copying {
+    fn add(&self, n: isize) {
+        let mut count = self.count.lock().unwrap();
+        *count = count.saturating_add_signed(n);
+        if *count == 0 {
+            self.idle.notify_all();
+        }
+    }
+
+    fn wait_idle(&self) {
+        let mut count = self.count.lock().unwrap();
+        while *count > 0 {
+            count = self.idle.wait(count).unwrap();
+        }
+    }
 }
 
 /// A file folded to one channel: peaks for the waveform, and the samples too when the file is
@@ -179,6 +203,10 @@ impl<T: Send + 'static> Latest<T> {
 pub struct Worker {
     tx: Sender<Job>,
     rx: Receiver<Done>,
+    /// Copies are written one at a time on a thread of their own, never behind the pool's
+    /// preloads, exports and scans.
+    copy_tx: Sender<(Plan, Option<Ready>)>,
+    copying: Arc<Copying>,
     /// The file the user is waiting on loads here, never behind the pool's preloads.
     selected: Arc<Latest<LoadRequest>>,
     analysis: Arc<Latest<(PathBuf, Option<Arc<Peaks>>)>>,
@@ -191,25 +219,23 @@ impl Worker {
         let (tx, job_rx) = channel::<Job>();
         let (done_tx, rx) = channel::<Done>();
         let job_rx = Arc::new(Mutex::new(job_rx));
+        let copying = Arc::new(Copying::default());
         for _ in 0..threads {
             let job_rx = job_rx.clone();
             let done_tx = done_tx.clone();
             let ctx = ctx.clone();
+            let copying = copying.clone();
             std::thread::spawn(move || loop {
                 let job = match job_rx.lock().unwrap().recv() {
                     Ok(j) => j,
                     Err(_) => return,
                 };
                 let done = match job {
-                    Job::Load(req) => load_done(req),
-                    Job::Export(req) => Done::Exported(hark_core::export::run(&req).map_err(|e| format!("{e:#}"))),
-                    Job::Copy { plan, ready } => {
-                        let result = hark_core::copies::finish(&plan).map_err(|e| format!("{e:#}"));
-                        if let Some(r) = &ready {
-                            r.set(result.is_ok());
-                        }
-                        Done::Copied { result, dragged: ready.is_some() }
+                    Job::Preload(req) => {
+                        copying.wait_idle();
+                        load_done(req)
                     }
+                    Job::Export(req) => Done::Exported(hark_core::export::run(&req).map_err(|e| format!("{e:#}"))),
                     Job::Scan(roots) => Done::Scanned(scan(&roots, |phase| {
                         let _ = done_tx.send(Done::Scanning(phase));
                         ctx.request_repaint();
@@ -219,6 +245,25 @@ impl Worker {
                     return;
                 }
                 ctx.request_repaint();
+            });
+        }
+        let (copy_tx, copy_rx) = channel::<(Plan, Option<Ready>)>();
+        {
+            let done_tx = done_tx.clone();
+            let ctx = ctx.clone();
+            let copying = copying.clone();
+            std::thread::spawn(move || {
+                for (plan, ready) in copy_rx {
+                    let result = hark_core::copies::finish(&plan).map_err(|e| format!("{e:#}"));
+                    if let Some(r) = &ready {
+                        r.set(result.is_ok());
+                    }
+                    copying.add(-1);
+                    if done_tx.send(Done::Copied { result, dragged: ready.is_some() }).is_err() {
+                        return;
+                    }
+                    ctx.request_repaint();
+                }
             });
         }
         // A load always reports, even one a newer selection overtook: the window keeps it
@@ -236,11 +281,19 @@ impl Worker {
             let result = measure_span(&span, held, abort).map_err(|e| format!("{e:#}"));
             (!abort()).then_some(Done::SpanMeasured(span, result))
         });
-        Worker { tx, rx, selected, analysis, fold, span }
+        Worker { tx, rx, copy_tx, copying, selected, analysis, fold, span }
     }
 
     pub fn send(&self, job: Job) {
         let _ = self.tx.send(job);
+    }
+
+    /// Writes a planned copy; `ready` tells a drag in flight when the file is there.
+    pub fn copy(&self, plan: Plan, ready: Option<Ready>) {
+        self.copying.add(1);
+        if self.copy_tx.send((plan, ready)).is_err() {
+            self.copying.add(-1);
+        }
     }
 
     /// Loads the file the user is waiting on. Returns the path of a request it replaced

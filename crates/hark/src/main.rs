@@ -666,7 +666,7 @@ impl App {
         let preview = (self.preview && (self.preset.mono.is_some() || !matches!(self.preset.normalize, Normalize::None))).then(|| self.preset.clone());
         let req = LoadRequest { path: path.to_path_buf(), device_rate: self.device_rate(), stream_above_mb: self.config.stream_above_mb, preview };
         if !selected {
-            self.worker.send(Job::Load(req));
+            self.worker.send(Job::Preload(req));
         } else if let Some(skipped) = self.worker.load_selected(req).filter(|p| p != path) {
             self.pending.remove(&skipped);
         }
@@ -1061,7 +1061,7 @@ impl App {
                 let span = req.selection.map(|s| (s.start_secs, s.end_secs)).unwrap_or((0.0, duration));
                 self.export_state = ExportState::Writing { span };
                 self.set_status(format!("Exporting {}", req.output_path().display()), false);
-                self.worker.send(Job::Export(req));
+                self.worker.send(Job::Export(Box::new(req)));
             }
             Some(Err(e)) => self.set_status(format!("Export: {e}"), true),
             None => {}
@@ -1089,7 +1089,7 @@ impl App {
             Ok(plan) if plan.pending.is_none() => self.copy_out(vec![plan.output]),
             Ok(plan) => {
                 self.set_status(format!("Copying {}", tilde(&plan.output)), false);
-                self.worker.send(Job::Copy { plan, ready: None });
+                self.worker.copy(plan, None);
             }
             Err(e) => self.set_status(format!("Copy: {e:#}"), true),
         }
@@ -1108,7 +1108,7 @@ impl App {
         let output = plan.output.clone();
         // Windows waits for the file inside the drag call, so the job must already be queued.
         if plan.pending.is_some() {
-            self.worker.send(Job::Copy { plan, ready: ready.clone() });
+            self.worker.copy(plan, ready.clone());
         }
         self.drag_out(vec![output], image, ready, &what);
     }
