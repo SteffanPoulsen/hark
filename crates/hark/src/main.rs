@@ -1105,10 +1105,12 @@ impl App {
         };
         let ready = plan.pending.as_ref().map(|_| dnd::Ready::new());
         let what = tilde(&plan.output);
-        self.drag_out(vec![plan.output.clone()], image, ready.clone(), &what);
+        let output = plan.output.clone();
+        // Windows waits for the file inside the drag call, so the job must already be queued.
         if plan.pending.is_some() {
-            self.worker.send(Job::Copy { plan, ready });
+            self.worker.send(Job::Copy { plan, ready: ready.clone() });
         }
+        self.drag_out(vec![output], image, ready, &what);
     }
 
     /// Hands `paths` to the drop target of the drag the pointer is in the middle of.
