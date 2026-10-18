@@ -20,7 +20,7 @@ Auditioning a large library in a DAW means importing first, and in a file manage
 - **Waveform selection with fades.** Select a region, trim it to the sound, step through the takes a recording holds, and set fade in and out.
 - **Preset-driven export.** WAV or FLAC, bit depth with dither, resampling, mono downmix, peak or EBU R128 loudness normalisation under a true-peak ceiling, and a file name template; any of it can be overridden for one export. Preview plays and draws the sound as the preset would export it, folded to mono and at its normalised level, the selection's with its fades when there is one.
 - **An origin inside every export.** A RIFF chunk and BWF `bext` description in WAV, an APPLICATION block and Vorbis comment in FLAC: source path and hash, selection, fades, preset and applied gain. `hark-cli inspect` reads it back and `hark-cli reexport` runs the recipe again with changes. A sidecar is never the only copy.
-- **Into a DAW directly.** Ctrl-drag the selection out of the waveform into Reaper, Pro Tools or a folder, or copy it with Ctrl+C and paste. The file is written through the export preset into a copy folder that hark never empties on its own, since a DAW may reference it in place.
+- **Into a DAW directly.** Ctrl-drag (Option-drag on macOS) the selection out of the waveform into Reaper, Pro Tools or a folder, or copy it with Ctrl+C (Cmd+C) and paste. The file is written through the export preset into a copy folder that hark never empties on its own, since a DAW may reference it in place.
 - **A CLI for all of it.** `hark-cli` sits on the same core as the window, with `--json` on every command, so a script or an agent can search, mark, analyse and export without a window.
 
 ![The presets page of the settings window](docs/screenshots/presets.png)
@@ -29,7 +29,7 @@ Auditioning a large library in a DAW means importing first, and in a file manage
 
 Download the archive for Linux x86_64, Windows x86_64 or macOS (universal) from the [Releases](../../releases) page. On Linux, `install.sh` in the archive puts `hark` and `hark-cli` in `~/.local/bin` and installs the desktop entry and icon.
 
-Dragging out and clipboard copy need Wayland on Linux and are not available on macOS; everything else runs on all three.
+On Linux, dragging out and clipboard copy need Wayland; everything else runs on all three.
 
 ### From source
 

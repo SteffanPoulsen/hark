@@ -16,6 +16,21 @@ pub fn binding(chord: &str) -> Option<Binding> {
     Some(Binding { modifiers: Modifiers { alt: c.alt, ctrl: false, shift: c.shift, mac_cmd: false, command: c.ctrl }, key })
 }
 
+/// The command modifier as the platform names it; a stored chord says `Ctrl` everywhere.
+pub const COMMAND: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+
+/// The modifier that makes a drag a copy on this platform, which starts a drag out of the
+/// wave: Option on macOS, where Cmd during a drag asks for a move, and Ctrl elsewhere.
+pub const DRAG_COPY: &str = if cfg!(target_os = "macos") { "Option" } else { "Ctrl" };
+
+pub fn drag_copy_held(m: Modifiers) -> bool {
+    if cfg!(target_os = "macos") {
+        m.alt
+    } else {
+        m.ctrl
+    }
+}
+
 /// The chord in a few characters: `Ctrl+C`, `←`, `Space`.
 pub fn hint(chord: &str) -> String {
     let Some(b) = binding(chord) else { return chord.to_string() };
@@ -26,14 +41,15 @@ pub fn hint(chord: &str) -> String {
         Key::ArrowDown => "↓",
         k => k.symbol_or_name(),
     };
-    format!("{}{key}", prefix(b.modifiers))
+    format!("{}{key}", prefix(b.modifiers, COMMAND))
 }
 
-fn prefix(m: Modifiers) -> String {
+fn prefix(m: Modifiers, command: &str) -> String {
     let mut s = String::new();
-    for (on, name) in [(m.command, "Ctrl+"), (m.shift, "Shift+"), (m.alt, "Alt+")] {
+    for (on, name) in [(m.command, command), (m.shift, "Shift"), (m.alt, "Alt")] {
         if on {
             s.push_str(name);
+            s.push('+');
         }
     }
     s
@@ -46,7 +62,7 @@ pub fn chord_of(key: Key, m: Modifiers) -> Option<String> {
     if matches!(key, ShiftLeft | ShiftRight | ControlLeft | ControlRight | AltLeft | AltRight | SuperLeft | SuperRight) {
         return None;
     }
-    Some(format!("{}{}", prefix(m), key.name()))
+    Some(format!("{}{}", prefix(m, "Ctrl"), key.name()))
 }
 
 fn held(m: Modifiers, pattern: Modifiers) -> bool {

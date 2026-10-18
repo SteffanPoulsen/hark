@@ -142,7 +142,10 @@ fn main() -> eframe::Result {
             .with_app_id("hark")
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/hark-256.png")).expect("the icon is a PNG"))
             .with_inner_size([1500.0, 900.0])
-            .with_min_inner_size([900.0, 600.0]),
+            .with_min_inner_size([900.0, 600.0])
+            // hark takes no file drops. As a drop target, the window would read the name of a
+            // file it is itself dragging out, and that read waits for the file to be written.
+            .with_drag_and_drop(false),
         ..Default::default()
     };
     eframe::run_native(
@@ -1208,7 +1211,8 @@ impl App {
             return self.drag_out(vec![output], image, None, &what);
         }
         let ready = Some(dnd::Ready::new());
-        // Windows waits for the file inside the drag call, so the job must already be queued.
+        // A drop target may ask for the file the moment the drag starts, so the job must
+        // already be queued.
         if !self.write_copy(&req, plan, ready.clone()) {
             return;
         }
@@ -2380,7 +2384,7 @@ impl App {
                 theme::menu_items(ui);
                 let has_selection = self.wave.selection.is_some();
                 let item = |ui: &mut egui::Ui, icon: &str, label: &str, key: &str, enabled: bool| ui.add_enabled(enabled, egui::Button::new(theme::icon_text(icon, label, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER))).on_hover_text(key).clicked();
-                if item(ui, icons::COPY, "Copy", "Ctrl+C; Ctrl-drag the wave to drag it out", true) {
+                if item(ui, icons::COPY, "Copy", &format!("{}+C; {}-drag the wave to drag it out", keys::COMMAND, keys::DRAG_COPY), true) {
                     action = Some(WaveAction::Copy);
                 }
                 ui.separator();
@@ -2920,8 +2924,8 @@ impl App {
                     (pair(Action::SelectionStart, Action::SelectionEnd), "Selection"),
                     (self.key_of(Action::Preview), "Preview"),
                     (self.key_of(Action::Export), "Export"),
-                    ("Ctrl+C".to_string(), "Copy"),
-                    ("Ctrl+Drag".to_string(), "Drag out"),
+                    (format!("{}+C", keys::COMMAND), "Copy"),
+                    (format!("{}+Drag", keys::DRAG_COPY), "Drag out"),
                 ];
                 for (key, action) in &hints {
                     self.key_hint(ui, key, action);

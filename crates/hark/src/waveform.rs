@@ -106,7 +106,8 @@ impl ClipFades {
 pub enum WaveEvent {
     None,
     Seek(f64),
-    /// A Ctrl-drag began on the wave: the selection is being dragged out of the window.
+    /// A Ctrl-drag (Option on macOS) began on the wave: the selection is being dragged out of the
+    /// window.
     DragOut,
 }
 
@@ -558,11 +559,11 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
         }
     }
 
-    // Cursor. Ctrl over the wave means a drag would carry the selection out, as in a file
-    // manager.
-    let ctrl = ui.input(|i| i.modifiers.ctrl);
+    // Cursor. The platform's copy-drag modifier over the wave means a drag would carry the
+    // selection out, as in a file manager.
+    let copy_drag = ui.input(|i| crate::keys::drag_copy_held(i.modifiers));
     match active {
-        _ if ctrl && resp.hovered() => ui.ctx().set_cursor_icon(CursorIcon::Grab),
+        _ if copy_drag && resp.hovered() => ui.ctx().set_cursor_icon(CursorIcon::Grab),
         Some(Drag::Start) | Some(Drag::End) | Some(Drag::FadeIn) | Some(Drag::FadeOut) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
         Some(Drag::Move { .. }) => ui.ctx().set_cursor_icon(CursorIcon::Grabbing),
         _ if resp.hovered() && lane.contains(resp.hover_pos().unwrap_or(Pos2::ZERO)) => {}
@@ -572,7 +573,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
 
     // Left-button interaction.
     let mut event = WaveEvent::None;
-    if resp.drag_started_by(PointerButton::Primary) && ctrl {
+    if resp.drag_started_by(PointerButton::Primary) && copy_drag {
         state.drag = None;
         return (WaveEvent::DragOut, resp);
     }
@@ -670,7 +671,7 @@ pub fn ghost(peaks: &Peaks, span: (f64, f64), gain_at: &dyn Fn(f64) -> f32, colo
     let mut rgba = vec![0u8; w * h * 4];
     let mut put = |x: usize, y: usize, c: Color32| {
         let i = (y * w + x) * 4;
-        rgba[i..i + 4].copy_from_slice(&[c.r(), c.g(), c.b(), c.a()]);
+        rgba[i..i + 4].copy_from_slice(&c.to_srgba_unmultiplied());
     };
     let card = Color32::from_rgba_unmultiplied(colors.card.r(), colors.card.g(), colors.card.b(), 200);
     for y in 0..h {

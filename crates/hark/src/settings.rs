@@ -196,7 +196,8 @@ impl App {
         let mut reopen_audio = false;
         let mut retheme = false;
         card(ui, &theme, |ui| {
-            row(ui, &theme, true, "Window scale", "Ctrl+= and Ctrl+- change it too.", |ui| {
+            let c = crate::keys::COMMAND;
+            row(ui, &theme, true, "Window scale", &format!("{c}+= and {c}+- change it too."), |ui| {
                 ui.allocate_ui_with_layout(egui::vec2(200.0, 28.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     // The new scale applies once the drag ends; applying it live would rescale
                     // the slider under the pointer.
@@ -490,7 +491,7 @@ impl App {
     /// taken from this window's events, so the main window's handler never sees it.
     fn page_keys(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme.clone();
-        heading(ui, &theme, "Keys", "Click a key and press the new one, with any modifiers held; Escape keeps the old. The list's arrows, the tag digits and Ctrl+C are fixed.");
+        heading(ui, &theme, "Keys", &format!("Click a key and press the new one, with any modifiers held; Escape keeps the old. The list's arrows, the tag digits and {}+C are fixed.", crate::keys::COMMAND));
         if let Some(action) = self.key_capture {
             let got = ui.ctx().input(|i| i.events.iter().find_map(|e| match e {
                 egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
