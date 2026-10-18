@@ -829,9 +829,9 @@ fn run() -> Result<()> {
                     if config.tags.iter().any(|t| t.name == new) {
                         return Err(anyhow!("tag {new} exists"));
                     }
+                    let n = db.rename_tag(&old, &new)?;
                     config.tags[i].name = new.clone();
                     config.save()?;
-                    let n = db.rename_tag(&old, &new)?;
                     if !json {
                         println!("renamed {old} to {new} on {n} files");
                     }
@@ -845,9 +845,9 @@ fn run() -> Result<()> {
                 }
                 TagsCmd::Remove { name } => {
                     let i = find(&config, &name)?;
+                    let n = db.remove_tag(&name)?;
                     config.tags.remove(i);
                     config.save()?;
-                    let n = db.remove_tag(&name)?;
                     if !json {
                         println!("removed {name} from {n} files");
                     }
@@ -952,8 +952,8 @@ fn run() -> Result<()> {
                 }
                 PresetsCmd::Rename { old, new } => {
                     config.rename_preset(&old, &new)?;
-                    config.save()?;
                     open_db(&project)?.rename_card_preset(&old, &new)?;
+                    config.save()?;
                 }
                 PresetsCmd::Remove { name } => {
                     config.remove_preset(&name)?;

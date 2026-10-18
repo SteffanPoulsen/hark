@@ -94,6 +94,13 @@ const FILE_TYPES: [(&str, &[&str]); 7] = [
     ("opus", &["opus"]),
 ];
 
+type ConfigStamp = (Option<std::time::SystemTime>, Option<std::time::SystemTime>);
+
+fn config_stamp(config: &Config) -> ConfigStamp {
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    (modified(&hark_core::paths::config_file()), config.active.as_ref().and_then(|a| modified(&a.path)))
+}
+
 /// A path for display, with the home directory as `~`.
 fn tilde(path: &Path) -> String {
     match std::env::home_dir().and_then(|h| path.strip_prefix(h).ok().map(|r| r.to_path_buf())) {
@@ -303,6 +310,8 @@ fn toggle_in<T: PartialEq>(set: &mut Vec<T>, item: T) {
 
 struct App {
     config: Config,
+    /// When the config file and the open project's file last changed, as the window knows them.
+    config_stamp: ConfigStamp,
     theme: Theme,
     db: Db,
     player: Option<Player>,
@@ -411,7 +420,6 @@ struct App {
     /// The file a row's menu was opened on, which it closes without when the list moves.
     menu_file: Option<PathBuf>,
     tag_edit: Option<(usize, String)>,
-    /// The file menu's new-tag field.
     /// The action whose key the settings window is waiting for.
     key_capture: Option<Action>,
     /// The bounds the voice was given when it was last played from the selection, which it
@@ -460,6 +468,7 @@ impl App {
         let scanning = (!config.roots().is_empty()).then_some(ScanPhase::Walking { seen: 0 });
         let expanded = config.roots().iter().map(|r| r.path.clone()).collect();
         let mut app = App {
+            config_stamp: config_stamp(&config),
             config,
             theme,
             db,
@@ -538,6 +547,50 @@ impl App {
         app.restore_card();
         app.restore_tabs();
         app
+    }
+
+    /// Takes up the config when another program, such as `hark-cli`, changed it on disk, so
+    /// the window's next save does not put back what that program changed. It runs before the
+    /// frame stores the tabs and the card, so the database rows the CLI rewrote are read as
+    /// it left them.
+    fn follow_config(&mut self, ctx: &egui::Context) {
+        let stamp = config_stamp(&self.config);
+        if stamp == self.config_stamp {
+            return;
+        }
+        self.config_stamp = stamp;
+        let disk = match Config::load() {
+            Ok(c) => c,
+            Err(e) => {
+                self.set_status(format!("Config: {e:#}"), true);
+                return;
+            }
+        };
+        if disk == self.config {
+            return;
+        }
+        let project_changed = disk.project_id() != self.config.project_id();
+        let roots_changed = disk.roots() != self.config.roots();
+        let tags_changed = !disk.tags.iter().map(|t| &t.name).eq(self.config.tags.iter().map(|t| &t.name));
+        if disk.ui_zoom != self.config.ui_zoom {
+            ctx.set_zoom_factor(disk.ui_zoom.clamp(0.5, 3.0));
+        }
+        self.config = disk;
+        self.config_stamp = config_stamp(&self.config);
+        self.db.set_project(self.config.project_id());
+        if tags_changed {
+            self.tag_edit = None;
+        }
+        if project_changed || tags_changed {
+            self.restore_tabs();
+        }
+        self.restore_card();
+        if project_changed || roots_changed {
+            self.forget_orphan_folders();
+            self.expanded = self.root_paths().into_iter().collect();
+            self.rescan();
+        }
+        self.list_dirty = true;
     }
 
     /// The tab in front as it stands.
@@ -1883,10 +1936,23 @@ impl App {
         if let Err(e) = self.config.save_target() {
             self.set_status(format!("Project: {e:#}"), true);
         }
-        if matches!(&self.location, Some(Location::Folder(d)) if d.starts_with(path)) {
+        self.forget_orphan_folders();
+        self.list_dirty = true;
+    }
+
+    /// Lets go of the folders, in the front tab and the waiting ones, that no library folder
+    /// holds any more; their rows stay in the database for other projects.
+    fn forget_orphan_folders(&mut self) {
+        let roots = self.root_paths();
+        let orphan = |l: &Option<Location>| matches!(l, Some(Location::Folder(d)) if !roots.iter().any(|r| d.starts_with(r)));
+        if orphan(&self.location) {
             self.location = None;
         }
-        self.list_dirty = true;
+        for tab in &mut self.tabs {
+            if orphan(&tab.location) {
+                tab.location = None;
+            }
+        }
     }
 
     fn rescan(&mut self) {
@@ -3726,9 +3792,10 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.follow_config(&ctx);
         self.remember_card();
         self.remember_tabs();
-        let ctx = ui.ctx().clone();
         let zoom = ctx.zoom_factor();
         if (zoom - self.config.ui_zoom).abs() > 1e-3 {
             self.config.ui_zoom = zoom;

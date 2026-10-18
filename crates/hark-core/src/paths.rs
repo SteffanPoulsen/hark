@@ -28,6 +28,17 @@ pub fn peaks_cache_dir() -> PathBuf {
     dirs().cache_dir().join("peaks")
 }
 
+/// Writes `bytes` beside `path` and renames them over it, so a reader never sees half a file:
+/// the window and the CLI each reload what the other saves. The temporary name carries the
+/// process, so two writers never share one.
+pub fn write_whole(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    ensure_parent(path)?;
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(format!(".{}.tmp", std::process::id()));
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(&temp, path)
+}
+
 pub fn ensure_parent(path: &std::path::Path) -> std::io::Result<()> {
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;

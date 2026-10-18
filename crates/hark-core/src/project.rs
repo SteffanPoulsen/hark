@@ -75,8 +75,7 @@ impl Project {
                 }
             }
         }
-        crate::paths::ensure_parent(path)?;
-        std::fs::write(path, serde_json::to_vec_pretty(&on_disk)?).with_context(|| format!("write {}", path.display()))
+        crate::paths::write_whole(path, &serde_json::to_vec_pretty(&on_disk)?).with_context(|| format!("write {}", path.display()))
     }
 }
 

@@ -310,8 +310,7 @@ impl Config {
     }
 
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        crate::paths::ensure_parent(path)?;
-        std::fs::write(path, serde_json::to_vec_pretty(self)?).with_context(|| format!("write {}", path.display()))
+        crate::paths::write_whole(path, &serde_json::to_vec_pretty(self)?).with_context(|| format!("write {}", path.display()))
     }
 
     /// Projects that lived in the config become files under the config folder, keeping their
