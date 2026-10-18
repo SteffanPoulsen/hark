@@ -192,6 +192,9 @@ enum Cmd {
         /// The channels to hear, numbered from 1: `2` for the right alone.
         #[arg(long)]
         channels: Option<Channels>,
+        /// Play the selection, or the whole file, backwards. A file that streams cannot.
+        #[arg(long)]
+        reverse: bool,
         /// Repeat the selection; plays for `--for` seconds, or until interrupted.
         #[arg(long = "loop")]
         looped: bool,
@@ -417,6 +420,10 @@ struct ExportArgs {
     /// the preset's mono folds what is kept.
     #[arg(long)]
     channels: Option<Channels>,
+    /// Reverse the selection, or the whole file; the fades apply to it reversed, so the
+    /// fade-in is at the start of what is heard.
+    #[arg(long)]
+    reverse: bool,
     /// Shrink the selection, or the whole file, to its sound: what sits 40 dB under its peak goes.
     #[arg(long)]
     trim: bool,
@@ -725,7 +732,7 @@ fn run() -> Result<()> {
         }
         Cmd::Analyze { file, store } => {
             let file = abs(&file)?;
-            let whole = hark_core::loudness::Span { path: file.clone(), secs: None, channels: None, fades: Default::default(), fold: None, rate: None };
+            let whole = hark_core::loudness::Span { path: file.clone(), secs: None, channels: None, reverse: false, fades: Default::default(), fold: None, rate: None };
             let l = hark_core::loudness::measure_file(&whole, &|| false)?.loudness;
             if store {
                 open_db(&project)?.set_loudness(&file, &l)?;
@@ -962,6 +969,7 @@ fn run() -> Result<()> {
                 }
             }
             req.channels = a.channels;
+            req.reverse = a.reverse;
             req.trim = a.trim;
             req.fade_in_secs = a.fade_in;
             req.fade_out_secs = a.fade_out;
@@ -1126,7 +1134,7 @@ fn run() -> Result<()> {
                 }
             }
         }
-        Cmd::Play { file, start, end, from, channels, looped, seconds, jump, stream_above, preset } => {
+        Cmd::Play { file, start, end, from, channels, reverse, looped, seconds, jump, stream_above, preset } => {
             let file = abs(&file)?;
             let config = load(&project)?;
             let player = hark_core::audition::Player::open(config.output_sample_rate, config.output_device.as_deref())?;
@@ -1134,15 +1142,18 @@ fn run() -> Result<()> {
             if let Some(c) = channels.filter(|c| !c.fits(info.channels)) {
                 return Err(anyhow!("{} has {} channels; it has no channel {}", file.display(), info.channels, c.label()));
             }
+            let streamed = info.decoded_mb() > stream_above.unwrap_or(config.stream_above_mb);
+            if streamed && reverse {
+                return Err(anyhow!("{} streams, and a stream plays forwards; raise --stream-above to reverse it", file.display()));
+            }
             let preset = preset.map(|n| config.preset(&n).cloned().ok_or_else(|| anyhow!("unknown preset {n}"))).transpose()?;
             let fold = preset.as_ref().and_then(|p| p.mono);
             let selection = (start.is_some() || end.is_some()).then(|| hark_core::Selection { start_secs: start.unwrap_or(0.0), end_secs: end.unwrap_or(info.duration_secs) });
-            let level = preset.as_ref().map(|p| hark_core::export::preview_level(&file, p, selection, channels, Default::default(), &|| false)).transpose()?.unwrap_or_default();
+            let level = preset.as_ref().map(|p| hark_core::export::preview_level(&file, p, selection, channels, reverse, Default::default(), &|| false)).transpose()?.unwrap_or_default();
             if let Some(db) = level.gain_db {
                 player.set_gain(hark_core::pcm::db_to_gain(db));
             }
             let (gain_db, warnings) = (level.gain_db, level.warnings);
-            let streamed = info.decoded_mb() > stream_above.unwrap_or(config.stream_above_mb);
             let source = if streamed {
                 Source::File { path: file.clone(), source_rate: info.sample_rate, channels: info.channels, source_frames: (info.duration_secs * info.sample_rate as f64).round() as u64 }
             } else {
@@ -1161,6 +1172,7 @@ fn run() -> Result<()> {
                 fade_out: 0,
                 fade_shape: Default::default(),
                 channels,
+                reverse,
                 fold,
             };
             let from = from.map(frame).unwrap_or(clip.start);

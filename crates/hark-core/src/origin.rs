@@ -61,6 +61,9 @@ pub struct Origin {
     /// The source's channels kept, numbered from 1; absent when all were.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channels: Option<Channels>,
+    /// The selection, or the whole file, was reversed before its fades.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reverse: bool,
     pub fade_in_secs: f64,
     pub fade_out_secs: f64,
     /// Hand-set level in dB; zero when the preset normalised instead.
@@ -99,6 +102,9 @@ impl Origin {
         }
         if let Some(c) = self.channels {
             line.push_str(&format!(" ch {}", c.label()));
+        }
+        if self.reverse {
+            line.push_str(" reversed");
         }
         line
     }

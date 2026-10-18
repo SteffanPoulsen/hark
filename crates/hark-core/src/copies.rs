@@ -24,6 +24,7 @@ pub struct CopyRequest {
     pub root: Option<Root>,
     pub selection: Option<Selection>,
     pub channels: Option<Channels>,
+    pub reverse: bool,
     pub fade_in_secs: f64,
     pub fade_out_secs: f64,
     /// What the copy is written through; the path template is not used.
@@ -46,6 +47,7 @@ impl CopyRequest {
             root: config.root_of(source).cloned(),
             selection: None,
             channels: None,
+            reverse: false,
             fade_in_secs: 0.0,
             fade_out_secs: 0.0,
             preset,
@@ -63,7 +65,7 @@ impl CopyRequest {
     }
 
     /// A copy already in the folder made from this very recipe: same source, selection,
-    /// channels, fades and gain. The origin inside each candidate says; the source matches by content hash
+    /// channels, direction, fades and gain. The origin inside each candidate says; the source matches by content hash
     /// when one is known, else by path and size.
     pub fn existing(&self) -> Option<PathBuf> {
         let stem = self.file_name();
@@ -83,6 +85,7 @@ impl CopyRequest {
             same_source
                 && o.selection.map(|s| (s.start_secs, s.end_secs)) == self.selection.map(|s| (s.start_secs, s.end_secs))
                 && o.channels == self.channels
+                && o.reverse == self.reverse
                 && o.fade_in_secs == self.fade_in_secs
                 && o.fade_out_secs == self.fade_out_secs
                 && o.gain_db == self.gain_db
@@ -97,14 +100,16 @@ impl CopyRequest {
             && self.folder == other.folder
             && self.selection == other.selection
             && self.channels == other.channels
+            && self.reverse == other.reverse
             && self.fade_in_secs == other.fade_in_secs
             && self.fade_out_secs == other.fade_out_secs
             && self.gain_db == other.gain_db
             && self.preset.clone().effective() == other.preset.clone().effective()
     }
 
-    /// `<stem> <in>-<out> ch<n>.<ext>`: the span, when there is one, in seconds, since a
-    /// colon is not a file name character everywhere; the channels kept, when not all are.
+    /// `<stem> <in>-<out> ch<n> rev.<ext>`: the span, when there is one, in seconds, since a
+    /// colon is not a file name character everywhere; the channels kept, when not all are;
+    /// `rev` when it plays backwards.
     pub fn file_name(&self) -> String {
         let mut name = self.source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "copy".into());
         if let Some(s) = self.selection {
@@ -112,6 +117,9 @@ impl CopyRequest {
         }
         if let Some(c) = self.channels {
             name.push_str(&format!(" ch{}", c.label()));
+        }
+        if self.reverse {
+            name.push_str(" rev");
         }
         format!("{name}.{}", self.extension())
     }
@@ -147,6 +155,7 @@ impl CopyRequest {
             root: self.root.clone(),
             selection: self.selection,
             channels: self.channels,
+            reverse: self.reverse,
             trim: false,
             fade_in_secs: self.fade_in_secs,
             fade_out_secs: self.fade_out_secs,
@@ -263,6 +272,7 @@ mod tests {
             root: None,
             selection: Some(Selection { start_secs: 0.1, end_secs: 0.6 }),
             channels: None,
+            reverse: false,
             fade_in_secs: 0.0,
             fade_out_secs: 0.0,
             preset: ExportPreset::default(),

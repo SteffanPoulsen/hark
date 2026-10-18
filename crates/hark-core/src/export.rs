@@ -24,6 +24,8 @@ pub struct ExportRequest {
     pub selection: Option<Selection>,
     /// The source's channels kept, before anything else is done; `None` keeps them all.
     pub channels: Option<Channels>,
+    /// Play the selection, or the whole file, backwards; the fades apply to it reversed.
+    pub reverse: bool,
     /// Shrink the selection, or the whole file, to the sound in its kept channels.
     pub trim: bool,
     pub fade_in_secs: f64,
@@ -72,6 +74,7 @@ impl ExportRequest {
             root: config.root_of(source).cloned(),
             selection: None,
             channels: None,
+            reverse: false,
             trim: false,
             fade_in_secs: 0.0,
             fade_out_secs: 0.0,
@@ -167,7 +170,7 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
         source = source.slice_frames(source.frame_at(a), source.frame_at(b));
     }
     let req = &req;
-    let span = Span::new(&req.source, req.selection.map(|s| (s.start_secs, s.end_secs)), req.fades(&preset), preset.mono, preset.sample_rate, source.sample_rate).picking(req.channels);
+    let span = Span::new(&req.source, req.selection.map(|s| (s.start_secs, s.end_secs)), req.fades(&preset), preset.mono, preset.sample_rate, source.sample_rate).picking(req.channels).reversing(req.reverse);
     let start = req.selection.map(|s| (s.start_secs.max(0.0) * source.sample_rate as f64).round() as u64).unwrap_or(0);
     let frames = (start, start + source.frames() as u64);
     let stamp = loudness::Stamp::from(&source_meta);
@@ -199,6 +202,7 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
         },
         selection: req.selection.map(|s| SelectionRef { start_secs: s.start_secs, end_secs: s.end_secs }),
         channels: req.channels,
+        reverse: req.reverse,
         fade_in_secs: req.fade_in_secs,
         fade_out_secs: req.fade_out_secs,
         gain_db: req.gain_db,
@@ -237,9 +241,14 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
     Ok(ExportResult { output, origin, warnings })
 }
 
-/// The selection, already cut from the source, faded, folded and resampled: what an export's
-/// level is set on, and what a measurement of that level is of.
-pub fn shape(mut pcm: Pcm, fades: Fades, fold: Option<crate::pcm::DownmixMode>, rate: Option<u32>) -> Result<Pcm> {
+/// The selection, already cut from the source with its channels picked, reversed, faded,
+/// folded and resampled: what an export's level is set on, and what a measurement of that
+/// level is of. The fades come after the reverse, so a fade-in is at the start of what is
+/// heard.
+pub fn shape(mut pcm: Pcm, reverse: bool, fades: Fades, fold: Option<crate::pcm::DownmixMode>, rate: Option<u32>) -> Result<Pcm> {
+    if reverse {
+        pcm.reverse();
+    }
     fades.apply(&mut pcm);
     if let Some(mode) = fold {
         pcm = pcm.to_mono(mode);
@@ -255,7 +264,7 @@ pub fn shape(mut pcm: Pcm, fades: Fades, fold: Option<crate::pcm::DownmixMode>, 
 fn process(pcm: Pcm, req: &ExportRequest, preset: &ExportPreset, known: Option<Loudness>) -> Result<(Pcm, Vec<String>, Measured)> {
     let mut warnings = Vec::new();
     let mut measured = Measured::default();
-    let mut pcm = shape(pcm, req.fades(preset), preset.mono, preset.sample_rate)?;
+    let mut pcm = shape(pcm, req.reverse, req.fades(preset), preset.mono, preset.sample_rate)?;
 
     match preset.normalize {
         Normalize::None => {
@@ -323,14 +332,16 @@ pub struct PreviewLevel {
 }
 
 /// The gain `preset` would give `selection` of `path`, or the whole of it, with `channels`
-/// kept and under `fades`, by the rule an export applies to the audio an export shapes.
-/// Measured in one streaming pass, so a long span is never held whole.
-pub fn preview_level(path: &Path, preset: &ExportPreset, selection: Option<Selection>, channels: Option<Channels>, fades: Fades, abort: &dyn Fn() -> bool) -> Result<PreviewLevel> {
+/// kept, reversed when `reverse` says, and under `fades`, by the rule an export applies to the
+/// audio an export shapes. Measured in one streaming pass, so a long span is never held whole,
+/// unless it is reversed.
+#[allow(clippy::too_many_arguments)]
+pub fn preview_level(path: &Path, preset: &ExportPreset, selection: Option<Selection>, channels: Option<Channels>, reverse: bool, fades: Fades, abort: &dyn Fn() -> bool) -> Result<PreviewLevel> {
     if matches!(preset.normalize, Normalize::None) {
         return Ok(PreviewLevel::default());
     }
     let source_rate = crate::decode::probe(path)?.sample_rate;
-    let span = Span::new(path, selection.map(|s| (s.start_secs, s.end_secs)), fades, preset.mono, preset.sample_rate, source_rate).picking(channels);
+    let span = Span::new(path, selection.map(|s| (s.start_secs, s.end_secs)), fades, preset.mono, preset.sample_rate, source_rate).picking(channels).reversing(reverse);
     Ok(preview_level_from(&loudness::measure_file(&span, abort)?.loudness, preset))
 }
 
@@ -352,6 +363,7 @@ pub fn request_from_origin(origin: &Origin, output_root: &Path, output_path: Opt
         trim: false,
         selection: origin.selection.map(|s| Selection { start_secs: s.start_secs, end_secs: s.end_secs }),
         channels: origin.channels,
+        reverse: origin.reverse,
         fade_in_secs: origin.fade_in_secs,
         fade_out_secs: origin.fade_out_secs,
         gain_db: origin.gain_db,
@@ -392,6 +404,7 @@ mod tests {
             root: None,
             selection: Some(Selection { start_secs: 0.7, end_secs: 3.1 }),
             channels: None,
+            reverse: false,
             trim: false,
             fade_in_secs: 0.25,
             fade_out_secs: 0.5,
@@ -473,6 +486,32 @@ mod tests {
         assert_eq!((upgraded.channels, upgraded.preset.mono), (written.channels, Some(crate::pcm::DownmixMode::Average)));
     }
 
+    /// A reversed selection exports backwards with its fade-in at the start of what is heard,
+    /// and its level is measured of it reversed.
+    #[test]
+    fn reversed_selection_exports_backwards() {
+        let dir = std::env::temp_dir().join(format!("hark-export-reverse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("swell.wav");
+        let n = 48_000;
+        let sample = |f: usize| f as f32 / n as f32 * 0.8 * (f as f32 * 0.05).sin();
+        crate::wav::write(&source, &Pcm { sample_rate: 48_000, channels: 1, samples: (0..n).map(sample).collect() }, 32, false, b"{}", &Default::default()).unwrap();
+        let mut req = request_from_origin(&Origin { reverse: true, selection: Some(SelectionRef { start_secs: 0.25, end_secs: 0.75 }), fade_in_secs: 0.1, ..stub_origin(&source) }, &dir, Some(dir.join("rev.wav")));
+        req.preset = ExportPreset { bits: 32, normalize: Normalize::Lufs { target_lufs: -20.0, true_peak_ceiling_dbfs: 0.0 }, fade_shape: FadeShape::Linear, ..Default::default() };
+        let result = run(&req).unwrap();
+        let out = crate::decode::decode(&result.output).unwrap();
+        let gain = db_to_gain(result.origin.measured.applied_gain_db);
+        let (first, fade) = (12_000, 4_800);
+        assert_eq!(out.frames(), 24_000);
+        assert_eq!(out.samples[0], 0.0, "the fade-in starts what is heard");
+        assert!((fade..out.frames()).all(|k| (out.samples[k] - sample(first + 24_000 - 1 - k) * gain).abs() < 1e-5), "the selection was not written backwards");
+        let span = Span::new(&source, Some((0.25, 0.75)), req.fades(&req.preset), None, None, 48_000).reversing(true);
+        let level = loudness::measure_file(&span, &|| false).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!((level.loudness.integrated_lufs - result.origin.measured.source_lufs.unwrap()).abs() < 1e-6, "the span measured is not the audio exported");
+        assert!(result.origin.reverse);
+    }
+
     fn stub_origin(source: &Path) -> Origin {
         let info = crate::decode::probe(source).unwrap();
         Origin {
@@ -481,6 +520,7 @@ mod tests {
             source: SourceRef { path: source.to_path_buf(), root: None, root_path: None, file_name: String::new(), size: 0, blake3: String::new(), sample_rate: info.sample_rate, channels: info.channels, duration_secs: info.duration_secs },
             selection: None,
             channels: None,
+            reverse: false,
             fade_in_secs: 0.0,
             fade_out_secs: 0.0,
             gain_db: 0.0,

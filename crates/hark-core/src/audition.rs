@@ -80,6 +80,9 @@ pub struct Clip {
     pub fade_shape: FadeShape,
     /// The source's channels heard; `None` is all of them.
     pub channels: Option<Channels>,
+    /// `start..end` heard backwards, with the fades where they are heard. A whole source only:
+    /// a streamed clip plays forwards.
+    pub reverse: bool,
     /// Heard folded to one channel, as an export through a mono preset would be.
     pub fold: Option<DownmixMode>,
 }
@@ -87,7 +90,7 @@ pub struct Clip {
 impl Clip {
     pub fn whole(pcm: Arc<Pcm>) -> Clip {
         let end = pcm.frames();
-        Clip { source: Source::Whole(pcm), start: 0, end, looped: false, fade_in: 0, fade_out: 0, fade_shape: FadeShape::EqualPower, channels: None, fold: None }
+        Clip { source: Source::Whole(pcm), start: 0, end, looped: false, fade_in: 0, fade_out: 0, fade_shape: FadeShape::EqualPower, channels: None, reverse: false, fold: None }
     }
 }
 
@@ -100,18 +103,31 @@ struct Bounds {
     fade_out: usize,
     fade_shape: FadeShape,
     channels: Option<Channels>,
+    reverse: bool,
     fold: Option<DownmixMode>,
 }
 
 impl Bounds {
     fn of(clip: &Clip) -> Bounds {
-        Bounds { start: clip.start, end: clip.end, looped: clip.looped, fade_in: clip.fade_in, fade_out: clip.fade_out, fade_shape: clip.fade_shape, channels: clip.channels, fold: clip.fold }
+        let reverse = clip.reverse && !clip.source.is_streamed();
+        Bounds { start: clip.start, end: clip.end, looped: clip.looped, fade_in: clip.fade_in, fade_out: clip.fade_out, fade_shape: clip.fade_shape, channels: clip.channels, reverse, fold: clip.fold }
     }
 
     /// Whether going from `self` to `other` changes what is heard at the same position, which
-    /// a voice crosses over rather than steps.
+    /// a voice crosses over rather than steps. Moving a reversed clip's edges moves every
+    /// frame of it.
     fn reshapes(&self, other: &Bounds) -> bool {
-        self.fold != other.fold || self.channels != other.channels
+        let moved = (self.start, self.end) != (other.start, other.end);
+        self.fold != other.fold || self.channels != other.channels || self.reverse != other.reverse || (self.reverse && moved)
+    }
+
+    /// The source frame heard at position `pos`.
+    fn source_frame(&self, pos: usize) -> usize {
+        if self.reverse {
+            (self.start + self.end).saturating_sub(pos + 1)
+        } else {
+            pos
+        }
     }
 
     /// Kept inside a whole source: the window may send the bounds of the file it now shows to
@@ -219,7 +235,8 @@ impl Feed {
         let src: &[f32] = match self {
             Feed::Whole(p) => {
                 let ic = p.channels as usize;
-                &p.samples[pos * ic..(pos + 1) * ic]
+                let f = bounds.source_frame(pos);
+                &p.samples[f * ic..(f + 1) * ic]
             }
             Feed::Stream(s) => {
                 if !s.ready.load(Ordering::Acquire) || take.taken >= take.avail {
@@ -382,8 +399,9 @@ impl Mixer {
                 }
                 // The position stays where it is: a voice below a moved start runs on to the
                 // end and loops from the new start, and one past a moved end wraps at once.
-                // A changed fold or pick crossfades: the voice as it was ramps out beside the
-                // reshaped one.
+                // A reversed voice has nothing below its start to run on through, so it moves
+                // up to it. A changed fold, pick or direction crossfades: the voice as it was
+                // ramps out beside the reshaped one.
                 Cmd::Bounds(bounds) => {
                     if let Some(v) = &mut self.voice {
                         if let Feed::Whole(p) = &v.feed {
@@ -392,6 +410,9 @@ impl Mixer {
                                 v.age = 0;
                             }
                             v.bounds = bounds.within(&v.feed);
+                            if v.bounds.reverse {
+                                v.pos = v.pos.max(v.bounds.start);
+                            }
                         }
                     }
                 }
@@ -926,7 +947,7 @@ mod tests {
     }
 
     fn bounds(start: usize, end: usize, looped: bool) -> Bounds {
-        Bounds { start, end, looped, fade_in: 0, fade_out: 0, fade_shape: FadeShape::Linear, channels: None, fold: None }
+        Bounds { start, end, looped, fade_in: 0, fade_out: 0, fade_shape: FadeShape::Linear, channels: None, reverse: false, fold: None }
     }
 
     #[test]
@@ -1005,6 +1026,18 @@ mod tests {
         b.mixer.fill(&mut out);
         b.mixer.fill(&mut out);
         assert!(out.chunks(2).enumerate().all(|(k, f)| f[0] == f[1] && (f[0] - expected(48_000, 512 + k)).abs() < 1e-6), "the left channel alone should reach both outputs");
+    }
+
+    /// A reversed clip plays its span from the end back to the start.
+    #[test]
+    fn a_reversed_clip_plays_backwards() {
+        let mut b = Bench::new(48_000);
+        let pcm = Arc::new(tone(48_000, 0.5));
+        let (start, end) = (1_000, 9_000);
+        b.tx.send(Cmd::Play(Feed::Whole(pcm), Bounds { reverse: true, ..bounds(start, end, false) }, start)).unwrap();
+        let mut out = vec![0.0f32; 512 * 2];
+        b.mixer.fill(&mut out);
+        assert!(out.chunks(2).enumerate().skip(1).all(|(k, f)| (f[0] - expected(48_000, end - 1 - k)).abs() < 1e-6));
     }
 
     #[test]

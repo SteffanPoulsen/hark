@@ -412,10 +412,11 @@ impl App {
                 self.audio_error = Some(format!("{e:#}"));
             }
         }
-        // The selection, the fades and the channels outlive the reload.
+        // The selection and its edits outlive the reload.
         if let Some(cur) = &self.current {
             let (start, end) = self.wave.selection.map(|(a, b)| (Some(a), Some(b))).unwrap_or((None, None));
-            self.open_region = Some((cur.path.clone(), crate::OpenRegion { start, end, fade_in: self.wave.fade_in, fade_out: self.wave.fade_out, channels: self.wave.channels }));
+            let w = &self.wave;
+            self.open_region = Some((cur.path.clone(), crate::OpenRegion { start, end, fade_in: w.fade_in, fade_out: w.fade_out, channels: w.channels, reverse: w.reverse }));
         }
         // Everything decoded so far is at the old device rate.
         self.cache.clear();

@@ -22,13 +22,14 @@ pub enum Action {
     PreviousTake,
     NextTake,
     Trim,
+    Reverse,
     Zoom,
     ClearSelection,
     Export,
 }
 
 impl Action {
-    pub const ALL: [Action; 14] = [
+    pub const ALL: [Action; 15] = [
         Action::Play,
         Action::PlayFromStart,
         Action::Favorite,
@@ -40,6 +41,7 @@ impl Action {
         Action::PreviousTake,
         Action::NextTake,
         Action::Trim,
+        Action::Reverse,
         Action::Zoom,
         Action::ClearSelection,
         Action::Export,
@@ -59,6 +61,7 @@ impl Action {
             Action::PreviousTake => "previous_take",
             Action::NextTake => "next_take",
             Action::Trim => "trim",
+            Action::Reverse => "reverse",
             Action::Zoom => "zoom",
             Action::ClearSelection => "clear_selection",
             Action::Export => "export",
@@ -82,6 +85,7 @@ impl Action {
             Action::PreviousTake => "Previous take",
             Action::NextTake => "Next take",
             Action::Trim => "Trim",
+            Action::Reverse => "Reverse",
             Action::Zoom => "Zoom to selection",
             Action::ClearSelection => "Clear selection",
             Action::Export => "Export",
@@ -101,8 +105,9 @@ impl Action {
             Action::PreviousTake => "Select the previous take, the spans of sound parted by silence.",
             Action::NextTake => "Select the next take.",
             Action::Trim => "Trim the selection, or the whole file, to the sound.",
+            Action::Reverse => "Play and export the selection, or the whole file, backwards.",
             Action::Zoom => "Fit the selection to the waveform.",
-            Action::ClearSelection => "Clear the selection and the fades.",
+            Action::ClearSelection => "Clear the selection, its fades and its reverse.",
             Action::Export => "Export the selection with the chosen preset.",
         }
     }
@@ -120,6 +125,7 @@ impl Action {
             Action::PreviousTake => "ArrowLeft",
             Action::NextTake => "ArrowRight",
             Action::Trim => "T",
+            Action::Reverse => "R",
             Action::Zoom => "Z",
             Action::ClearSelection => "Escape",
             Action::Export => "E",

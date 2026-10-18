@@ -116,6 +116,7 @@ fn main() -> eframe::Result {
             "--fade-in" => region.fade_in = secs(&mut args).unwrap_or(0.0),
             "--fade-out" => region.fade_out = secs(&mut args).unwrap_or(0.0),
             "--channels" => region.channels = args.next().and_then(|c| c.parse().ok()),
+            "--reverse" => region.reverse = true,
             "--settings" => {
                 settings = Some(match args.next().as_deref() {
                     Some("tags") => settings::Page::Tags,
@@ -130,7 +131,7 @@ fn main() -> eframe::Result {
                 })
             }
             "-h" | "--help" => {
-                println!("hark [--open <audio file or folder>] [--in <secs>] [--out <secs>] [--fade-in <secs>] [--fade-out <secs>] [--channels <1,2,…>] [--project <file.hark>] [--settings [general|tags|presets]]");
+                println!("hark [--open <audio file or folder>] [--in <secs>] [--out <secs>] [--fade-in <secs>] [--fade-out <secs>] [--channels <1,2,…>] [--reverse] [--project <file.hark>] [--settings [general|tags|presets]]");
                 return Ok(());
             }
             other => open = Some(PathBuf::from(other)),
@@ -170,10 +171,10 @@ fn main() -> eframe::Result {
     )
 }
 
-type ClipKey = (usize, usize, bool, usize, usize, hark_core::pcm::FadeShape, Option<Channels>, Option<DownmixMode>);
+type ClipKey = (usize, usize, bool, usize, usize, hark_core::pcm::FadeShape, Option<Channels>, bool, Option<DownmixMode>);
 
 fn clip_key(c: &Clip) -> ClipKey {
-    (c.start, c.end, c.looped, c.fade_in, c.fade_out, c.fade_shape, c.channels, c.fold)
+    (c.start, c.end, c.looped, c.fade_in, c.fade_out, c.fade_shape, c.channels, c.reverse, c.fold)
 }
 
 /// A span's measurement in flight, when it was asked for, and the level it promises.
@@ -233,8 +234,8 @@ struct Takes {
     spans: Vec<(f64, f64)>,
 }
 
-/// A selection, fades and channels asked for on the command line, applied once the opened
-/// file loads.
+/// A selection with its edits asked for on the command line, applied once the opened file
+/// loads.
 #[derive(Default, Clone, Copy)]
 struct OpenRegion {
     start: Option<f64>,
@@ -242,6 +243,7 @@ struct OpenRegion {
     fade_in: f64,
     fade_out: f64,
     channels: Option<Channels>,
+    reverse: bool,
 }
 
 enum ProjectAction {
@@ -630,6 +632,23 @@ impl App {
         }
     }
 
+    /// The selection goes, and the edits made with it: the fades and the reverse.
+    fn clear_selection(&mut self) {
+        self.wave.selection = None;
+        self.wave.fade_in = 0.0;
+        self.wave.fade_out = 0.0;
+        self.wave.reverse = false;
+    }
+
+    /// Turns the selection, or the whole file, around.
+    fn toggle_reverse(&mut self) {
+        let Some(cur) = &self.current else { return };
+        if cur.source.is_streamed() {
+            return self.set_status("Reverse needs the file decoded whole; this one streams", true);
+        }
+        self.wave.reverse = !self.wave.reverse;
+    }
+
     fn set_status(&mut self, msg: impl Into<String>, error: bool) {
         self.status = msg.into();
         self.status_is_error = error;
@@ -806,6 +825,7 @@ impl App {
             self.wave.fade_in = r.fade_in.max(0.0);
             self.wave.fade_out = r.fade_out.max(0.0);
             self.wave.channels = r.channels.and_then(|c| Channels::pick(c.iter(), l.channels));
+            self.wave.reverse = r.reverse && !l.source.is_streamed();
         }
         let recorded = self.record_of(&l.path).and_then(FileRecord::loudness).is_some();
         if l.loudness.is_some() && !recorded {
@@ -866,7 +886,7 @@ impl App {
         match (self.preset.mono, kept) {
             (Some(_), _) => self.folded.as_ref().filter(|(p, f, _)| *p == cur.path && f.channels == kept).and_then(|(_, _, f)| f.loudness.as_ref()).map(|l| l.loudness),
             (None, Some(_)) => {
-                let whole = |s: &Span| s.path == cur.path && s.secs.is_none() && s.channels == kept && s.fold.is_none() && s.fades.is_zero();
+                let whole = |s: &Span| s.path == cur.path && s.secs.is_none() && s.channels == kept && !s.reverse && s.fold.is_none() && s.fades.is_zero();
                 self.recent_levels.iter().find(|l| whole(&l.span) && l.stamp == cur.stamp).map(|l| l.loudness)
             }
             (None, None) => cur.loudness.as_ref().map(|l| l.loudness).or_else(|| self.record_of(&cur.path).and_then(FileRecord::loudness)),
@@ -878,14 +898,14 @@ impl App {
     }
 
     /// What the preview's level is of when the passes over the whole file cannot give it: the
-    /// selection, the file's kept channels, the whole file under its fades, or the whole file
-    /// at a rate the preset resamples it to; shaped as an export shapes it.
+    /// selection, the file's kept channels, the whole file reversed or under its fades, or the
+    /// whole file at a rate the preset resamples it to; shaped as an export shapes it.
     fn preview_span(&self) -> Option<Span> {
         let cur = self.current.as_ref()?;
         let w = &self.wave;
         let fades = Fades { in_secs: w.fade_in, out_secs: w.fade_out, shape: w.fade_shape };
-        let span = Span::new(&cur.path, w.selection, fades, self.preset.mono, self.preset.sample_rate, cur.source_rate).picking(w.channels);
-        (span.secs.is_some() || span.channels.is_some() || !fades.is_zero() || span.rate.is_some()).then_some(span)
+        let span = Span::new(&cur.path, w.selection, fades, self.preset.mono, self.preset.sample_rate, cur.source_rate).picking(w.channels).reversing(w.reverse);
+        (span.secs.is_some() || span.channels.is_some() || span.reverse || !fades.is_zero() || span.rate.is_some()).then_some(span)
     }
 
     /// Where a span starts and ends in seconds.
@@ -900,7 +920,7 @@ impl App {
         let span = self.preview_span().filter(|_| self.previewing_level())?;
         let (measured, result) = self.span_level.as_ref()?;
         let ((a, b), (c, d)) = (self.span_bounds(measured), self.span_bounds(&span));
-        let edit_of = measured.path == span.path && measured.channels == span.channels && measured.fold == span.fold && measured.rate == span.rate && a < d && c < b;
+        let edit_of = measured.path == span.path && measured.channels == span.channels && measured.reverse == span.reverse && measured.fold == span.fold && measured.rate == span.rate && a < d && c < b;
         (*measured == span || edit_of).then(|| result.as_ref().ok()).flatten().map(|l| hark_core::export::preview_level_from(&l.loudness, &self.preset))
     }
 
@@ -964,7 +984,7 @@ impl App {
         };
         let fold = if self.preview { self.preset.mono } else { None };
         let w = &self.wave;
-        Some(Clip { source: cur.source.clone(), start, end: end.max(start), looped: self.config.looping, fade_in: frames(w.fade_in), fade_out: frames(w.fade_out), fade_shape: w.fade_shape, channels: w.channels, fold })
+        Some(Clip { source: cur.source.clone(), start, end: end.max(start), looped: self.config.looping, fade_in: frames(w.fade_in), fade_out: frames(w.fade_out), fade_shape: w.fade_shape, channels: w.channels, reverse: w.reverse, fold })
     }
 
     /// Asks the worker for what the preview of the current file needs and does not have yet.
@@ -1057,10 +1077,10 @@ impl App {
         let (Some(player), Some(clip)) = (&self.player, self.selection_clip()) else { return };
         let total = clip.source.frames(player.sample_rate);
         let from = from_secs.map(|t| ((t * player.sample_rate as f64) as usize).min(total)).unwrap_or(clip.start);
-        // The fades belong to the selection, or to the whole file without one. A seek outside
-        // the selection plays the file from there without them.
+        // The fades and the reverse belong to the selection, or to the whole file without one.
+        // A seek outside the selection plays the file from there without them.
         let inside = from >= clip.start && from < clip.end;
-        let clip = if inside { clip } else { Clip { start: from, end: total, fade_in: 0, fade_out: 0, ..clip } };
+        let clip = if inside { clip } else { Clip { start: from, end: total, fade_in: 0, fade_out: 0, reverse: false, ..clip } };
         self.synced = inside.then(|| clip_key(&clip));
         self.outside = (!inside).then(|| clip.clone());
         player.play_from(clip, from);
@@ -1165,6 +1185,7 @@ impl App {
         req.preset_name = self.preset_name.clone();
         req.selection = self.wave.selection.map(|(a, b)| Selection { start_secs: a, end_secs: b });
         req.channels = self.wave.channels;
+        req.reverse = self.wave.reverse;
         req.fade_in_secs = self.wave.fade_in;
         req.fade_out_secs = self.wave.fade_out;
         req.gain_db = self.gain_db as f64;
@@ -1217,6 +1238,7 @@ impl App {
         req.source_hash = f.hash.clone();
         req.selection = self.wave.selection.map(|(a, b)| Selection { start_secs: a, end_secs: b });
         req.channels = self.wave.channels;
+        req.reverse = self.wave.reverse;
         req.fade_in_secs = self.wave.fade_in;
         req.fade_out_secs = self.wave.fade_out;
         req.preset.fade_shape = self.wave.fade_shape;
@@ -1326,19 +1348,19 @@ impl App {
 
     /// The picture under the pointer while a span of a file is dragged out: its envelope on a
     /// translucent card, at the display's scale.
-    fn ghost(&self, ctx: &egui::Context, peaks: &hark_core::Peaks, span: (f64, f64), kept: Option<Channels>, gain_at: &dyn Fn(f64) -> f32) -> dnd::Image {
+    fn ghost(&self, ctx: &egui::Context, peaks: &hark_core::Peaks, span: (f64, f64), kept: Option<Channels>, reversed: bool, gain_at: &dyn Fn(f64) -> f32) -> dnd::Image {
         let scale = ctx.pixels_per_point().round().max(1.0) as i32;
         let colors = waveform::GhostColors { card: self.theme.bg_deep, peak: self.theme.accent.gamma_multiply(0.7), rms: self.theme.accent, hatch: None };
-        waveform::ghost(peaks, span, kept, gain_at, &colors, scale)
+        waveform::ghost(peaks, span, kept, reversed, gain_at, &colors, scale)
     }
 
     /// The pointer while a drag waits for its file: the drag's picture greyed on a striped
     /// card, hanging from the pointer as the drag's own does.
-    fn pending_ghost(&self, ctx: &egui::Context, peaks: &hark_core::Peaks, span: (f64, f64), kept: Option<Channels>, gain_at: &dyn Fn(f64) -> f32) -> dnd::Image {
+    fn pending_ghost(&self, ctx: &egui::Context, peaks: &hark_core::Peaks, span: (f64, f64), kept: Option<Channels>, reversed: bool, gain_at: &dyn Fn(f64) -> f32) -> dnd::Image {
         // AppKit takes a cursor's pixels as points.
         let scale = if cfg!(target_os = "macos") { 1 } else { ctx.pixels_per_point().round().max(1.0) as i32 };
         let colors = waveform::GhostColors { card: self.theme.bg_deep, peak: self.theme.muted.gamma_multiply(0.5), rms: self.theme.muted, hatch: Some(self.theme.line) };
-        waveform::ghost(peaks, span, kept, gain_at, &colors, scale)
+        waveform::ghost(peaks, span, kept, reversed, gain_at, &colors, scale)
     }
 
     fn copy_out(&mut self, paths: Vec<PathBuf>) {
@@ -1601,9 +1623,10 @@ impl App {
         }
         // Escape closes an open menu first; egui sees to that, and the selection stays.
         if fired(Action::ClearSelection) && !egui::Popup::is_any_open(ctx) {
-            self.wave.selection = None;
-            self.wave.fade_in = 0.0;
-            self.wave.fade_out = 0.0;
+            self.clear_selection();
+        }
+        if fired(Action::Reverse) {
+            self.toggle_reverse();
         }
         if let Some(cur) = &self.current {
             let pos = self.player.as_ref().map(|p| p.position() as f64 / p.sample_rate as f64);
@@ -2244,7 +2267,7 @@ impl App {
         if let Some(i) = dragged {
             let path = self.files[i].path.clone();
             let what = self.files[i].name.clone();
-            let image = self.cache.get(&path).and_then(|l| l.peaks.clone()).map(|p| self.ghost(ui.ctx(), &p, (0.0, p.duration_secs()), None, &|_| 1.0));
+            let image = self.cache.get(&path).and_then(|l| l.peaks.clone()).map(|p| self.ghost(ui.ctx(), &p, (0.0, p.duration_secs()), None, false, &|_| 1.0));
             self.drag_out(vec![path], image, &what);
         } else if let Some(i) = double {
             self.select(i, true);
@@ -2508,6 +2531,10 @@ impl App {
                 if item(ui, icons::ARROWS_IN_LINE_HORIZONTAL, "Trim to the sound", &self.key_of(Action::Trim), true) {
                     action = Some(WaveAction::Trim);
                 }
+                let reverse = if self.wave.reverse { "Play forwards" } else { "Reverse" };
+                if item(ui, icons::ARROWS_LEFT_RIGHT, reverse, &self.key_of(Action::Reverse), true) {
+                    action = Some(WaveAction::Reverse);
+                }
                 if item(ui, icons::MAGNIFYING_GLASS_PLUS, "Zoom to selection", &self.key_of(Action::Zoom), has_selection) {
                     action = Some(WaveAction::Zoom);
                 }
@@ -2519,11 +2546,8 @@ impl App {
                 Some(WaveAction::Copy) => self.copy_selection(),
                 Some(WaveAction::Trim) => self.trim_selection(),
                 Some(WaveAction::Zoom) => self.zoom_to_selection(),
-                Some(WaveAction::Clear) => {
-                    self.wave.selection = None;
-                    self.wave.fade_in = 0.0;
-                    self.wave.fade_out = 0.0;
-                }
+                Some(WaveAction::Reverse) => self.toggle_reverse(),
+                Some(WaveAction::Clear) => self.clear_selection(),
                 None => {}
             }
         }
@@ -2536,8 +2560,9 @@ impl App {
                 let bounds = self.wave.bounds(duration);
                 // A folded envelope is already of the kept channels alone.
                 let kept = |p: &Peaks| self.wave.channels.filter(|_| p.channels > 1);
-                let image = peaks.as_ref().map(|p| self.ghost(ui.ctx(), p, bounds, kept(p), &gain_at));
-                let pending = peaks.as_ref().map(|p| self.pending_ghost(ui.ctx(), p, bounds, kept(p), &gain_at));
+                let reversed = self.wave.reverse;
+                let image = peaks.as_ref().map(|p| self.ghost(ui.ctx(), p, bounds, kept(p), reversed, &gain_at));
+                let pending = peaks.as_ref().map(|p| self.pending_ghost(ui.ctx(), p, bounds, kept(p), reversed, &gain_at));
                 self.drag_selection(ui.ctx(), image, pending);
             }
             WaveEvent::None => {}
@@ -2696,11 +2721,14 @@ impl App {
             if icon_btn(ui, icons::ARROWS_IN_LINE_HORIZONTAL, false).on_hover_text(format!("Trim the selection to the sound ({}): what sits {} dB under its peak goes", self.key_of(Action::Trim), hark_core::pcm::TRIM_BELOW_PEAK_DB)).clicked() {
                 self.trim_selection();
             }
+            if icon_btn(ui, icons::ARROWS_LEFT_RIGHT, self.wave.reverse).on_hover_text(format!("Reverse the selection, or the whole file ({}): heard, drawn and exported backwards, the fades where they are heard", self.key_of(Action::Reverse))).clicked() {
+                self.toggle_reverse();
+            }
             if icon_btn(ui, icons::MAGNIFYING_GLASS_PLUS, false).on_hover_text(format!("Zoom to selection ({})", self.key_of(Action::Zoom))).clicked() {
                 self.wave.zoom_to_selection(duration);
             }
-            if icon_btn(ui, icons::X, false).on_hover_text(format!("Clear selection ({})", self.key_of(Action::ClearSelection))).clicked() {
-                self.wave.selection = None;
+            if icon_btn(ui, icons::X, false).on_hover_text(format!("Clear the selection, its fades and its reverse ({})", self.key_of(Action::ClearSelection))).clicked() {
+                self.clear_selection();
             }
             group(ui);
             ui.label(RichText::new("Fade").color(self.theme.muted));
@@ -3185,6 +3213,7 @@ const EXPORT_FAILED_SECS: f32 = 2.0 * waveform::FLASH_SECS;
 enum WaveAction {
     Copy,
     Trim,
+    Reverse,
     Zoom,
     Clear,
 }

@@ -468,7 +468,7 @@ fn whole(path: &Path, stamp: Stamp, fold: Option<Fold>, frames: usize, loudness:
 }
 
 fn whole_span(path: &Path, fold: Option<Fold>) -> Span {
-    Span { path: path.to_path_buf(), secs: None, channels: fold.and_then(|f| f.channels), fades: Default::default(), fold: fold.map(|f| f.mode), rate: None }
+    Span { path: path.to_path_buf(), secs: None, channels: fold.and_then(|f| f.channels), reverse: false, fades: Default::default(), fold: fold.map(|f| f.mode), rate: None }
 }
 
 /// One pass over a streamed file for its peaks (unless cached) and loudness, holding only a
@@ -560,6 +560,9 @@ fn measure_span(span: &Span, held: Option<(Arc<Pcm>, Stamp)>, abort: &dyn Fn() -
         None => (0, pcm.frames()),
     };
     let mut cut = pcm.slice_frames(frames.0, frames.1);
+    if span.reverse {
+        cut.reverse();
+    }
     span.fades.apply(&mut cut);
     let loudness = hark_core::loudness::measure_with(&cut, abort)?;
     Ok(Level { span: span.clone(), stamp, frames: (frames.0 as u64, frames.1 as u64), loudness })

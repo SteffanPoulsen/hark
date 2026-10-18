@@ -272,6 +272,16 @@ impl Pcm {
         Pcm { sample_rate: self.sample_rate, channels: kept.len() as u16, samples }
     }
 
+    /// The frames in reverse order.
+    pub fn reverse(&mut self) {
+        let c = self.channels.max(1) as usize;
+        let frames = self.frames();
+        for f in 0..frames / 2 {
+            let (head, tail) = self.samples.split_at_mut((frames - 1 - f) * c);
+            head[f * c..(f + 1) * c].swap_with_slice(&mut tail[..c]);
+        }
+    }
+
     pub fn to_mono(&self, mode: DownmixMode) -> Pcm {
         let c = self.channels as usize;
         if c == 1 {

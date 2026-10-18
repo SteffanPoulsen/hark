@@ -45,6 +45,9 @@ pub struct WaveState {
     /// The file's channels kept, picked beside the wave; the lanes of the rest draw dimmed.
     /// `None` keeps them all.
     pub channels: Option<Channels>,
+    /// The selection, or the whole file, plays backwards; it draws mirrored inside its span,
+    /// so the picture reads as it is heard and the fades sit where they are heard.
+    pub reverse: bool,
     /// Linear gain the drawing is scaled by, so the picture follows the playback volume.
     pub gain: f32,
     /// How the selection draws against the rest of the file.
@@ -133,7 +136,7 @@ impl WaveState {
 
 impl Default for WaveState {
     fn default() -> Self {
-        WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), channels: None, gain: 1.0, selection_level: SelectionLevel::Same, clip_fades: None, drag: None, flash: None, last_edge: None, last_fade: None }
+        WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), channels: None, reverse: false, gain: 1.0, selection_level: SelectionLevel::Same, clip_fades: None, drag: None, flash: None, last_edge: None, last_fade: None }
     }
 }
 
@@ -144,6 +147,7 @@ impl WaveState {
         self.fade_in = 0.0;
         self.fade_out = 0.0;
         self.channels = None;
+        self.reverse = false;
         self.drag = None;
         self.last_edge = None;
         self.last_fade = None;
@@ -329,23 +333,31 @@ fn lane_colors(colors: &WaveColors, kept: Option<Channels>, ch: usize) -> WaveCo
     }
 }
 
-/// With `samples`, the columns come from them instead of the peaks' bins. `gain_at` scales a
-/// column by the gain at its time, so the picture follows the level and the fades.
+/// Draws `v0..v1` seconds of the file into `rect`, left to right, or right to left when
+/// `mirrored`. With `samples`, the columns come from them instead of the peaks' bins.
+/// `gain_at` scales a column by the gain at its time in the file, so the picture follows the
+/// level and the fades.
 #[allow(clippy::too_many_arguments)]
-fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, samples: Option<&Pcm>, rect: Rect, v0: f64, v1: f64, gain_at: &dyn Fn(f64) -> f32, colors: &WaveColors, kept: Option<Channels>) {
+fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, samples: Option<&Pcm>, rect: Rect, v0: f64, v1: f64, mirrored: bool, gain_at: &dyn Fn(f64) -> f32, colors: &WaveColors, kept: Option<Channels>) {
     let channels = peaks.channels.max(1) as usize;
     let lane_h = rect.height() / channels as f32;
     let cols = rect.width().max(1.0) as usize;
-    let gains: Vec<f32> = (0..cols).map(|i| gain_at(v0 + (i as f64 + 0.5) / cols as f64 * (v1 - v0))).collect();
+    let mut gains: Vec<f32> = (0..cols).map(|i| gain_at(v0 + (i as f64 + 0.5) / cols as f64 * (v1 - v0))).collect();
+    if mirrored {
+        gains.reverse();
+    }
     for ch in 0..channels {
         let colors = &lane_colors(colors, kept, ch);
         let mid = rect.top() + lane_h * (ch as f32 + 0.5);
         let amp = lane_h * 0.46;
         painter.hline(rect.x_range(), mid, Stroke::new(1.0, colors.axis));
-        let bins = match samples {
+        let mut bins = match samples {
             Some(pcm) => sample_columns(pcm, ch, v0, v1, cols),
             None => peaks.columns(ch, v0, v1, cols),
         };
+        if mirrored {
+            bins.reverse();
+        }
         let xs: Vec<f32> = (0..cols).map(|i| rect.left() + i as f32 + 0.5).collect();
         let top: Vec<f32> = bins.iter().zip(&gains).map(|(b, g)| mid - (b.max * g).clamp(-1.0, 1.0) * amp).collect();
         let bottom: Vec<f32> = bins.iter().zip(&gains).map(|(b, g)| mid - (b.min * g).clamp(-1.0, 1.0) * amp).collect();
@@ -361,18 +373,26 @@ fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, samples: Option<&Pcm>, 
     draw_lane_dividers(painter, rect, channels, colors);
 }
 
+/// The sample curve of `v0..v1` seconds of the file, as `draw_envelope` draws its columns.
 #[allow(clippy::too_many_arguments)]
-fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64, gain_at: &dyn Fn(f64) -> f32, colors: &WaveColors, kept: Option<Channels>) {
+fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64, mirrored: bool, gain_at: &dyn Fn(f64) -> f32, colors: &WaveColors, kept: Option<Channels>) {
     let channels = pcm.channels.max(1) as usize;
     let lane_h = rect.height() / channels as f32;
     let rate = pcm.sample_rate as f64;
     let frames = pcm.frames();
     let f0 = ((v0 * rate).floor().max(0.0) as usize).min(frames);
-    let f1 = ((v1 * rate).ceil().max(0.0) as usize + 1).min(frames);
+    // Forwards, the frame past the end carries the curve to the edge; mirrored, that frame is
+    // outside the span, which ends at its last frame.
+    let f1 = ((v1 * rate).ceil().max(0.0) as usize + !mirrored as usize).min(frames);
     let span = v1 - v0;
-    let x_of = |f: usize| rect.left() + ((f as f64 / rate - v0) / span) as f32 * rect.width();
+    // A frame mirrored lands where its far edge was: the last frame of the span plays first.
+    let t_of = |f: usize| (f + mirrored as usize) as f64 / rate;
+    let x_of = |f: usize| {
+        let u = ((t_of(f) - v0) / span) as f32;
+        rect.left() + if mirrored { 1.0 - u } else { u } * rect.width()
+    };
     let frames_per_px = (f1 - f0) as f64 / rect.width().max(1.0) as f64;
-    let gains: Vec<f32> = (f0..f1).map(|f| gain_at(f as f64 / rate)).collect();
+    let gains: Vec<f32> = (f0..f1).map(|f| gain_at(t_of(f))).collect();
     for ch in 0..channels {
         let colors = &lane_colors(colors, kept, ch);
         let mid = rect.top() + lane_h * (ch as f32 + 0.5);
@@ -475,19 +495,26 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
     // its gain either side, the selection at its, dimmed while a measurement of it runs.
     // Each segment is the span, its gain, whether it is dimmed, and whether it is the clip,
     // which alone draws under the fades.
+    // A reversed selection also goes down apart, mirrored about its middle; the whole file
+    // reversed mirrors about the file's.
     let mut segments: Vec<(f64, f64, f32, bool, bool)> = Vec::new();
-    match (state.selection, state.selection_level) {
-        (Some((a, b)), level) if level != SelectionLevel::Same && b > a => {
+    let split = state.selection_level != SelectionLevel::Same || state.reverse;
+    let mirror = match (state.selection, state.selection_level) {
+        (Some((a, b)), level) if split && b > a => {
             segments.push((v0, a, state.gain, false, false));
             match level {
                 SelectionLevel::Gain(g) => segments.push((a, b, g, false, true)),
                 SelectionLevel::Busy { gain, .. } => segments.push((a, b, gain, true, true)),
-                SelectionLevel::Same => {}
+                SelectionLevel::Same => segments.push((a, b, state.gain, false, true)),
             }
             segments.push((b, v1, state.gain, false, false));
+            state.reverse.then_some((a, b))
         }
-        _ => segments.push((v0, v1, state.gain, false, true)),
-    }
+        (selection, _) => {
+            segments.push((v0, v1, state.gain, false, true));
+            (state.reverse && selection.is_none()).then_some((0.0, duration))
+        }
+    };
     for (s0, s1, gain, dim, clip) in segments {
         let (s0, s1) = (s0.max(v0), s1.min(v1));
         let seg = Rect::from_min_max(Pos2::new(x_of(s0), rect.top()), Pos2::new(x_of(s1), rect.bottom()));
@@ -496,10 +523,17 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
         }
         let wave = if dim { dimmed(&wave) } else { wave };
         let fades = state.clip_fades.filter(|_| clip);
-        let gain_at = |t: f64| gain * fades.map_or(1.0, |f| f.gain(t));
+        // What shows at `t` of a mirrored clip is the file at `a + b - t`.
+        let mirrored = mirror.filter(|_| clip);
+        let heard = |t: f64| mirrored.map_or(t, |(a, b)| a + b - t);
+        let (f0, f1) = match mirrored {
+            Some((a, b)) => (a + b - s1, a + b - s0),
+            None => (s0, s1),
+        };
+        let gain_at = |t: f64| gain * fades.map_or(1.0, |f| f.gain(heard(t)));
         match samples {
-            Some(pcm) if frames_per_px * (pcm.sample_rate as f64 / peaks.sample_rate as f64) <= SAMPLE_VIEW_FRAMES_PER_PX => draw_samples(&painter, pcm, seg, s0, s1, &gain_at, &wave, kept),
-            _ => draw_envelope(&painter, peaks, samples.filter(|_| frames_per_px < peaks.bin_frames as f64), seg, s0, s1, &gain_at, &wave, kept),
+            Some(pcm) if frames_per_px * (pcm.sample_rate as f64 / peaks.sample_rate as f64) <= SAMPLE_VIEW_FRAMES_PER_PX => draw_samples(&painter, pcm, seg, f0, f1, mirrored.is_some(), &gain_at, &wave, kept),
+            _ => draw_envelope(&painter, peaks, samples.filter(|_| frames_per_px < peaks.bin_frames as f64), seg, f0, f1, mirrored.is_some(), &gain_at, &wave, kept),
         }
     }
     if let Some((text, busy)) = status {
@@ -689,9 +723,10 @@ pub struct GhostColors {
 }
 
 /// The drag picture: the span's envelope, its `kept` channels (all with `None`) folded into
-/// one, on a rounded translucent card of 200 by 56 logical pixels, drawn at `scale` buffer
-/// pixels per logical.
-pub fn ghost(peaks: &Peaks, span: (f64, f64), kept: Option<Channels>, gain_at: &dyn Fn(f64) -> f32, colors: &GhostColors, scale: i32) -> crate::dnd::Image {
+/// one and backwards when `reversed`, on a rounded translucent card of 200 by 56 logical
+/// pixels, drawn at `scale` buffer pixels per logical. `gain_at` takes the time as heard.
+#[allow(clippy::too_many_arguments)]
+pub fn ghost(peaks: &Peaks, span: (f64, f64), kept: Option<Channels>, reversed: bool, gain_at: &dyn Fn(f64) -> f32, colors: &GhostColors, scale: i32) -> crate::dnd::Image {
     let (w, h) = (200 * scale as usize, 56 * scale as usize);
     let radius = 6.0 * scale as f32;
     let mut rgba = vec![0u8; w * h * 4];
@@ -719,6 +754,9 @@ pub fn ghost(peaks: &Peaks, span: (f64, f64), kept: Option<Channels>, gain_at: &
             m.max = m.max.max(b.max);
             m.rms = m.rms.max(b.rms);
         }
+    }
+    if reversed {
+        merged.reverse();
     }
     let mid = h as f32 * 0.5;
     let half = mid - inset as f32;
