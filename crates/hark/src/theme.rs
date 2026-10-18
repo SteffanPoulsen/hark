@@ -116,7 +116,10 @@ impl Theme {
         fonts.families.insert(FontFamily::Proportional, vec!["inter".into(), "Ubuntu-Light".into()]);
         fonts.families.insert(FontFamily::Name(MEDIUM.into()), vec![MEDIUM.into()]);
         fonts.families.insert(FontFamily::Name(SEMIBOLD.into()), vec![SEMIBOLD.into()]);
+        // A family takes its line metrics from its first font, so each icon family holds its
+        // Phosphor variant alone and a filled icon sits where its outline does.
         fonts.families.insert(FontFamily::Name(ICONS.into()), vec!["phosphor".into()]);
+        fonts.families.insert(FontFamily::Name(ICONS_FILL.into()), vec![ICONS_FILL.into()]);
         ctx.set_fonts(fonts);
 
         let mut v = Visuals::dark();
