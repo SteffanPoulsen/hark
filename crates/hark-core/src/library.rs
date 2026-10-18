@@ -193,6 +193,44 @@ pub struct CardState {
     pub overwrite: bool,
 }
 
+/// What a file list shows when nothing is being searched.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Location {
+    Favorites,
+    Folder(PathBuf),
+}
+
+/// One tab of the window's file list: where it looks, what it searches for, how it is
+/// narrowed, and the file it has selected. Working state, kept per project like the card.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Tab {
+    /// Tells tabs apart for as long as they are open.
+    pub id: u64,
+    #[serde(default)]
+    pub location: Option<Location>,
+    #[serde(default)]
+    pub search: String,
+    #[serde(default)]
+    pub favorites: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// The filter's file types by name: `wav`, `flac`, …
+    #[serde(default)]
+    pub types: Vec<String>,
+    #[serde(default)]
+    pub channels: Vec<ChannelClass>,
+    #[serde(default)]
+    pub selected: Option<PathBuf>,
+}
+
+/// A project's tabs and the one in front.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Tabs {
+    pub tabs: Vec<Tab>,
+    pub active: usize,
+}
+
 pub struct Db {
     conn: Connection,
     /// Favorites are read and written for this project.
@@ -225,6 +263,7 @@ CREATE TABLE IF NOT EXISTS file_tags (hash TEXT NOT NULL, tag TEXT NOT NULL, PRI
 CREATE TABLE IF NOT EXISTS favorites (project TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY (project, hash));
 CREATE TABLE IF NOT EXISTS hashes (hash TEXT PRIMARY KEY, size INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS card_state (project TEXT PRIMARY KEY, state TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tabs (project TEXT PRIMARY KEY, state TEXT NOT NULL);
 INSERT OR IGNORE INTO hashes SELECT hash, size FROM files WHERE hash IS NOT NULL;
 ";
 
@@ -621,11 +660,49 @@ impl Db {
         Ok(self.conn.execute("UPDATE card_state SET state = json_set(state, '$.preset_name', ?2) WHERE json_extract(state, '$.preset_name') = ?1", params![old, new])?)
     }
 
+    /// The project's tabs as they were left; `None` for a project never opened in the window.
+    pub fn tabs(&self) -> Result<Option<Tabs>> {
+        let json: Option<String> = self.conn.query_row("SELECT state FROM tabs WHERE project = ?1", params![self.project], |r| r.get(0)).optional()?;
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    pub fn set_tabs(&self, tabs: &Tabs) -> Result<()> {
+        self.conn.execute("INSERT OR REPLACE INTO tabs (project, state) VALUES (?1, ?2)", params![self.project, serde_json::to_string(tabs)?])?;
+        Ok(())
+    }
+
+    /// Every project's tabs that filter by tag `old` filter by `new` instead, or by nothing
+    /// in its place when it is `None`.
+    fn retag_tabs(&self, old: &str, new: Option<&str>) -> Result<()> {
+        let rows: Vec<(String, String)> = self.conn.prepare("SELECT project, state FROM tabs")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        for (project, json) in rows {
+            let Ok(mut state) = serde_json::from_str::<Tabs>(&json) else { continue };
+            let mut changed = false;
+            for tab in &mut state.tabs {
+                if let Some(i) = tab.tags.iter().position(|t| t == old) {
+                    match new.filter(|n| !tab.tags.iter().any(|t| t == n)) {
+                        Some(n) => tab.tags[i] = n.to_string(),
+                        None => {
+                            tab.tags.remove(i);
+                        }
+                    }
+                    changed = true;
+                }
+            }
+            if changed {
+                self.conn.execute("UPDATE tabs SET state = ?2 WHERE project = ?1", params![project, serde_json::to_string(&state)?])?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn rename_tag(&self, old: &str, new: &str) -> Result<usize> {
+        self.retag_tabs(old, Some(new))?;
         Ok(self.conn.execute("UPDATE OR IGNORE file_tags SET tag = ?2 WHERE tag = ?1", params![old, new])?)
     }
 
     pub fn remove_tag(&self, tag: &str) -> Result<usize> {
+        self.retag_tabs(tag, None)?;
         Ok(self.conn.execute("DELETE FROM file_tags WHERE tag = ?1", params![tag])?)
     }
 

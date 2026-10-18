@@ -26,10 +26,14 @@ pub enum Action {
     Zoom,
     ClearSelection,
     Export,
+    NewTab,
+    CloseTab,
+    NextTab,
+    PreviousTab,
 }
 
 impl Action {
-    pub const ALL: [Action; 15] = [
+    pub const ALL: [Action; 19] = [
         Action::Play,
         Action::PlayFromStart,
         Action::Favorite,
@@ -45,6 +49,10 @@ impl Action {
         Action::Zoom,
         Action::ClearSelection,
         Action::Export,
+        Action::NewTab,
+        Action::CloseTab,
+        Action::NextTab,
+        Action::PreviousTab,
     ];
 
     /// The name in the config file and on the command line.
@@ -65,6 +73,10 @@ impl Action {
             Action::Zoom => "zoom",
             Action::ClearSelection => "clear_selection",
             Action::Export => "export",
+            Action::NewTab => "new_tab",
+            Action::CloseTab => "close_tab",
+            Action::NextTab => "next_tab",
+            Action::PreviousTab => "previous_tab",
         }
     }
 
@@ -89,6 +101,10 @@ impl Action {
             Action::Zoom => "Zoom to selection",
             Action::ClearSelection => "Clear selection",
             Action::Export => "Export",
+            Action::NewTab => "New tab",
+            Action::CloseTab => "Close tab",
+            Action::NextTab => "Next tab",
+            Action::PreviousTab => "Previous tab",
         }
     }
 
@@ -109,6 +125,10 @@ impl Action {
             Action::Zoom => "Fit the selection to the waveform.",
             Action::ClearSelection => "Clear the selection, its fades and its reverse.",
             Action::Export => "Export the selection with the chosen preset.",
+            Action::NewTab => "Open a tab on the list as it is now.",
+            Action::CloseTab => "Close the list's tab; the last one stays.",
+            Action::NextTab => "Show the list's next tab.",
+            Action::PreviousTab => "Show the list's previous tab.",
         }
     }
 
@@ -129,6 +149,10 @@ impl Action {
             Action::Zoom => "Z",
             Action::ClearSelection => "Escape",
             Action::Export => "E",
+            Action::NewTab => "Ctrl+T",
+            Action::CloseTab => "Ctrl+W",
+            Action::NextTab => "Ctrl+Tab",
+            Action::PreviousTab => "Ctrl+Shift+Tab",
         }
     }
 }

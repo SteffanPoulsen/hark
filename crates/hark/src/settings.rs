@@ -423,10 +423,10 @@ impl App {
         self.cache_order.clear();
         self.pending.clear();
         self.current = None;
-        self.play_on_load = was_playing;
         if let Some(i) = self.selected {
             self.select(i, false);
         }
+        self.play_on_load = was_playing;
     }
 
     fn page_tags(&mut self, ui: &mut egui::Ui) {

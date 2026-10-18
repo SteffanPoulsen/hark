@@ -21,7 +21,7 @@ use hark_core::audition::{Clip, Player, Source};
 use hark_core::config::Normalize;
 use hark_core::export::{ExportRequest, PreviewLevel, Selection};
 use hark_core::pcm::{Channels, DownmixMode, Fades};
-use hark_core::library::{CardState, ChannelClass, Query, Sort, SortKey};
+use hark_core::library::{CardState, ChannelClass, Location, Query, Sort, SortKey, Tab, Tabs};
 use hark_core::copies::CopyRequest;
 use hark_core::keys::Action;
 use hark_core::{Config, Db, ExportPreset, FileRecord, Loudness, Peaks};
@@ -265,13 +265,6 @@ enum TagAction {
     Add,
 }
 
-/// What the list shows when nothing is being searched.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Location {
-    Favorites,
-    Folder(PathBuf),
-}
-
 /// Narrows the list, whatever it shows; each axis is a set, and an empty set leaves it open.
 #[derive(Default)]
 struct Filter {
@@ -319,6 +312,14 @@ struct App {
 
     expanded: HashSet<PathBuf>,
     dir_children: HashMap<PathBuf, Vec<PathBuf>>,
+    /// The tab in front shows in `location`, `search`, `filter` and the selected file; the
+    /// others wait here as they were left, and the front one's slot holds its id.
+    tabs: Vec<Tab>,
+    active_tab: usize,
+    /// The tabs as the database last stored them for this project.
+    tabs_saved: Option<Tabs>,
+    /// Tabs whose list has been drawn, and so has a scroll offset of its own.
+    tabs_drawn: HashSet<u64>,
     location: Option<Location>,
     fav_count: usize,
 
@@ -411,7 +412,8 @@ struct App {
     synced: Option<ClipKey>,
     /// The clip played from outside the selection, which keeps its own bounds.
     outside: Option<Clip>,
-    /// Playback was running when the device was reopened; resume once the file reloads.
+    /// The selected file plays once it loads: it was selected to play, or playback was running
+    /// when the device was reopened.
     play_on_load: bool,
     /// Output file name for the next export; empty takes the preset's template.
     export_name: String,
@@ -461,6 +463,10 @@ impl App {
             drag_took_release: false,
             expanded,
             dir_children: HashMap::new(),
+            tabs: vec![Tab::default()],
+            active_tab: 0,
+            tabs_saved: None,
+            tabs_drawn: HashSet::new(),
             location: None,
             fav_count: 0,
             search: String::new(),
@@ -522,7 +528,112 @@ impl App {
             preset_rename: None,
         };
         app.restore_card();
+        app.restore_tabs();
         app
+    }
+
+    /// The tab in front as it stands.
+    fn tab_now(&self) -> Tab {
+        Tab {
+            id: self.tabs[self.active_tab].id,
+            location: self.location.clone(),
+            search: self.search.clone(),
+            favorites: self.filter.favorites,
+            tags: self.filter.tags.clone(),
+            types: self.filter.types.iter().map(|t| t.to_string()).collect(),
+            channels: self.filter.channels.clone(),
+            selected: self.selected.and_then(|i| self.files.get(i)).map(|f| f.path.clone()),
+        }
+    }
+
+    fn tabs_now(&self) -> Tabs {
+        let mut tabs = self.tabs.clone();
+        tabs[self.active_tab] = self.tab_now();
+        Tabs { tabs, active: self.active_tab }
+    }
+
+    fn remember_tabs(&mut self) {
+        let state = self.tabs_now();
+        if self.tabs_saved.as_ref() != Some(&state) {
+            if let Err(e) = self.db.set_tabs(&state) {
+                self.set_status(format!("Tabs: {e:#}"), true);
+            }
+            self.tabs_saved = Some(state);
+        }
+    }
+
+    /// Opens the tabs the open project left, on the one that was in front; a project never
+    /// opened starts on one tab with no folder picked.
+    fn restore_tabs(&mut self) {
+        let state = self.db.tabs().unwrap_or_else(|e| {
+            self.set_status(format!("Tabs: {e:#}"), true);
+            None
+        });
+        let state = state.filter(|s| !s.tabs.is_empty()).unwrap_or_else(|| Tabs { tabs: vec![Tab::default()], active: 0 });
+        self.active_tab = state.active.min(state.tabs.len() - 1);
+        self.tabs = state.tabs;
+        self.tabs_saved = None;
+        // Another project's tabs share these ids, and their scroll is not this project's.
+        self.tabs_drawn.clear();
+        self.show_tab();
+    }
+
+    /// Puts the front tab's view in place: its location, search and filter, and its file
+    /// selected once the list has it.
+    fn show_tab(&mut self) {
+        let tab = self.tabs[self.active_tab].clone();
+        self.search = tab.search;
+        self.filter = Filter {
+            favorites: tab.favorites,
+            tags: tab.tags,
+            types: FILE_TYPES.iter().map(|(name, _)| *name).filter(|name| tab.types.iter().any(|t| t == name)).collect(),
+            channels: tab.channels,
+        };
+        if let Some(Location::Folder(dir)) = &tab.location {
+            self.expand_to(&dir.clone());
+        }
+        self.location = tab.location;
+        self.refresh_list();
+        match tab.selected.and_then(|p| self.files.iter().position(|f| f.path == p)) {
+            Some(i) => self.select(i, false),
+            None => self.selected = None,
+        }
+        // A tab shown before keeps the scroll it was left at; one restored scrolls to its file.
+        self.scroll_to_selected = !self.tabs_drawn.contains(&tab.id);
+    }
+
+    fn switch_tab(&mut self, to: usize) {
+        if to == self.active_tab || to >= self.tabs.len() {
+            return;
+        }
+        self.tabs[self.active_tab] = self.tab_now();
+        self.active_tab = to;
+        self.show_tab();
+    }
+
+    /// A tab beside the front one on the list as it is now, brought to the front.
+    fn new_tab(&mut self) {
+        self.tabs[self.active_tab] = self.tab_now();
+        let id = self.tabs.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+        self.tabs.insert(self.active_tab + 1, Tab { id, ..self.tab_now() });
+        self.active_tab += 1;
+        self.scroll_to_selected = true;
+    }
+
+    /// Closes a tab; the last one stays. Closing the front one brings its neighbour forward.
+    fn close_tab(&mut self, i: usize) {
+        if self.tabs.len() < 2 || i >= self.tabs.len() {
+            return;
+        }
+        let front = i == self.active_tab;
+        self.tabs[self.active_tab] = self.tab_now();
+        self.tabs.remove(i);
+        if i < self.active_tab || self.active_tab == self.tabs.len() {
+            self.active_tab -= 1;
+        }
+        if front {
+            self.show_tab();
+        }
     }
 
     fn card_state(&self) -> CardState {
@@ -564,16 +675,12 @@ impl App {
     }
 
     /// Shows a folder, or a file's folder with the file selected, expanding the tree to it.
+    /// The tab's search and filter go, so nothing hides the file asked for.
     fn open_path(&mut self, path: &Path) {
         let dir = if path.is_dir() { path.to_path_buf() } else { path.parent().map(|p| p.to_path_buf()).unwrap_or_default() };
-        let mut p = dir.clone();
-        loop {
-            self.expanded.insert(p.clone());
-            match p.parent() {
-                Some(parent) if self.config.roots().iter().all(|r| p != r.path) && parent != Path::new("/") => p = parent.to_path_buf(),
-                _ => break,
-            }
-        }
+        self.expand_to(&dir);
+        self.search.clear();
+        self.filter.clear();
         self.location = Some(Location::Folder(dir));
         self.refresh_list();
         if path.is_file() {
@@ -583,7 +690,18 @@ impl App {
         }
     }
 
-    /// A message holds the footer for a while, then the key hints come back.
+    /// Opens the tree down to `dir`, from the library folder it sits in.
+    fn expand_to(&mut self, dir: &Path) {
+        let mut p = dir.to_path_buf();
+        loop {
+            self.expanded.insert(p.clone());
+            match p.parent() {
+                Some(parent) if self.config.roots().iter().all(|r| p != r.path) && parent != Path::new("/") => p = parent.to_path_buf(),
+                _ => break,
+            }
+        }
+    }
+
     /// Selects the next or previous take in the file, the takes being its spans of sound
     /// parted by silence, and plays it when autoplay is on: Up and Down browse the list, Left
     /// and Right browse inside a file.
@@ -790,11 +908,13 @@ impl App {
             self.synced = None;
             self.export_name.clear();
             if let Some(l) = self.cache.get(&path).cloned() {
+                self.play_on_load = false;
                 self.show_loaded(l);
                 if play {
                     self.play(None);
                 }
             } else {
+                self.play_on_load = play;
                 self.request_load(&path, true);
                 self.current = None;
                 self.wave.reset(self.files[i].info.as_ref().map(|x| x.duration_secs).unwrap_or(1.0));
@@ -1409,7 +1529,7 @@ impl App {
                             let wanted = self.selected.and_then(|i| self.files.get(i)).map(|f| f.path == path).unwrap_or(false);
                             if wanted && self.current.as_ref().map(|c| c.path != path).unwrap_or(true) {
                                 self.show_loaded(l);
-                                if self.config.autoplay || std::mem::take(&mut self.play_on_load) {
+                                if std::mem::take(&mut self.play_on_load) {
                                     self.play(None);
                                 }
                             }
@@ -1627,6 +1747,18 @@ impl App {
         }
         if fired(Action::Reverse) {
             self.toggle_reverse();
+        }
+        if fired(Action::NewTab) {
+            self.new_tab();
+        }
+        if fired(Action::CloseTab) {
+            self.close_tab(self.active_tab);
+        }
+        if fired(Action::NextTab) {
+            self.switch_tab((self.active_tab + 1) % self.tabs.len());
+        }
+        if fired(Action::PreviousTab) {
+            self.switch_tab((self.active_tab + self.tabs.len() - 1) % self.tabs.len());
         }
         if let Some(cur) = &self.current {
             let pos = self.player.as_ref().map(|p| p.position() as f64 / p.sample_rate as f64);
@@ -1952,8 +2084,13 @@ impl App {
         }
         let mut remove = false;
         let mut show = false;
+        let mut in_tab = false;
         resp.context_menu(|ui| {
             theme::menu_items(ui);
+            if ui.button(theme::icon_text(icons::PLUS, "Open in a new tab", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
+                in_tab = true;
+                ui.close();
+            }
             if depth == 0 && ui.button(theme::icon_text(icons::X, "Remove folder from the project", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
                 remove = true;
                 ui.close();
@@ -1966,6 +2103,12 @@ impl App {
         if remove {
             self.remove_root(dir);
             return;
+        }
+        if in_tab {
+            self.new_tab();
+            self.location = Some(Location::Folder(dir.to_path_buf()));
+            self.search.clear();
+            self.list_dirty = true;
         }
         if show {
             if let Err(e) = reveal(dir) {
@@ -1980,7 +2123,86 @@ impl App {
         }
     }
 
+    /// A tab's icon and name: what it searches for, or where it looks, and how many filters
+    /// narrow it.
+    fn tab_label(&self, tab: &Tab) -> (&'static str, String) {
+        let (icon, name) = match (&tab.location, tab.search.trim()) {
+            (_, search) if !search.is_empty() => (icons::MAGNIFYING_GLASS, search.to_string()),
+            (Some(Location::Favorites), _) => (icons::STAR, "Favorites".to_string()),
+            (Some(Location::Folder(d)), _) => {
+                let root = self.config.roots().iter().find(|r| r.path == *d).map(|r| r.name.clone());
+                (icons::FOLDER, root.or_else(|| d.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| d.display().to_string()))
+            }
+            (None, _) => (icons::FOLDER_DASHED, "No folder".to_string()),
+        };
+        let name = if name.chars().count() > 28 { format!("{}…", name.chars().take(27).collect::<String>()) } else { name };
+        let filters = tab.favorites as usize + tab.tags.len() + tab.types.len() + tab.channels.len();
+        (icon, if filters > 0 { format!("{name}  ·  {filters}") } else { name })
+    }
+
+    /// The tab strip above the list: a click brings a tab forward, a middle-click or its cross
+    /// closes it, and the plus opens one on the list as it is.
+    fn ui_tabs(&mut self, ui: &mut egui::Ui) {
+        let labels: Vec<(&str, String)> = (0..self.tabs.len()).map(|i| if i == self.active_tab { self.tab_label(&self.tab_now()) } else { self.tab_label(&self.tabs[i]) }).collect();
+        let closable = self.tabs.len() > 1;
+        let (mut switch, mut close, mut new) = (None, None, false);
+        let theme = self.theme.clone();
+        let hint = |a: Action| self.key_of(a);
+        let tip = format!("{} next, {} previous; middle-click or {} closes", hint(Action::NextTab), hint(Action::PreviousTab), hint(Action::CloseTab));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for (i, (icon, label)) in labels.iter().enumerate() {
+                let front = i == self.active_tab;
+                let color = if front { theme.text } else { theme.muted };
+                let text = ui.painter().layout_no_wrap(label.clone(), FontId::proportional(13.0), color);
+                let close_w = if closable { 18.0 } else { 0.0 };
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(10.0 + 14.0 + 6.0 + text.size().x + close_w + 10.0, 26.0), Sense::click());
+                let resp = resp.on_hover_text(&tip);
+                let fill = if front {
+                    theme.accent2_soft
+                } else if resp.hovered() {
+                    theme.overlay
+                } else {
+                    Color32::TRANSPARENT
+                };
+                let p = ui.painter();
+                p.rect_filled(rect, CornerRadius::same(5), fill);
+                p.text(egui::pos2(rect.left() + 10.0, rect.center().y), egui::Align2::LEFT_CENTER, *icon, FontId::new(13.0, egui::FontFamily::Name(theme::ICONS.into())), if front { theme.accent } else { theme.muted });
+                p.galley(egui::pos2(rect.left() + 30.0, rect.center().y - text.size().y / 2.0), text, color);
+                if closable {
+                    let x = egui::Rect::from_center_size(egui::pos2(rect.right() - 10.0 - close_w / 2.0 + 4.0, rect.center().y), egui::vec2(16.0, 16.0));
+                    let c = ui.interact(x, ui.id().with(("close-tab", self.tabs[i].id, i)), Sense::click()).on_hover_text("Close the tab");
+                    if c.hovered() {
+                        ui.painter().rect_filled(x, CornerRadius::same(3), theme.overlay);
+                    }
+                    ui.painter().text(x.center(), egui::Align2::CENTER_CENTER, icons::X, FontId::new(11.0, egui::FontFamily::Name(theme::ICONS.into())), if c.hovered() { theme.text } else { theme.muted });
+                    if c.clicked() {
+                        close = Some(i);
+                        continue;
+                    }
+                }
+                if resp.middle_clicked() {
+                    close = Some(i);
+                } else if resp.clicked() {
+                    switch = Some(i);
+                }
+            }
+            if ui.add(egui::Button::new(theme::icon(icons::PLUS).color(theme.muted)).frame(false)).on_hover_text(format!("New tab on the list as it is ({}); a folder's menu opens one there", hint(Action::NewTab))).clicked() {
+                new = true;
+            }
+        });
+        if let Some(i) = close {
+            self.close_tab(i);
+        } else if let Some(i) = switch {
+            self.switch_tab(i);
+        } else if new {
+            self.new_tab();
+        }
+    }
+
     fn ui_list(&mut self, ui: &mut egui::Ui) {
+        self.ui_tabs(ui);
+        ui.add_space(4.0);
         let n = self.files.len();
         let heading = if !self.search.trim().is_empty() {
             if n >= SEARCH_LIMIT { format!("First {n} results") } else { format!("{n} results") }
@@ -2048,7 +2270,11 @@ impl App {
         let header_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), header_h));
         let band = egui::emath::GuiRounding::round_ui(header_rect.expand2(0.5 * ui.spacing().item_spacing));
         let table_rect = egui::Rect::from_min_max(band.min, egui::pos2(band.right(), ui.max_rect().bottom()));
+        // Each tab scrolls on its own, so coming back to one finds it where it was left.
+        let tab_id = self.tabs[self.active_tab].id;
+        self.tabs_drawn.insert(tab_id);
         let mut builder = TableBuilder::new(ui)
+            .id_salt(("files", tab_id))
             .striped(true)
             .sense(Sense::click_and_drag())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
@@ -3043,6 +3269,7 @@ impl App {
 
     pub fn apply_project_action(&mut self, action: ProjectAction) {
         self.remember_card();
+        self.remember_tabs();
         let result = match action {
             ProjectAction::Default => self.config.close_project(),
             ProjectAction::Open(path) => self.config.open_project(&path),
@@ -3062,8 +3289,8 @@ impl App {
         }
         self.db.set_project(self.config.project_id());
         self.restore_card();
-        self.location = None;
         self.expanded = self.config.roots().iter().map(|r| r.path.clone()).collect();
+        self.restore_tabs();
         self.rescan();
     }
 
@@ -3077,7 +3304,8 @@ impl App {
                     match self.db.rename_tag(&old, &new) {
                         Ok(_) => {
                             self.config.tags[k].name = new.clone();
-                            for t in self.filter.tags.iter_mut().filter(|t| **t == old) {
+                            let waiting = self.tabs.iter_mut().flat_map(|tab| tab.tags.iter_mut());
+                            for t in self.filter.tags.iter_mut().chain(waiting).filter(|t| **t == old) {
                                 *t = new.clone();
                             }
                         }
@@ -3095,6 +3323,9 @@ impl App {
                     self.set_status(format!("Remove tag: {e:#}"), true);
                 }
                 self.filter.tags.retain(|x| *x != t.name);
+                for tab in &mut self.tabs {
+                    tab.tags.retain(|x| *x != t.name);
+                }
             }
             TagAction::Add => {
                 let mut name = "new".to_string();
@@ -3352,6 +3583,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.remember_card();
+        self.remember_tabs();
         let ctx = ui.ctx().clone();
         let zoom = ctx.zoom_factor();
         if (zoom - self.config.ui_zoom).abs() > 1e-3 {
