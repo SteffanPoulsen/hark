@@ -1586,25 +1586,6 @@ impl App {
 
     // ---- widgets ----
 
-    fn chip(&self, ui: &mut egui::Ui, text: &str, color: Color32, on: bool, clickable: bool) -> egui::Response {
-        let font = FontId::new(12.0, egui::FontFamily::Name(theme::MEDIUM.into()));
-        let galley = ui.painter().layout_no_wrap(text.to_string(), font, Color32::WHITE);
-        let pad = egui::vec2(8.0, 3.0);
-        let size = galley.size() + pad * 2.0;
-        let (rect, resp) = ui.allocate_exact_size(size, if clickable { Sense::click() } else { Sense::hover() });
-        let hovered = clickable && resp.hovered();
-        let (fill, stroke, fg) = if on {
-            (color.gamma_multiply(if hovered { 0.45 } else { 0.32 }), Stroke::new(1.0, color.gamma_multiply(0.9)), color.gamma_multiply(1.6).to_opaque())
-        } else {
-            (if hovered { self.theme.select } else { Color32::TRANSPARENT }, Stroke::new(1.0, if hovered { self.theme.muted } else { self.theme.line }), self.theme.muted)
-        };
-        let p = ui.painter();
-        p.rect_filled(rect, CornerRadius::same(10), fill);
-        p.rect_stroke(rect, CornerRadius::same(10), stroke, StrokeKind::Inside);
-        p.galley(rect.min + pad, galley, fg);
-        resp
-    }
-
 
     fn icon_button(ui: &mut egui::Ui, icon: &str, label: &str, on: bool) -> egui::Response {
         ui.add(egui::Button::new(theme::icon_text(icon, label, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).selected(on).min_size(egui::vec2(30.0, CONTROL_H)))
@@ -1723,38 +1704,63 @@ impl App {
             egui::Popup::open_id(ui.ctx(), popup.get_id());
         }
         let theme = self.theme.clone();
-        // The list scrolls before it can run off the window; Clear stays below it.
-        let max_h = ui.ctx().content_rect().height() - button.rect.bottom() - 90.0;
+        let tags = self.config.tags.clone();
+        // The tags scroll before they can run off the window; the other columns are short.
+        let max_h = (ui.ctx().content_rect().height() - button.rect.bottom() - 160.0).max(120.0);
+        const TAGS_W: f32 = 300.0;
+        const COLUMN_W: f32 = 110.0;
         popup.show(|ui| {
             theme::menu_items(ui);
-            egui::ScrollArea::vertical().max_height(max_h).auto_shrink([ui.is_sizing_pass(), true]).show(ui, |ui| {
-                changed |= theme::menu_check(ui, &mut self.filter.favorites, theme::icon_text(icons::STAR, "Favorites", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).changed();
-                theme::menu_heading(ui, &theme, "Tags");
-                for (k, t) in self.config.tags.clone().iter().enumerate() {
-                    let mut on = self.filter.tags.contains(&t.name);
-                    if theme::menu_check(ui, &mut on, RichText::new(&t.name).color(theme.color_of(k, Some(t)).gamma_multiply(1.3).to_opaque())).changed() {
-                        toggle_in(&mut self.filter.tags, t.name.clone());
-                        changed = true;
+            changed |= theme::menu_check(ui, &mut self.filter.favorites, theme::icon_text(icons::STAR, "Favorites", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).changed();
+            ui.separator();
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(TAGS_W);
+                    theme::menu_heading(ui, &theme, "Tags");
+                    ui.add_space(4.0);
+                    if tags.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(theme::MENU_INSET);
+                            ui.label(RichText::new("No tags yet. A file's menu makes one.").color(theme.muted).size(12.5));
+                        });
                     }
-                }
-                theme::menu_heading(ui, &theme, "File type");
-                for (name, _) in FILE_TYPES {
-                    let mut on = self.filter.types.contains(&name);
-                    if theme::menu_check(ui, &mut on, name).changed() {
-                        toggle_in(&mut self.filter.types, name);
-                        changed = true;
+                    egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+                        egui::Frame::new().inner_margin(Margin { left: theme::MENU_INSET as i8, ..Margin::ZERO }).show(ui, |ui| ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                            for (k, t) in tags.iter().enumerate() {
+                                let on = self.filter.tags.contains(&t.name);
+                                if chip(ui, &theme, &t.name, theme.color_of(k, Some(t)), on, true).clicked() {
+                                    toggle_in(&mut self.filter.tags, t.name.clone());
+                                    changed = true;
+                                }
+                            }
+                        }));
+                    });
+                });
+                ui.vertical(|ui| {
+                    ui.set_width(COLUMN_W);
+                    theme::menu_heading(ui, &theme, "File type");
+                    for (name, _) in FILE_TYPES {
+                        let mut on = self.filter.types.contains(&name);
+                        if theme::menu_check(ui, &mut on, name).changed() {
+                            toggle_in(&mut self.filter.types, name);
+                            changed = true;
+                        }
                     }
-                }
-                theme::menu_heading(ui, &theme, "Channels");
-                for c in ChannelClass::ALL {
-                    let mut on = self.filter.channels.contains(&c);
-                    if theme::menu_check(ui, &mut on, c.name()).changed() {
-                        toggle_in(&mut self.filter.channels, c);
-                        changed = true;
+                });
+                ui.vertical(|ui| {
+                    ui.set_width(COLUMN_W);
+                    theme::menu_heading(ui, &theme, "Channels");
+                    for c in ChannelClass::ALL {
+                        let mut on = self.filter.channels.contains(&c);
+                        if theme::menu_check(ui, &mut on, c.name()).changed() {
+                            toggle_in(&mut self.filter.channels, c);
+                            changed = true;
+                        }
                     }
-                }
+                });
             });
-            ui.add_space(6.0);
+            ui.separator();
             if ui.add_enabled(n > 0, egui::Button::new(theme::icon_text(icons::FUNNEL_X, "Clear", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER))).clicked() {
                 self.filter.clear();
                 changed = true;
@@ -2516,11 +2522,11 @@ impl App {
         if reversed {
             menu_button(ui, &mut action);
             for (k, t) in chips.iter().rev() {
-                self.chip(ui, t, self.theme.color_of(*k, defs.get(*k)), true, false);
+                chip(ui, &theme, t, theme.color_of(*k, defs.get(*k)), true, false);
             }
         } else {
             for (k, t) in &chips {
-                self.chip(ui, t, self.theme.color_of(*k, defs.get(*k)), true, false);
+                chip(ui, &theme, t, theme.color_of(*k, defs.get(*k)), true, false);
             }
             menu_button(ui, &mut action);
         }
@@ -3025,6 +3031,26 @@ impl App {
             });
         });
     }
+}
+
+/// A tag as a rounded chip in its colour: filled when `on`, outlined when not.
+fn chip(ui: &mut egui::Ui, theme: &Theme, text: &str, color: Color32, on: bool, clickable: bool) -> egui::Response {
+    let font = FontId::new(12.0, egui::FontFamily::Name(theme::MEDIUM.into()));
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, Color32::PLACEHOLDER);
+    let pad = egui::vec2(8.0, 3.0);
+    let size = galley.size() + pad * 2.0;
+    let (rect, resp) = ui.allocate_exact_size(size, if clickable { Sense::click() } else { Sense::hover() });
+    let hovered = clickable && resp.hovered();
+    let (fill, stroke, fg) = if on {
+        (color.gamma_multiply(if hovered { 0.45 } else { 0.32 }), Stroke::new(1.0, color.gamma_multiply(0.9)), color.gamma_multiply(1.6).to_opaque())
+    } else {
+        (if hovered { theme.select } else { Color32::TRANSPARENT }, Stroke::new(1.0, color.gamma_multiply(if hovered { 0.9 } else { 0.45 })), color.gamma_multiply(if hovered { 1.4 } else { 1.0 }).to_opaque())
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(10), fill);
+    p.rect_stroke(rect, CornerRadius::same(10), stroke, StrokeKind::Inside);
+    p.galley(rect.min + pad, galley, fg);
+    resp
 }
 
 fn secs_field(v: &mut f64, max: f64) -> egui::DragValue<'_> {
