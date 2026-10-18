@@ -3515,26 +3515,6 @@ impl App {
 
     fn ui_status(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if self.status.is_empty() {
-                let pair = |a: Action, b: Action| format!("{} {}", self.key_of(a), self.key_of(b));
-                let hints = [
-                    (self.key_of(Action::Play), "Play"),
-                    ("↑ ↓".to_string(), "Browse"),
-                    (pair(Action::PreviousTake, Action::NextTake), "Takes"),
-                    (self.key_of(Action::Favorite), "Favorite"),
-                    (self.key_of(Action::Reverse), "Reverse"),
-                    (self.key_of(Action::Preview), "Preview"),
-                    (self.key_of(Action::Export), "Export"),
-                    (format!("{}+C", keys::COMMAND), "Copy"),
-                    (format!("{}+Drag", keys::DRAG_COPY), "Drag out"),
-                ];
-                for (key, action) in &hints {
-                    self.key_hint(ui, key, action);
-                }
-            } else {
-                let color = if self.status_is_error { self.theme.err } else { self.theme.muted };
-                ui.label(RichText::new(&self.status).color(color).size(12.0));
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let device = match (&self.player, &self.audio_error) {
                     (Some(p), _) => theme::icon_text(icons::SPEAKER_HIGH, &format!("{}  ·  {} Hz", p.device_name, p.sample_rate), 12.0, egui::FontFamily::Proportional, self.theme.muted),
@@ -3557,6 +3537,34 @@ impl App {
                 } else {
                     ui.label(RichText::new(format!("{} files", self.file_count)).color(self.theme.muted).size(12.0));
                 }
+                // The left side takes what the right leaves, and the hints that do not fit go.
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    if self.status.is_empty() {
+                        let pair = |a: Action, b: Action| format!("{} {}", self.key_of(a), self.key_of(b));
+                        let hints = [
+                            (self.key_of(Action::Play), "Play"),
+                            ("↑ ↓".to_string(), "Browse"),
+                            (pair(Action::PreviousTake, Action::NextTake), "Takes"),
+                            (self.key_of(Action::Favorite), "Favorite"),
+                            (self.key_of(Action::Reverse), "Reverse"),
+                            (self.key_of(Action::Preview), "Preview"),
+                            (self.key_of(Action::Export), "Export"),
+                            (format!("{}+C", keys::COMMAND), "Copy"),
+                            (format!("{}+Drag", keys::DRAG_COPY), "Drag out"),
+                        ];
+                        let text_w = |ui: &egui::Ui, text: &str, family: egui::FontFamily| ui.painter().layout_no_wrap(text.to_string(), FontId::new(12.0, family), Color32::PLACEHOLDER).size().x;
+                        for (key, action) in &hints {
+                            let w = text_w(ui, key, egui::FontFamily::Name(theme::MEDIUM.into())) + text_w(ui, action, egui::FontFamily::Proportional) + 3.0 * ui.spacing().item_spacing.x + 4.0;
+                            if w > ui.available_width() {
+                                break;
+                            }
+                            self.key_hint(ui, key, action);
+                        }
+                    } else {
+                        let color = if self.status_is_error { self.theme.err } else { self.theme.muted };
+                        ui.add(egui::Label::new(RichText::new(&self.status).color(color).size(12.0)).truncate());
+                    }
+                });
             });
         });
     }
