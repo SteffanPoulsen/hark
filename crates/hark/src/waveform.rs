@@ -661,6 +661,8 @@ pub struct GhostColors {
     pub card: Color32,
     pub peak: Color32,
     pub rms: Color32,
+    /// Diagonal stripes across the card, in this colour.
+    pub hatch: Option<Color32>,
 }
 
 /// The drag picture: the span's envelope, all channels folded into one, on a rounded
@@ -674,11 +676,13 @@ pub fn ghost(peaks: &Peaks, span: (f64, f64), gain_at: &dyn Fn(f64) -> f32, colo
         rgba[i..i + 4].copy_from_slice(&c.to_srgba_unmultiplied());
     };
     let card = Color32::from_rgba_unmultiplied(colors.card.r(), colors.card.g(), colors.card.b(), 200);
+    let hatch = colors.hatch.map(|c| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 220));
+    let stripe = 6 * scale as usize;
     for y in 0..h {
         for x in 0..w {
             let (cx, cy) = ((x as f32 + 0.5 - radius).min(0.0).max(x as f32 + 0.5 - (w as f32 - radius)), (y as f32 + 0.5 - radius).min(0.0).max(y as f32 + 0.5 - (h as f32 - radius)));
             if cx * cx + cy * cy <= radius * radius {
-                put(x, y, card);
+                put(x, y, hatch.filter(|_| ((x + y) / stripe).is_multiple_of(2)).unwrap_or(card));
             }
         }
     }

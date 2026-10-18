@@ -2368,7 +2368,7 @@ dependencies = [
  "serde",
  "serde_json",
  "wayland-client",
- "windows 0.52.0",
+ "windows-sys 0.52.0",
  "wl-clipboard-rs",
 ]
 

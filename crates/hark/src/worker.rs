@@ -17,7 +17,6 @@ use hark_core::pcm::DownmixMode;
 use hark_core::peaks::{Bin, PeaksBuilder};
 use hark_core::{ExportPreset, Loudness, Pcm, Peaks};
 
-use crate::dnd::Ready;
 use crate::promise::Promise;
 
 pub struct Loaded {
@@ -115,9 +114,7 @@ pub enum Done {
     /// The analysis pass of a streamed file.
     Analyzed(PathBuf, Result<(Arc<Peaks>, Option<Level>), String>),
     Exported(Result<ExportResult, String>),
-    /// `dragged` when the copy was for a drag, which is handed over by itself; otherwise the
-    /// clipboard still wants it.
-    Copied { output: PathBuf, result: Result<ExportResult, String>, dragged: bool },
+    Copied { output: PathBuf, result: Result<ExportResult, String> },
     /// One result per root, by name; a root that could not be scanned carries the reason.
     Scanned(Vec<(String, Result<ScanReport, String>)>),
     Folded { path: PathBuf, mode: DownmixMode, measure: bool, result: Result<Folded, String> },
@@ -226,7 +223,6 @@ struct SpanJob {
 
 struct CopyJob {
     plan: Plan,
-    ready: Option<Ready>,
     measuring: Option<Promise<Option<Level>>>,
 }
 
@@ -273,7 +269,7 @@ impl Worker {
             let ctx = ctx.clone();
             let copying = copying.clone();
             std::thread::spawn(move || {
-                for CopyJob { mut plan, ready, measuring } in copy_rx {
+                for CopyJob { mut plan, measuring } in copy_rx {
                     if let (Some(export), Some(Some(level))) = (&mut plan.pending, measuring.and_then(|m| m.wait(MEASURING_WAIT))) {
                         export.levels.push(level);
                     }
@@ -282,11 +278,8 @@ impl Worker {
                         Ok(r) => r.map_err(|e| format!("{e:#}")),
                         Err(_) => Err("the export stopped on an internal error".to_string()),
                     };
-                    if let Some(r) = &ready {
-                        r.set(result.is_ok());
-                    }
                     copying.add(-1);
-                    if done_tx.send(Done::Copied { output: plan.output, result, dragged: ready.is_some() }).is_err() {
+                    if done_tx.send(Done::Copied { output: plan.output, result }).is_err() {
                         return;
                     }
                     ctx.request_repaint();
@@ -317,17 +310,15 @@ impl Worker {
         let _ = self.tx.send(job);
     }
 
-    /// Writes a planned copy; `ready` tells a drag in flight when the file is there.
-    /// `measuring` is a measurement of the span still running, which the copy waits for
-    /// rather than measuring the same audio again.
-    /// `false` when the copy thread is gone and the copy will never be written.
-    pub fn copy(&self, plan: Plan, ready: Option<Ready>, measuring: Option<Promise<Option<Level>>>) -> bool {
+    /// Writes a planned copy. `measuring` is a measurement of the span still running, which
+    /// the copy waits for rather than measuring the same audio again. The plan comes back
+    /// when the copy thread is gone and the copy will never be written.
+    pub fn copy(&self, plan: Plan, measuring: Option<Promise<Option<Level>>>) -> Result<(), Box<Plan>> {
         self.copying.add(1);
-        let sent = self.copy_tx.send(CopyJob { plan, ready, measuring }).is_ok();
-        if !sent {
+        self.copy_tx.send(CopyJob { plan, measuring }).map_err(|e| {
             self.copying.add(-1);
-        }
-        sent
+            Box::new(e.0.plan)
+        })
     }
 
     /// Loads the file the user is waiting on. Returns the path of a request it replaced

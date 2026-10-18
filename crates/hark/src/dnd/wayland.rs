@@ -10,7 +10,7 @@ use std::io::Write;
 use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use wayland_client::backend::{Backend, ObjectId};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
@@ -34,26 +34,41 @@ pub struct Dragger {
     /// Serial of the left press being held, or `NO_PRESS`.
     press: Arc<AtomicU64>,
     dragging: Arc<AtomicBool>,
+    entered: Entered,
+    cursor: Mutex<Cursor>,
 }
+
+/// The pointer picture `show_cursor` sets.
+#[derive(Default)]
+struct Cursor {
+    /// The picture, and the enter it was set after.
+    shown: Option<(wl_surface::WlSurface, wl_buffer::WlBuffer, u32)>,
+    /// The enter the last call saw.
+    seen: Option<u32>,
+}
+
+/// The pointer while it is over the window, with the serial of its enter.
+type Entered = Arc<Mutex<Option<(wl_pointer::WlPointer, u32)>>>;
 
 struct State {
     pointer: Option<wl_pointer::WlPointer>,
     press: Arc<AtomicU64>,
     dragging: Arc<AtomicBool>,
+    entered: Entered,
+    missed: super::Missed,
 }
 
-/// What a source in flight sends, the icon it carries, and whether the file is written yet.
+/// What a source in flight sends, and the icon it carries.
 struct Payload {
     paths: Vec<PathBuf>,
     icon: Option<(wl_surface::WlSurface, wl_buffer::WlBuffer)>,
-    ready: Option<super::Ready>,
 }
 
 impl Dragger {
     /// # Safety
     /// `display` and `surface` are winit's live `wl_display` and the window's `wl_surface`,
     /// and outlive the dragger.
-    pub unsafe fn new(display: *mut std::ffi::c_void, surface: *mut std::ffi::c_void) -> Result<Dragger, String> {
+    pub unsafe fn new(display: *mut std::ffi::c_void, surface: *mut std::ffi::c_void, missed: super::Missed) -> Result<Dragger, String> {
         let backend = unsafe { Backend::from_foreign_display(display.cast()) };
         let conn = Connection::from_backend(backend);
         let (globals, mut queue) = registry_queue_init::<State>(&conn).map_err(|e| e.to_string())?;
@@ -65,7 +80,8 @@ impl Dragger {
         let device = manager.get_data_device(&seat, &qh, ());
         let press = Arc::new(AtomicU64::new(NO_PRESS));
         let dragging = Arc::new(AtomicBool::new(false));
-        let mut state = State { pointer: None, press: press.clone(), dragging: dragging.clone() };
+        let entered = Entered::default();
+        let mut state = State { pointer: None, press: press.clone(), dragging: dragging.clone(), entered: entered.clone(), missed };
         queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
         if state.pointer.is_none() {
             return Err("the seat has no pointer".into());
@@ -76,18 +92,18 @@ impl Dragger {
             .name("wl-drag".into())
             .spawn(move || while queue.blocking_dispatch(&mut state).is_ok() {})
             .map_err(|e| e.to_string())?;
-        Ok(Dragger { conn, qh, manager, compositor, shm, device, surface, press, dragging })
+        Ok(Dragger { conn, qh, manager, compositor, shm, device, surface, press, dragging, entered, cursor: Mutex::default() })
     }
 
     /// Drags `paths` from the window. The compositor only starts a drag for the press it is
     /// grabbing, so the button must still be down.
-    pub fn drag(&self, paths: Vec<PathBuf>, image: Option<Image>, ready: Option<super::Ready>) -> Result<(), String> {
+    pub fn drag(&self, paths: Vec<PathBuf>, image: Option<Image>) -> Result<(), String> {
         let serial = match self.press.load(Ordering::Acquire) {
             NO_PRESS => return Err("no button held; the drag did not start".into()),
             s => s as u32,
         };
         let icon = image.and_then(|im| self.icon(&im).map_err(|e| eprintln!("drag icon: {e}")).ok());
-        let source = self.manager.create_data_source(&self.qh, Payload { paths, icon: icon.clone(), ready });
+        let source = self.manager.create_data_source(&self.qh, Payload { paths, icon: icon.clone() });
         source.offer("text/uri-list".into());
         if source.version() >= 3 {
             source.set_actions(DndAction::Copy);
@@ -99,6 +115,47 @@ impl Dragger {
             surface.commit();
         }
         self.conn.flush().map_err(|e| e.to_string())
+    }
+
+    /// Shows `im` as the pointer over the window, called every frame it should. winit's own
+    /// custom cursor flickers, since it uploads a new buffer every frame. winit sets its cursor
+    /// when the pointer enters and egui-winit at the end of that frame, so the picture goes on
+    /// in the frame after the one that first sees an enter; `false` while it waits for it.
+    pub fn show_cursor(&self, im: &Image) -> Result<bool, String> {
+        let Some((pointer, serial)) = self.entered.lock().unwrap().clone() else { return Ok(true) };
+        let mut cursor = self.cursor.lock().unwrap();
+        if cursor.shown.as_ref().is_some_and(|c| c.2 == serial) {
+            return Ok(true);
+        }
+        if cursor.seen.replace(serial) != Some(serial) {
+            return Ok(false);
+        }
+        let (surface, buffer) = self.icon(im)?;
+        surface.attach(Some(&buffer), 0, 0);
+        surface.commit();
+        pointer.set_cursor(serial, Some(&surface), 0, 0);
+        if let Some((s, b, _)) = cursor.shown.replace((surface, buffer, serial)) {
+            s.destroy();
+            b.destroy();
+        }
+        self.conn.flush().map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    /// Lets go of the picture `show_cursor` set; winit sets the window's next cursor. Not
+    /// flushed: winit's request goes out with it on the same connection, and a compositor
+    /// shows no pointer at all between the two.
+    pub fn hide_cursor(&self) {
+        let mut cursor = self.cursor.lock().unwrap();
+        cursor.seen = None;
+        if let Some((s, b, _)) = cursor.shown.take() {
+            s.destroy();
+            b.destroy();
+        }
+    }
+
+    pub fn button_held(&self) -> bool {
+        self.press.load(Ordering::Acquire) != NO_PRESS
     }
 
     /// A surface showing `im`, from a buffer in a file the compositor maps.
@@ -178,13 +235,19 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
 }
 
 impl Dispatch<wl_pointer::WlPointer, ()> for State {
-    fn event(st: &mut Self, _: &wl_pointer::WlPointer, ev: wl_pointer::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+    fn event(st: &mut Self, pointer: &wl_pointer::WlPointer, ev: wl_pointer::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         match ev {
+            wl_pointer::Event::Enter { serial, .. } => *st.entered.lock().unwrap() = Some((pointer.clone(), serial)),
             wl_pointer::Event::Button { serial, button: BTN_LEFT, state, .. } => {
                 let pressed = state == WEnum::Value(wl_pointer::ButtonState::Pressed);
                 st.press.store(if pressed { serial as u64 } else { NO_PRESS }, Ordering::Release);
             }
-            wl_pointer::Event::Leave { .. } if !st.dragging.load(Ordering::Acquire) => st.press.store(NO_PRESS, Ordering::Release),
+            wl_pointer::Event::Leave { .. } => {
+                *st.entered.lock().unwrap() = None;
+                if !st.dragging.load(Ordering::Acquire) {
+                    st.press.store(NO_PRESS, Ordering::Release);
+                }
+            }
             _ => {}
         }
     }
@@ -194,14 +257,13 @@ impl Dispatch<wl_data_source::WlDataSource, Payload> for State {
     fn event(st: &mut Self, source: &wl_data_source::WlDataSource, ev: wl_data_source::Event, payload: &Payload, _: &Connection, _: &QueueHandle<Self>) {
         match ev {
             wl_data_source::Event::Send { mime_type, fd } if mime_type == "text/uri-list" => {
-                // The receiver waits on the pipe, so the file is complete before it is named.
-                if payload.ready.as_ref().is_some_and(|r| !r.wait()) {
-                    return;
-                }
                 let mut file = std::fs::File::from(fd);
                 let _ = file.write_all(super::uri_list(&payload.paths).as_bytes());
             }
             wl_data_source::Event::Cancelled | wl_data_source::Event::DndFinished => {
+                if matches!(ev, wl_data_source::Event::Cancelled) {
+                    st.missed.raise();
+                }
                 st.dragging.store(false, Ordering::Release);
                 st.press.store(NO_PRESS, Ordering::Release);
                 if let Some((surface, buffer)) = &payload.icon {

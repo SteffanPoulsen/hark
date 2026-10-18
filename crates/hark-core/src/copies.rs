@@ -86,6 +86,18 @@ impl CopyRequest {
         })
     }
 
+    /// Whether `other` writes the same copy, by the recipe `existing` matches a finished one
+    /// by.
+    pub fn same_recipe(&self, other: &CopyRequest) -> bool {
+        self.source == other.source
+            && self.folder == other.folder
+            && self.selection == other.selection
+            && self.fade_in_secs == other.fade_in_secs
+            && self.fade_out_secs == other.fade_out_secs
+            && self.gain_db == other.gain_db
+            && self.preset.clone().effective() == other.preset.clone().effective()
+    }
+
     /// `<stem> <in>-<out>.<ext>`, or `<stem>.<ext>` for the whole file; times in seconds,
     /// since a colon is not a file name character everywhere.
     pub fn file_name(&self) -> String {
@@ -152,6 +164,15 @@ impl CopyRequest {
 pub struct Plan {
     pub output: PathBuf,
     pub pending: Option<ExportRequest>,
+}
+
+impl Plan {
+    /// Lets go of the name this plan claimed, for a copy that will not be written.
+    pub fn abandon(self) {
+        if self.pending.is_some() {
+            let _ = std::fs::remove_file(part_of(&self.output));
+        }
+    }
 }
 
 /// The name a copy is written under until it is complete, so a receiver never opens half a

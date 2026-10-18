@@ -1,18 +1,16 @@
 //! Handing files to other programs: a drag out of the window, and a file copy to the system
-//! clipboard. winit 0.30 has neither, so each desktop gets its own piece behind the same two
+//! clipboard. winit 0.30 has neither, so each desktop gets its own piece behind the same
 //! calls; X11 has no drag source at all, and the status line says so. Windows and macOS drag
-//! through the `drag` crate, except that a Windows drag of a file still being written has a
-//! source of its own.
+//! through the `drag` crate.
 //!
-//! A drag of a file still being written starts at once on every desktop, and its drop target
-//! is answered when it reads the file's name, once the file is there.
+//! A drag carries a file that is already written. A drop target may read the file's name at
+//! any moment from the drag's start, and a late answer hangs a Windows or macOS target and
+//! confuses a Wayland one, so the window holds a drag back until its file is there.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-use crate::promise::Promise;
-
-#[cfg(windows)]
-mod ole;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod wayland;
 
@@ -26,39 +24,38 @@ pub struct Image {
     pub scale: i32,
 }
 
-/// Whether a dragged file has been written yet. The drag starts the moment the pointer moves,
-/// with the path known; the file lands on a worker thread, and the drop target is answered
-/// only once it has.
+/// Raised when a drag ends without a drop, from whichever thread learns it.
 #[derive(Clone)]
-pub struct Ready(Promise<bool>);
+struct Missed {
+    flag: Arc<AtomicBool>,
+    ctx: egui::Context,
+}
 
-impl Ready {
-    pub fn new() -> Ready {
-        Ready(Promise::new())
-    }
-
-    pub fn set(&self, ok: bool) {
-        self.0.set(ok);
-    }
-
-    /// Blocks until the file is there, or gives up after a couple of minutes.
-    pub fn wait(&self) -> bool {
-        self.0.wait(std::time::Duration::from_secs(120)) == Some(true)
+impl Missed {
+    fn raise(&self) {
+        self.flag.store(true, Ordering::Release);
+        self.ctx.request_repaint();
     }
 }
 
 /// The window's drag source, if the desktop has one.
 pub struct DragOut {
+    missed: Missed,
     #[cfg(all(unix, not(target_os = "macos")))]
     wayland: Option<wayland::Dragger>,
     #[cfg(any(windows, target_os = "macos"))]
     native: Option<raw_window_handle::RawWindowHandle>,
+    /// A drag is waiting for its file.
+    waiting: bool,
+    #[cfg(any(windows, target_os = "macos"))]
+    wait_cursor: Option<egui::CustomCursorImage>,
 }
 
 impl DragOut {
     pub fn new(cc: &eframe::CreationContext<'_>) -> DragOut {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let window = cc.window_handle().map(|h| h.as_raw());
+        let missed = Missed { flag: Arc::default(), ctx: cc.egui_ctx.clone() };
         #[cfg(all(unix, not(target_os = "macos")))]
         {
             use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
@@ -67,7 +64,7 @@ impl DragOut {
                 (Ok(RawDisplayHandle::Wayland(d)), Ok(RawWindowHandle::Wayland(w))) => {
                     // SAFETY: winit's live wl_display and the window's wl_surface; both outlive
                     // the app, which is created once for the process.
-                    match unsafe { wayland::Dragger::new(d.display.as_ptr(), w.surface.as_ptr()) } {
+                    match unsafe { wayland::Dragger::new(d.display.as_ptr(), w.surface.as_ptr(), missed.clone()) } {
                         Ok(d) => Some(d),
                         Err(e) => {
                             eprintln!("drag source: {e}");
@@ -77,7 +74,7 @@ impl DragOut {
                 }
                 _ => None,
             };
-            DragOut { wayland }
+            DragOut { missed, wayland, waiting: false }
         }
         #[cfg(any(windows, target_os = "macos"))]
         {
@@ -85,9 +82,8 @@ impl DragOut {
                 Ok(h @ (RawWindowHandle::Win32(_) | RawWindowHandle::AppKit(_))) => Some(h),
                 _ => None,
             };
-            // winit registers every window for file drops on macOS; hark takes none, and as a
-            // drop target the window would read the name of a file it is itself dragging out,
-            // which waits for the file to be written.
+            // winit registers every window for file drops on macOS. hark takes none, and as a
+            // drop target the window would accept its own drag and swallow the drop.
             #[cfg(target_os = "macos")]
             if let Some(RawWindowHandle::AppKit(h)) = native {
                 // SAFETY: the window's live NSView, on the main thread that created it.
@@ -96,40 +92,105 @@ impl DragOut {
                     window.unregisterDraggedTypes();
                 }
             }
-            DragOut { native }
+            DragOut { missed, native, waiting: false, wait_cursor: None }
         }
         #[cfg(not(any(unix, windows)))]
         {
             let _ = window;
-            DragOut {}
+            DragOut { missed, waiting: false }
         }
     }
 
-    /// Starts dragging `paths` from the window, with `image` under the pointer, and with the
-    /// drop answered only once `ready` says the file is written. The pointer button must still
-    /// be down.
-    pub fn start(&self, paths: Vec<PathBuf>, image: Option<Image>, ready: Option<Ready>) -> Result<(), String> {
+    /// The pointer while a drag waits for its file: `image`, or the busy cursor without one.
+    /// Called every frame of the wait; `done_waiting` in the frame it ends.
+    pub fn waiting(&mut self, ctx: &egui::Context, image: Option<&Image>) {
+        self.waiting = true;
+        ctx.set_cursor_icon(egui::CursorIcon::Progress);
+        let Some(im) = image else { return };
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(d) = &self.wayland {
+            match d.show_cursor(im) {
+                Ok(true) => {}
+                Ok(false) => ctx.request_repaint(),
+                Err(e) => eprintln!("drag cursor: {e}"),
+            }
+        }
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            let cursor = self.wait_cursor.get_or_insert_with(|| egui::CustomCursorImage { rgba: im.rgba.clone().into(), size: [im.width as u16, im.height as u16], hotspot: [0, 0] });
+            ctx.set_cursor_image(Some(cursor.clone()));
+        }
+        #[cfg(not(any(unix, windows)))]
+        let _ = im;
+    }
+
+    pub fn done_waiting(&mut self, ctx: &egui::Context) {
+        if !std::mem::take(&mut self.waiting) {
+            return;
+        }
+        // egui-winit sets the window's cursor only when the icon changes, and the busy icon
+        // can still stand from the wait.
+        ctx.output_mut(|o| {
+            if o.cursor_icon == egui::CursorIcon::Progress {
+                o.cursor_icon = egui::CursorIcon::Default;
+            }
+        });
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(d) = &self.wayland {
+            d.hide_cursor();
+        }
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            self.wait_cursor = None;
+        }
+    }
+
+    /// Whether a drag has ended without a drop since the last call. Windows reports only a
+    /// drag called off with Escape.
+    pub fn take_missed(&self) -> bool {
+        self.missed.flag.swap(false, Ordering::AcqRel)
+    }
+
+    /// Whether the pointer's primary button is down, as the desktop has it now; `true` where
+    /// it cannot say. egui can miss a release that comes after the pointer has left the window,
+    /// and a Windows drag started once the button is up drops at once, wherever it is.
+    pub fn button_held(&self) -> bool {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            self.wayland.as_ref().is_none_or(|d| d.button_held())
+        }
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+            use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+            // GetAsyncKeyState reads the physical buttons.
+            let primary = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
+            let state = unsafe { GetAsyncKeyState(primary.into()) };
+            state < 0
+        }
+        #[cfg(target_os = "macos")]
+        {
+            objc2_app_kit::NSEvent::pressedMouseButtons() & 1 != 0
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            true
+        }
+    }
+
+    /// Starts dragging `paths`, written files, from the window, with `image` under the pointer.
+    /// The pointer button must still be down.
+    pub fn start(&self, paths: Vec<PathBuf>, image: Option<Image>) -> Result<(), String> {
         #[cfg(all(unix, not(target_os = "macos")))]
         {
             match &self.wayland {
-                Some(d) => d.drag(paths, image, ready),
+                Some(d) => d.drag(paths, image),
                 None => Err("dragging out of the window needs Wayland; on X11, use copy".into()),
             }
         }
         #[cfg(any(windows, target_os = "macos"))]
         {
             let Some(handle) = self.native else { return Err("no window handle for the drag".into()) };
-            #[cfg(windows)]
-            if let Some(ready) = ready {
-                return ole::drag(paths, image, ready);
-            }
-            #[cfg(windows)]
-            let item = drag::DragItem::Files(paths);
-            #[cfg(target_os = "macos")]
-            let item = match ready {
-                Some(ready) => promised(paths, ready),
-                None => drag::DragItem::Files(paths),
-            };
             struct Native(raw_window_handle::RawWindowHandle);
             impl raw_window_handle::HasWindowHandle for Native {
                 fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
@@ -137,38 +198,20 @@ impl DragOut {
                     Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0) })
                 }
             }
-            drag::start_drag(&Native(handle), item, drag::Image::Raw(png(image)), |_, _| {}, drag::Options::default()).map_err(|e| e.to_string())
+            let missed = self.missed.clone();
+            let ended = move |result, _| {
+                if matches!(result, drag::DragResult::Cancel) {
+                    missed.raise();
+                }
+            };
+            drag::start_drag(&Native(handle), drag::DragItem::Files(paths), drag::Image::Raw(png(image)), ended, drag::Options::default()).map_err(|e| e.to_string())
         }
         #[cfg(not(any(unix, windows)))]
         {
-            let _ = (paths, image, ready);
+            let _ = (paths, image);
             Err("dragging out of the window is not available here; use copy".into())
         }
     }
-}
-
-/// A drag item for a file still being written: it declares the file's URL, and the legacy
-/// filename list older programs read, and gives them only when the drop target reads one,
-/// once the file is there. The target waits meanwhile, as a Wayland one does.
-#[cfg(target_os = "macos")]
-fn promised(paths: Vec<PathBuf>, ready: Ready) -> drag::DragItem {
-    const FILE_URL: &str = "public.file-url";
-    const FILENAMES: &str = "NSFilenamesPboardType";
-    let provider = move |kind: &str| -> Option<Vec<u8>> {
-        if !ready.wait() {
-            return None;
-        }
-        match kind {
-            FILE_URL => paths.first().map(|p| file_uri(p).into_bytes()),
-            FILENAMES => {
-                let escape = |s: String| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-                let names: String = paths.iter().map(|p| format!("<string>{}</string>", escape(p.to_string_lossy().into_owned()))).collect();
-                Some(format!(r#"<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><array>{names}</array></plist>"#).into_bytes())
-            }
-            _ => None,
-        }
-    };
-    drag::DragItem::Data { provider: Box::new(provider), types: vec![FILE_URL.into(), FILENAMES.into()] }
 }
 
 #[cfg(windows)]
@@ -243,7 +286,7 @@ pub fn uri_list(paths: &[PathBuf]) -> String {
     paths.iter().map(|p| format!("{}\r\n", file_uri(p))).collect()
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn file_uri(path: &std::path::Path) -> String {
     use std::os::unix::ffi::OsStrExt;
     let mut out = String::from("file://");

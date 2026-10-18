@@ -143,8 +143,8 @@ fn main() -> eframe::Result {
             .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/hark-256.png")).expect("the icon is a PNG"))
             .with_inner_size([1500.0, 900.0])
             .with_min_inner_size([900.0, 600.0])
-            // hark takes no file drops. As a drop target, the window would read the name of a
-            // file it is itself dragging out, and that read waits for the file to be written.
+            // hark takes no file drops, and as a drop target the window would accept its own
+            // drag and swallow the drop. This reaches Windows; `dnd` unregisters on macOS.
             .with_drag_and_drop(false),
         ..Default::default()
     };
@@ -182,18 +182,32 @@ struct Asked {
     level: promise::Promise<Option<Level>>,
 }
 
-/// A copy being written: `span` of `source`, or all of it, bound for `output`.
+/// A copy being written from `recipe` to `output`, and for the clipboard once written.
 struct Writing {
-    source: PathBuf,
-    span: Option<(f64, f64)>,
+    recipe: CopyRequest,
     output: PathBuf,
+    clipboard: bool,
 }
 
-struct DeferredDrag {
+impl Writing {
+    fn span(&self) -> Option<(f64, f64)> {
+        self.recipe.selection.map(|s| (s.start_secs, s.end_secs))
+    }
+}
+
+/// A drag out of the selection waiting for its file.
+struct AwaitedDrag {
+    /// When the press that began it started, as egui has it.
+    press: Option<f64>,
     output: PathBuf,
     image: Option<dnd::Image>,
-    ready: Option<dnd::Ready>,
+    /// The pointer meanwhile.
+    pending: Option<dnd::Image>,
     what: String,
+    written: bool,
+    /// A frame showing the file written has been drawn. A Windows drag loop keeps the window
+    /// from painting until the drop, so the drag waits for it.
+    shown: bool,
 }
 
 /// How many span measurements the window keeps; each is a few hundred bytes.
@@ -286,9 +300,9 @@ struct App {
     audio_error: Option<String>,
     worker: Worker,
     drag: dnd::DragOut,
-    /// A drag out of the window began: the desktop's drag grab takes the button release, so
-    /// winit never reports it and egui would hold the press until the next click. The next
-    /// frame's input gets the release.
+    /// egui holds a press the desktop has let go of: a drag out of the window took the
+    /// release, so winit never reported it, or egui-winit dropped it after the pointer left
+    /// the window. The next frame's input gets the release.
     drag_took_release: bool,
 
     expanded: HashSet<PathBuf>,
@@ -332,9 +346,9 @@ struct App {
     recent_levels: VecDeque<Level>,
     /// Copies being written, for the drag or the clipboard.
     writing: Vec<Writing>,
-    /// A drag out of the selection asked for and not started yet: the frames it waits are
-    /// left, then the drag.
-    drag_deferred: Option<(u8, DeferredDrag)>,
+    /// A drag out of the selection whose file is being written. It starts once the file is
+    /// there, if the press that began it still holds.
+    drag_awaited: Option<AwaitedDrag>,
     /// A selection or fade number field is being dragged, which edits the clip as a drag on
     /// the wave does.
     fields_dragging: bool,
@@ -457,7 +471,7 @@ impl App {
             span_asked: None,
             recent_levels: VecDeque::new(),
             writing: Vec::new(),
-            drag_deferred: None,
+            drag_awaited: None,
             fields_dragging: false,
             building: Vec::new(),
             pass_error: None,
@@ -905,7 +919,7 @@ impl App {
     fn exporting(&self, span: Option<(f64, f64)>) -> bool {
         let Some(cur) = self.current.as_ref() else { return false };
         let export = matches!(&self.export_state, ExportState::Writing { source, span: s } if *source == cur.path && *s == span);
-        export || self.writing.iter().any(|w| w.source == cur.path && w.span == span)
+        export || self.writing.iter().any(|w| w.recipe.source == cur.path && w.span() == span)
     }
 
     /// The selection with its fades as a clip, or the whole file without one.
@@ -1171,11 +1185,16 @@ impl App {
     /// there, else once the worker has written it.
     fn copy_selection(&mut self) {
         let Some(req) = self.copy_request() else { return };
+        if let Some(w) = self.writing.iter_mut().find(|w| w.recipe.same_recipe(&req)) {
+            w.clipboard = true;
+            let what = tilde(&w.output);
+            return self.set_status(format!("Copying {what}"), false);
+        }
         match req.plan() {
             Ok(plan) if plan.pending.is_none() => self.copy_out(vec![plan.output]),
             Ok(plan) => {
                 self.set_status(format!("Copying {}", tilde(&plan.output)), false);
-                let _ = self.write_copy(&req, plan, None);
+                let _ = self.write_copy(&req, plan, true);
             }
             Err(e) => self.set_status(format!("Copy: {e:#}"), true),
         }
@@ -1183,62 +1202,70 @@ impl App {
 
     /// Queues a planned copy and shows it under way on the wave until it is written. `false`
     /// when the copy could not be queued, which the status line then says.
-    fn write_copy(&mut self, req: &CopyRequest, plan: hark_core::copies::Plan, ready: Option<dnd::Ready>) -> bool {
-        let span = req.selection.map(|s| (s.start_secs, s.end_secs));
+    fn write_copy(&mut self, req: &CopyRequest, plan: hark_core::copies::Plan, clipboard: bool) -> bool {
         let output = plan.output.clone();
-        if !self.worker.copy(plan, ready.clone(), self.measuring()) {
-            if let Some(r) = ready {
-                r.set(false);
-            }
+        if let Err(plan) = self.worker.copy(plan, self.measuring()) {
+            (*plan).abandon();
             self.set_status("Copy failed: the copy thread has stopped".to_string(), true);
             return false;
         }
-        self.writing.push(Writing { source: req.source.clone(), span, output });
+        self.writing.push(Writing { recipe: req.clone(), output, clipboard });
         true
     }
 
-    /// Starts dragging the selection out, the path decided; the file follows from the worker,
-    /// and the drop waits for it.
-    fn drag_selection(&mut self, image: Option<dnd::Image>) {
+    /// Drags the selection out: at once when a copy from this recipe is there, else once the
+    /// worker has written it, if the button is still held then.
+    fn drag_selection(&mut self, ctx: &egui::Context, image: Option<dnd::Image>, pending: Option<dnd::Image>) {
         let Some(req) = self.copy_request() else { return };
-        let plan = match req.plan() {
-            Ok(p) => p,
-            Err(e) => return self.set_status(format!("Copy: {e:#}"), true),
+        let output = match self.writing.iter().find(|w| w.recipe.same_recipe(&req)) {
+            Some(w) => w.output.clone(),
+            None => {
+                let plan = match req.plan() {
+                    Ok(p) => p,
+                    Err(e) => return self.set_status(format!("Copy: {e:#}"), true),
+                };
+                let output = plan.output.clone();
+                if plan.pending.is_none() {
+                    return self.drag_out(vec![output.clone()], image, &tilde(&output));
+                }
+                if !self.write_copy(&req, plan, false) {
+                    return;
+                }
+                output
+            }
         };
-        let what = tilde(&plan.output);
-        let output = plan.output.clone();
-        if plan.pending.is_none() {
-            return self.drag_out(vec![output], image, None, &what);
-        }
-        let ready = Some(dnd::Ready::new());
-        // A drop target may ask for the file the moment the drag starts, so the job must
-        // already be queued.
-        if !self.write_copy(&req, plan, ready.clone()) {
-            return;
-        }
-        // The drag waits two frames: one drawing the export under way and one showing it,
-        // since the native drag loop may keep the window from painting until the drop.
-        self.drag_deferred = Some((2, DeferredDrag { output, image, ready, what }));
+        let what = tilde(&output);
+        self.drag_awaited = Some(AwaitedDrag { press: ctx.input(|i| i.pointer.press_start_time()), output, image, pending, what, written: false, shown: false });
     }
 
-    /// Starts the drag `drag_selection` deferred once its frames have passed, if the press that
-    /// began it has held throughout.
-    fn start_deferred_drag(&mut self, ctx: &egui::Context) {
-        let Some((left, drag)) = self.drag_deferred.take() else { return };
-        if ctx.input(|i| !i.pointer.primary_down() || i.pointer.primary_released()) {
-            return;
+    /// Starts the awaited drag once its file is written, or lets it go when its press ends
+    /// first.
+    fn hold_drag(&mut self, ctx: &egui::Context) {
+        let Some(drag) = &mut self.drag_awaited else { return self.drag.done_waiting(ctx) };
+        let (down, released, press) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.primary_released(), i.pointer.press_start_time()));
+        let held = self.drag.button_held();
+        if !held || !down || released || press != drag.press {
+            self.drag_took_release |= down && !released && !held;
+            let drag = self.drag_awaited.take().expect("checked above");
+            self.drag.done_waiting(ctx);
+            let when = if drag.written { "the drag started" } else { "it was ready" };
+            self.set_status(format!("Released {} before {when}; drag again to take it", drag.what), false);
+        } else if drag.shown {
+            let drag = self.drag_awaited.take().expect("checked above");
+            self.drag.done_waiting(ctx);
+            self.drag_out(vec![drag.output], drag.image, &drag.what);
+        } else {
+            if drag.written && !drag.shown {
+                drag.shown = true;
+                ctx.request_repaint();
+            }
+            self.drag.waiting(ctx, drag.pending.as_ref());
         }
-        if left > 0 {
-            self.drag_deferred = Some((left - 1, drag));
-            ctx.request_repaint();
-            return;
-        }
-        self.drag_out(vec![drag.output], drag.image, drag.ready, &drag.what);
     }
 
     /// Hands `paths` to the drop target of the drag the pointer is in the middle of.
-    fn drag_out(&mut self, paths: Vec<PathBuf>, image: Option<dnd::Image>, ready: Option<dnd::Ready>, what: &str) {
-        match self.drag.start(paths, image, ready) {
+    fn drag_out(&mut self, paths: Vec<PathBuf>, image: Option<dnd::Image>, what: &str) {
+        match self.drag.start(paths, image) {
             Ok(()) => {
                 self.drag_took_release = true;
                 self.set_status(format!("Dragging {what}"), false);
@@ -1251,7 +1278,16 @@ impl App {
     /// translucent card, at the display's scale.
     fn ghost(&self, ctx: &egui::Context, peaks: &hark_core::Peaks, span: (f64, f64), gain_at: &dyn Fn(f64) -> f32) -> dnd::Image {
         let scale = ctx.pixels_per_point().round().max(1.0) as i32;
-        let colors = waveform::GhostColors { card: self.theme.bg_deep, peak: self.theme.accent.gamma_multiply(0.7), rms: self.theme.accent };
+        let colors = waveform::GhostColors { card: self.theme.bg_deep, peak: self.theme.accent.gamma_multiply(0.7), rms: self.theme.accent, hatch: None };
+        waveform::ghost(peaks, span, gain_at, &colors, scale)
+    }
+
+    /// The pointer while a drag waits for its file: the drag's picture greyed on a striped
+    /// card, hanging from the pointer as the drag's own does.
+    fn pending_ghost(&self, ctx: &egui::Context, peaks: &hark_core::Peaks, span: (f64, f64), gain_at: &dyn Fn(f64) -> f32) -> dnd::Image {
+        // AppKit takes a cursor's pixels as points.
+        let scale = if cfg!(target_os = "macos") { 1 } else { ctx.pixels_per_point().round().max(1.0) as i32 };
+        let colors = waveform::GhostColors { card: self.theme.bg_deep, peak: self.theme.muted.gamma_multiply(0.5), rms: self.theme.muted, hatch: Some(self.theme.line) };
         waveform::ghost(peaks, span, gain_at, &colors, scale)
     }
 
@@ -1368,18 +1404,27 @@ impl App {
                         self.span_level = Some((span, result));
                     }
                 }
-                Done::Copied { output, result, dragged } => {
+                Done::Copied { output, result } => {
                     let written = self.writing.iter().position(|w| w.output == output).map(|i| self.writing.remove(i));
+                    let awaited = self.drag_awaited.as_mut().filter(|d| d.output == output);
                     match result {
                         Ok(r) => {
-                            if let Some(w) = written {
-                                self.flash_written(&w.source, w.span);
+                            if let Some(d) = awaited {
+                                d.written = true;
                             }
-                            if !dragged {
-                                self.copy_out(vec![r.output]);
+                            if let Some(w) = written {
+                                self.flash_written(&w.recipe.source, w.span());
+                                if w.clipboard {
+                                    self.copy_out(vec![r.output]);
+                                }
                             }
                         }
-                        Err(e) => self.set_status(format!("Copy failed: {e}"), true),
+                        Err(e) => {
+                            if awaited.is_some() {
+                                self.drag_awaited = None;
+                            }
+                            self.set_status(format!("Copy failed: {e}"), true);
+                        }
                     }
                 }
                 Done::Exported(result) => {
@@ -2144,7 +2189,7 @@ impl App {
             let path = self.files[i].path.clone();
             let what = self.files[i].name.clone();
             let image = self.cache.get(&path).and_then(|l| l.peaks.clone()).map(|p| self.ghost(ui.ctx(), &p, (0.0, p.duration_secs()), &|_| 1.0));
-            self.drag_out(vec![path], image, None, &what);
+            self.drag_out(vec![path], image, &what);
         } else if let Some(i) = double {
             self.select(i, true);
         } else if let Some(i) = clicked {
@@ -2415,8 +2460,11 @@ impl App {
             WaveEvent::DragOut => {
                 let gain = hark_core::pcm::db_to_gain(self.clip_level_db());
                 let fades = self.wave.clip_fades;
-                let image = peaks.as_ref().map(|p| self.ghost(ui.ctx(), p, self.wave.bounds(duration), &|t| gain * fades.map_or(1.0, |f| f.gain(t))));
-                self.drag_selection(image);
+                let gain_at = |t: f64| gain * fades.map_or(1.0, |f| f.gain(t));
+                let bounds = self.wave.bounds(duration);
+                let image = peaks.as_ref().map(|p| self.ghost(ui.ctx(), p, bounds, &gain_at));
+                let pending = peaks.as_ref().map(|p| self.pending_ghost(ui.ctx(), p, bounds, &gain_at));
+                self.drag_selection(ui.ctx(), image, pending);
             }
             WaveEvent::None => {}
         }
@@ -3117,8 +3165,13 @@ impl eframe::App for App {
             self.config.ui_zoom = zoom;
             let _ = self.config.save();
         }
-        self.start_deferred_drag(&ctx);
         self.handle_done();
+        // Hyprland aims a new drag at the window holding the pointer, which during the press
+        // is this one, until the pointer moves: a drag that starts under a still pointer and
+        // is let go there drops nowhere.
+        if self.drag.take_missed() {
+            self.set_status("The drop did not land anywhere; drag again to take it", false);
+        }
         self.expire_status(&ctx);
         if self.list_dirty {
             self.refresh_list();
@@ -3169,6 +3222,7 @@ impl eframe::App for App {
         }
 
         self.ui_settings(&ctx);
+        self.hold_drag(&ctx);
 
         let analysing = self.current.as_ref().map(|c| c.peaks.is_none()).unwrap_or(false);
         if self.is_playing() || !self.pending.is_empty() || analysing {
