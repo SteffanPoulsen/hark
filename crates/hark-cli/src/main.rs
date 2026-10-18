@@ -192,7 +192,8 @@ enum Cmd {
         /// The channels to hear, numbered from 1: `2` for the right alone.
         #[arg(long)]
         channels: Option<Channels>,
-        /// Play the selection, or the whole file, backwards. A file that streams cannot.
+        /// Play the file backwards, the selection being the same span of the source heard the
+        /// other way round. A file that streams cannot.
         #[arg(long)]
         reverse: bool,
         /// Repeat the selection; plays for `--for` seconds, or until interrupted.
@@ -270,10 +271,12 @@ enum TagsCmd {
     List,
     Add {
         name: String,
+        /// A swatch name or `#rrggbb`; by default a swatch no tag uses yet.
         #[arg(long)]
         color: Option<String>,
     },
-    /// Change a tag's color; an empty value clears it.
+    /// Change a tag's color to a swatch (red, coral, amber, yellow, green, teal, sky, indigo,
+    /// violet, pink, brown, grey) or any `#rrggbb`; an empty value gives it a swatch again.
     Set {
         name: String,
         #[arg(long)]
@@ -281,7 +284,7 @@ enum TagsCmd {
     },
     /// Rename a tag and rewrite the marks that carry it.
     Rename { old: String, new: String },
-    /// Move a tag to a position (0-based); position decides the 1-9 hotkey.
+    /// Move a tag to a position (0-based), its place in menus.
     Move { name: String, position: usize },
     /// Remove a tag definition and the marks that carry it.
     Remove { name: String },
@@ -420,8 +423,8 @@ struct ExportArgs {
     /// the preset's mono folds what is kept.
     #[arg(long)]
     channels: Option<Channels>,
-    /// Reverse the selection, or the whole file; the fades apply to it reversed, so the
-    /// fade-in is at the start of what is heard.
+    /// Reverse the file, the selection being the same span of the source heard the other way
+    /// round; the fades apply to it reversed, so the fade-in is at the start of what is heard.
     #[arg(long)]
     reverse: bool,
     /// Shrink the selection, or the whole file, to its sound: what sits 40 dB under its peak goes.
@@ -798,13 +801,26 @@ fn run() -> Result<()> {
                     if config.tags.iter().any(|t| t.name == name) {
                         return Err(anyhow!("tag {name} exists"));
                     }
+                    let color = match color {
+                        Some(c) => match hark_core::tag_color::swatch(&c) {
+                            Some(hex) => Some(hex.to_string()),
+                            None if hark_core::tag_color::parse(&c).is_some() => Some(c),
+                            None => return Err(anyhow!("{c} is neither a swatch nor #rrggbb")),
+                        },
+                        None => Some(hark_core::tag_color::fresh(&config.tags)),
+                    };
                     config.tags.push(hark_core::TagDef { name, color });
                     config.save()?;
                 }
                 TagsCmd::Set { name, color } => {
                     let i = find(&config, &name)?;
                     if let Some(c) = color {
-                        config.tags[i].color = if c.is_empty() { None } else { Some(c) };
+                        config.tags[i].color = match hark_core::tag_color::swatch(&c) {
+                            Some(hex) => Some(hex.to_string()),
+                            None if c.is_empty() => Some(hark_core::tag_color::fresh(&config.tags)),
+                            None if hark_core::tag_color::parse(&c).is_some() => Some(c),
+                            None => return Err(anyhow!("{c} is neither a swatch nor #rrggbb")),
+                        };
                     }
                     config.save()?;
                 }
@@ -1162,11 +1178,16 @@ fn run() -> Result<()> {
             };
             let rate = player.sample_rate as f64;
             let total = source.frames(player.sample_rate);
-            let frame = |secs: f64| ((secs * rate).round().max(0.0) as usize).min(total);
+            // The times count along the source; a reversed clip counts along what is heard.
+            let frame = |secs: f64| {
+                let f = ((secs * rate).round().max(0.0) as usize).min(total);
+                if reverse { total - f } else { f }
+            };
+            let (first, last) = (start.map(frame).unwrap_or(if reverse { total } else { 0 }), end.map(frame).unwrap_or(if reverse { 0 } else { total }));
             let clip = Clip {
                 source,
-                start: start.map(frame).unwrap_or(0),
-                end: end.map(frame).unwrap_or(total),
+                start: first.min(last),
+                end: first.max(last),
                 looped,
                 fade_in: 0,
                 fade_out: 0,

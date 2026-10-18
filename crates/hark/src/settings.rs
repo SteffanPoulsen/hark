@@ -81,6 +81,62 @@ fn row(ui: &mut egui::Ui, theme: &Theme, first: bool, title: &str, desc: &str, c
     ui.add_space(8.0);
 }
 
+/// A tag's colour as a dot; a click opens the swatches, ringing the current one, with a
+/// custom colour under them. Returns the colour picked.
+fn swatch_picker(ui: &mut egui::Ui, theme: &Theme, current: Color32) -> Option<Color32> {
+    const DOT: f32 = 18.0;
+    const CELL: f32 = 28.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(CELL, CELL), egui::Sense::click());
+    let hot = resp.hovered();
+    ui.painter().circle_filled(rect.center(), DOT / 2.0, current);
+    if hot {
+        ui.painter().circle_stroke(rect.center(), DOT / 2.0 + 3.0, egui::Stroke::new(1.5, theme.muted));
+    }
+    let resp = resp.on_hover_text("Colour");
+    let custom_id = resp.id.with("custom");
+    let mut picked = None;
+    let shown = egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        theme::menu_items(ui);
+        ui.add_space(4.0);
+        for row in hark_core::tag_color::SWATCHES.chunks(6) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.add_space(theme::MENU_INSET - 4.0);
+                for (name, hex) in row {
+                    let Some(color) = theme::hex(hex) else { continue };
+                    let (cell, dot) = ui.allocate_exact_size(egui::vec2(CELL, CELL), egui::Sense::click());
+                    let p = ui.painter();
+                    p.circle_filled(cell.center(), DOT / 2.0, color);
+                    if color == current {
+                        p.circle_stroke(cell.center(), DOT / 2.0 + 3.0, egui::Stroke::new(2.0, theme.text));
+                    } else if dot.hovered() {
+                        p.circle_stroke(cell.center(), DOT / 2.0 + 3.0, egui::Stroke::new(1.5, theme.muted));
+                    }
+                    if dot.on_hover_text(*name).clicked() {
+                        picked = Some(color);
+                        ui.close();
+                    }
+                }
+                ui.add_space(theme::MENU_INSET - 4.0);
+            });
+        }
+        ui.add_space(2.0);
+        ui.separator();
+        if ui.data(|d| d.get_temp::<bool>(custom_id)).unwrap_or(false) {
+            let mut c = current;
+            if egui::color_picker::color_picker_color32(ui, &mut c, egui::color_picker::Alpha::Opaque) {
+                picked = Some(c);
+            }
+        } else if ui.button("Custom…").clicked() {
+            ui.data_mut(|d| d.insert_temp(custom_id, true));
+        }
+    });
+    if shown.is_none() {
+        ui.data_mut(|d| d.remove::<bool>(custom_id));
+    }
+    picked
+}
+
 fn heading(ui: &mut egui::Ui, theme: &Theme, text: &str, desc: &str) {
     ui.label(theme::semibold(text).size(17.0));
     if !desc.is_empty() {
@@ -414,9 +470,9 @@ impl App {
         }
         // The selection and its edits outlive the reload.
         if let Some(cur) = &self.current {
-            let (start, end) = self.wave.selection.map(|(a, b)| (Some(a), Some(b))).unwrap_or((None, None));
+            let (start, end) = self.wave.selection.map(|s| self.source_span(s)).map(|(a, b)| (Some(a), Some(b))).unwrap_or((None, None));
             let w = &self.wave;
-            self.open_region = Some((cur.path.clone(), crate::OpenRegion { start, end, fade_in: w.fade_in, fade_out: w.fade_out, channels: w.channels, reverse: w.reverse }));
+            self.open_region = Some((cur.path.clone(), crate::OpenRegion { start, end, fade_in: w.fade_in, fade_out: w.fade_out, channels: w.channels, muted: w.muted, reverse: w.reverse }));
         }
         // Everything decoded so far is at the old device rate.
         self.cache.clear();
@@ -431,7 +487,7 @@ impl App {
 
     fn page_tags(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme.clone();
-        heading(ui, &theme, "Tags", "Shared by every project. The order is the 1 to 9 hotkey order; renaming rewrites the marks, removing drops them.");
+        heading(ui, &theme, "Tags", "Shared by every project, in the order menus and the filter show them. Renaming rewrites the marks, removing drops them.");
         let used: std::collections::HashMap<String, usize> = self.db.tags_in_use().unwrap_or_default().into_iter().collect();
         let mut action: Option<TagAction> = None;
         let n = self.config.tags.len();
@@ -444,9 +500,7 @@ impl App {
                 let def = self.config.tags[k].clone();
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.add_sized(egui::vec2(16.0, 28.0), egui::Label::new(RichText::new(if k < 9 { format!("{}", k + 1) } else { String::new() }).color(theme.muted).monospace()));
-                    let mut c = theme.color_of(k, Some(&def));
-                    if ui.color_edit_button_srgba(&mut c).changed() {
+                    if let Some(c) = swatch_picker(ui, &theme, theme.color_of(Some(&def))) {
                         action = Some(TagAction::Color(k, theme::to_hex(c)));
                     }
                     let mut buf = self.tag_edit.as_ref().filter(|(i, _)| *i == k).map(|(_, s)| s.clone()).unwrap_or_else(|| def.name.clone());
@@ -492,7 +546,7 @@ impl App {
     /// taken from this window's events, so the main window's handler never sees it.
     fn page_keys(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme.clone();
-        heading(ui, &theme, "Keys", &format!("Click a key and press the new one, with any modifiers held; Escape keeps the old. The list's arrows, the tag digits and {}+C are fixed.", crate::keys::COMMAND));
+        heading(ui, &theme, "Keys", &format!("Click a key and press the new one, with any modifiers held; Escape keeps the old. The list's arrows and {}+C are fixed.", crate::keys::COMMAND));
         if let Some(action) = self.key_capture {
             let got = ui.ctx().input(|i| i.events.iter().find_map(|e| match e {
                 egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),

@@ -75,6 +75,9 @@ enum Divider {
 }
 /// Height of the top bar's row of controls; the bar is this plus its margins.
 const TOP_BAR_H: f32 = 32.0;
+const MUTED: &str = "Every channel is muted; unmute one beside the wave";
+/// The channel strip's width; the transport starts past it, level with the wave.
+const STRIP_W: f32 = 22.0;
 /// Height of every control in the top bar and the transport row, so each reads as one line.
 const CONTROL_H: f32 = 28.0;
 /// Search results are cut here so typing stays quick; folder and favorites views are whole.
@@ -235,7 +238,7 @@ struct Takes {
 }
 
 /// A selection with its edits asked for on the command line, applied once the opened file
-/// loads.
+/// loads. `start` and `end` count along the source, as the command line's do.
 #[derive(Default, Clone, Copy)]
 struct OpenRegion {
     start: Option<f64>,
@@ -243,6 +246,7 @@ struct OpenRegion {
     fade_in: f64,
     fade_out: f64,
     channels: Option<Channels>,
+    muted: bool,
     reverse: bool,
 }
 
@@ -402,9 +406,12 @@ struct App {
     /// Centre line of the project switcher on the last frame; the brand sits on it, since
     /// egui does not centre buttons on the row they are in.
     search_id: egui::Id,
+    /// The search box had the keyboard last frame; keys are handled before it is drawn.
+    search_focused: bool,
+    /// The file a row's menu was opened on, which it closes without when the list moves.
+    menu_file: Option<PathBuf>,
     tag_edit: Option<(usize, String)>,
     /// The file menu's new-tag field.
-    new_tag: String,
     /// The action whose key the settings window is waiting for.
     key_capture: Option<Action>,
     /// The bounds the voice was given when it was last played from the selection, which it
@@ -519,8 +526,9 @@ impl App {
             settings_page: settings::Page::General,
             copies_clear: false,
             search_id: egui::Id::new("search"),
+            search_focused: false,
+            menu_file: None,
             tag_edit: None,
-            new_tag: String::new(),
             key_capture: None,
             play_on_load: false,
             export_name: String::new(),
@@ -711,12 +719,16 @@ impl App {
             self.set_status("Takes need the file decoded whole; this one streams", true);
             return;
         };
+        if self.wave.muted {
+            return self.set_status(MUTED, true);
+        }
         let kept = self.wave.channels;
         if self.takes.as_ref().is_none_or(|t| t.path != cur.path || t.channels != kept) {
             self.takes = Some(Takes { path: cur.path.clone(), channels: kept, spans: pcm.takes(kept) });
         }
         let duration = cur.duration_secs;
-        let takes = &self.takes.as_ref().expect("just found").spans;
+        let mut takes: Vec<(f64, f64)> = self.takes.as_ref().expect("just found").spans.iter().map(|&t| self.source_span(t)).collect();
+        takes.sort_by(|x, y| x.0.total_cmp(&y.0));
         let eps = 1e-3;
         let next = match (self.wave.selection, dir > 0) {
             (None, true) => takes.first().copied(),
@@ -743,28 +755,48 @@ impl App {
             self.set_status("Trim needs the file decoded whole; this one streams", true);
             return;
         };
-        let (start, end) = self.wave.selection.unwrap_or((0.0, cur.duration_secs));
+        if self.wave.muted {
+            return self.set_status(MUTED, true);
+        }
+        let (start, end) = self.source_span(self.wave.selection.unwrap_or((0.0, cur.duration_secs)));
         match pcm.sound_span(start, end, self.wave.channels) {
-            Some(span) => self.wave.selection = Some(span),
+            Some(span) => self.wave.selection = Some(self.source_span(span)),
             None => self.set_status("Silent; nothing to trim to", true),
         }
     }
 
-    /// The selection goes, and the edits made with it: the fades and the reverse.
+    /// The selection goes, and the fades made with it.
     fn clear_selection(&mut self) {
         self.wave.selection = None;
         self.wave.fade_in = 0.0;
         self.wave.fade_out = 0.0;
-        self.wave.reverse = false;
     }
 
-    /// Turns the selection, or the whole file, around.
+    /// Turns the file around. The selection, the view and the playhead move with the audio
+    /// they were on, so the same sound stays selected, now heard the other way.
     fn toggle_reverse(&mut self) {
         let Some(cur) = &self.current else { return };
         if cur.source.is_streamed() {
             return self.set_status("Reverse needs the file decoded whole; this one streams", true);
         }
+        let d = cur.duration_secs;
+        let mirror = |(a, b): (f64, f64)| (d - b, d - a);
+        let playhead = self.player.as_ref().filter(|p| p.is_playing()).map(|p| p.position() as f64 / p.sample_rate as f64);
+        self.wave.selection = self.wave.selection.map(mirror);
+        self.wave.view = mirror(self.wave.view);
         self.wave.reverse = !self.wave.reverse;
+        if let Some(t) = playhead {
+            self.play(Some((d - t).max(0.0)));
+        }
+    }
+
+    /// The span of the source a span of the file as heard plays, and the way back: the same
+    /// span unless the file is reversed.
+    fn source_span(&self, (a, b): (f64, f64)) -> (f64, f64) {
+        match &self.current {
+            Some(cur) if self.wave.reverse => (cur.duration_secs - b, cur.duration_secs - a),
+            _ => (a, b),
+        }
     }
 
     fn set_status(&mut self, msg: impl Into<String>, error: bool) {
@@ -939,13 +971,14 @@ impl App {
         self.wave.reset(duration);
         if let Some((_, r)) = self.open_region.take_if(|(p, _)| *p == l.path) {
             let (a, b) = (r.start.unwrap_or(0.0).clamp(0.0, duration), r.end.unwrap_or(duration).clamp(0.0, duration));
+            self.wave.reverse = r.reverse && !l.source.is_streamed();
             if b > a && (r.start.is_some() || r.end.is_some()) {
-                self.wave.selection = Some((a, b));
+                self.wave.selection = Some(if self.wave.reverse { (duration - b, duration - a) } else { (a, b) });
             }
             self.wave.fade_in = r.fade_in.max(0.0);
             self.wave.fade_out = r.fade_out.max(0.0);
             self.wave.channels = r.channels.and_then(|c| Channels::pick(c.iter(), l.channels));
-            self.wave.reverse = r.reverse && !l.source.is_streamed();
+            self.wave.muted = r.muted;
         }
         let recorded = self.record_of(&l.path).and_then(FileRecord::loudness).is_some();
         if l.loudness.is_some() && !recorded {
@@ -1024,7 +1057,7 @@ impl App {
         let cur = self.current.as_ref()?;
         let w = &self.wave;
         let fades = Fades { in_secs: w.fade_in, out_secs: w.fade_out, shape: w.fade_shape };
-        let span = Span::new(&cur.path, w.selection, fades, self.preset.mono, self.preset.sample_rate, cur.source_rate).picking(w.channels).reversing(w.reverse);
+        let span = Span::new(&cur.path, w.selection.map(|s| self.source_span(s)), fades, self.preset.mono, self.preset.sample_rate, cur.source_rate).picking(w.channels).reversing(w.reverse);
         (span.secs.is_some() || span.channels.is_some() || span.reverse || !fades.is_zero() || span.rate.is_some()).then_some(span)
     }
 
@@ -1064,7 +1097,7 @@ impl App {
     /// the preview's level is off.
     fn wave_selection_level(&self) -> SelectionLevel {
         let gain = hark_core::pcm::db_to_gain(self.clip_level_db());
-        if self.wave.selection.is_some() && self.exporting(self.wave.selection) {
+        if self.wave.selection.is_some() && self.exporting(self.wave.selection.map(|s| self.source_span(s))) {
             return SelectionLevel::Busy { gain, what: "Exporting" };
         }
         let Some(span) = self.preview_span().filter(|_| self.previewing_level() && self.wave.selection.is_some()) else { return SelectionLevel::Same };
@@ -1080,7 +1113,8 @@ impl App {
     /// Flashes what was just written on the wave, when it is of the file on it.
     fn flash_written(&mut self, source: &Path, span: Option<(f64, f64)>) {
         if let Some(cur) = self.current.as_ref().filter(|c| c.path == source) {
-            self.wave.flash(span.unwrap_or((0.0, cur.duration_secs)));
+            let heard = span.map(|s| self.source_span(s)).unwrap_or((0.0, cur.duration_secs));
+            self.wave.flash(heard);
         }
     }
 
@@ -1159,10 +1193,10 @@ impl App {
     fn wave_clip_fades(&self) -> Option<ClipFades> {
         let span = self.preview_span().filter(|s| self.preview && (s.secs.is_some() || !s.fades.is_zero()))?;
         if !self.previewing_level() {
-            return Some(ClipFades { secs: self.span_bounds(&span), fades: span.fades });
+            return Some(ClipFades { secs: self.source_span(self.span_bounds(&span)), fades: span.fades });
         }
-        let (measured, _) = self.span_level.as_ref().filter(|(s, _)| s.path == span.path)?;
-        Some(ClipFades { secs: self.span_bounds(measured), fades: measured.fades })
+        let (measured, _) = self.span_level.as_ref().filter(|(s, _)| s.path == span.path && s.reverse == span.reverse)?;
+        Some(ClipFades { secs: self.source_span(self.span_bounds(measured)), fades: measured.fades })
     }
 
     /// The gain the file plays and draws at, in dB: the preset's level of the whole file under
@@ -1197,10 +1231,10 @@ impl App {
         let (Some(player), Some(clip)) = (&self.player, self.selection_clip()) else { return };
         let total = clip.source.frames(player.sample_rate);
         let from = from_secs.map(|t| ((t * player.sample_rate as f64) as usize).min(total)).unwrap_or(clip.start);
-        // The fades and the reverse belong to the selection, or to the whole file without one.
-        // A seek outside the selection plays the file from there without them.
+        // The fades belong to the selection, or to the whole file without one. A seek outside
+        // the selection plays the file from there without them.
         let inside = from >= clip.start && from < clip.end;
-        let clip = if inside { clip } else { Clip { start: from, end: total, fade_in: 0, fade_out: 0, reverse: false, ..clip } };
+        let clip = if inside { clip } else { Clip { start: from, end: total, fade_in: 0, fade_out: 0, ..clip } };
         self.synced = inside.then(|| clip_key(&clip));
         self.outside = (!inside).then(|| clip.clone());
         player.play_from(clip, from);
@@ -1272,12 +1306,6 @@ impl App {
         }
     }
 
-    fn toggle_tag(&mut self, tag: &str) {
-        if let Some(i) = self.selected {
-            self.toggle_tag_of(i, tag);
-        }
-    }
-
     fn toggle_tag_of(&mut self, i: usize, tag: &str) {
         let path = self.files[i].path.clone();
         let on = !self.files[i].tags.iter().any(|t| t == tag);
@@ -1296,6 +1324,9 @@ impl App {
 
     fn export_request(&self) -> Option<Result<ExportRequest, String>> {
         let i = self.selected?;
+        if self.wave.muted {
+            return None;
+        }
         let f = &self.files[i];
         let mut req = match ExportRequest::from_config(&self.config, &f.path, None, f.tags.clone(), f.favorite) {
             Ok(r) => r,
@@ -1303,7 +1334,7 @@ impl App {
         };
         req.preset = self.preset.clone();
         req.preset_name = self.preset_name.clone();
-        req.selection = self.wave.selection.map(|(a, b)| Selection { start_secs: a, end_secs: b });
+        req.selection = self.wave.selection.map(|s| self.source_span(s)).map(|(a, b)| Selection { start_secs: a, end_secs: b });
         req.channels = self.wave.channels;
         req.reverse = self.wave.reverse;
         req.fade_in_secs = self.wave.fade_in;
@@ -1356,7 +1387,7 @@ impl App {
         let f = &self.files[self.selected?];
         let mut req = CopyRequest::from_config(&self.config, &f.path, self.preset.clone(), f.tags.clone(), f.favorite);
         req.source_hash = f.hash.clone();
-        req.selection = self.wave.selection.map(|(a, b)| Selection { start_secs: a, end_secs: b });
+        req.selection = self.wave.selection.map(|s| self.source_span(s)).map(|(a, b)| Selection { start_secs: a, end_secs: b });
         req.channels = self.wave.channels;
         req.reverse = self.wave.reverse;
         req.fade_in_secs = self.wave.fade_in;
@@ -1376,6 +1407,9 @@ impl App {
     /// Puts the selection on the clipboard as a file: at once when a copy from this recipe is
     /// there, else once the worker has written it.
     fn copy_selection(&mut self) {
+        if self.wave.muted {
+            return self.set_status(MUTED, true);
+        }
         let Some(req) = self.copy_request() else { return };
         if let Some(w) = self.writing.iter_mut().find(|w| w.recipe.same_recipe(&req)) {
             w.clipboard = true;
@@ -1408,6 +1442,9 @@ impl App {
     /// Drags the selection out: at once when a copy from this recipe is there, else once the
     /// worker has written it, if the button is still held then.
     fn drag_selection(&mut self, ctx: &egui::Context, image: Option<dnd::Image>, pending: Option<dnd::Image>) {
+        if self.wave.muted {
+            return self.set_status(MUTED, true);
+        }
         let Some(req) = self.copy_request() else { return };
         let output = match self.writing.iter().find(|w| w.recipe.same_recipe(&req)) {
             Some(w) => w.output.clone(),
@@ -1741,8 +1778,8 @@ impl App {
         if fired(Action::Trim) {
             self.trim_selection();
         }
-        // Escape closes an open menu first; egui sees to that, and the selection stays.
-        if fired(Action::ClearSelection) && !egui::Popup::is_any_open(ctx) {
+        // Escape closes an open menu or leaves the search first, and the selection stays.
+        if fired(Action::ClearSelection) && !egui::Popup::is_any_open(ctx) && !self.search_focused {
             self.clear_selection();
         }
         if fired(Action::Reverse) {
@@ -1771,12 +1808,6 @@ impl App {
                     let start = self.wave.selection.map(|(a, _)| a).filter(|a| *a < t).unwrap_or(0.0);
                     self.wave.selection = Some((start, t));
                 }
-            }
-        }
-        let digits = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
-        for (k, tag) in digits.iter().zip(self.config.tags.clone()) {
-            if pressed(*k) {
-                self.toggle_tag(&tag.name);
             }
         }
     }
@@ -1823,33 +1854,6 @@ impl App {
             if let Some(action) = self.project_menu(ui) {
                 self.apply_project_action(action);
             }
-            let focused = ui.memory(|m| m.has_focus(self.search_id));
-            let box_frame = egui::Frame::new()
-                .fill(self.theme.surface)
-                .stroke(Stroke::new(1.0, if focused { self.theme.accent2 } else { self.theme.line }))
-                .corner_radius(CornerRadius::same(6))
-                .inner_margin(Margin::symmetric(8, 0));
-            ui.allocate_ui_with_layout(egui::vec2(300.0, CONTROL_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                box_frame.show(ui, |ui| {
-                    ui.set_min_height(CONTROL_H - 2.0);
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.label(theme::icon(icons::MAGNIFYING_GLASS).color(self.theme.muted));
-                    let search = ui.add(egui::TextEdit::singleline(&mut self.search).id(self.search_id).frame(egui::Frame::NONE).hint_text("Search the library").desired_width(ui.available_width() - 20.0));
-                    if search.changed() {
-                        self.list_dirty = true;
-                    }
-                    if ui.input(|i| i.key_pressed(Key::Escape)) && search.has_focus() {
-                        self.search.clear();
-                        self.list_dirty = true;
-                        search.surrender_focus();
-                    }
-                    if !self.search.is_empty() && ui.add(egui::Button::new(theme::icon(icons::X).color(self.theme.muted)).frame(false)).clicked() {
-                        self.search.clear();
-                        self.list_dirty = true;
-                    }
-                });
-            });
-            self.ui_filter(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if Self::icon_button(ui, icons::GEAR, "", self.settings_open).on_hover_text("Settings").clicked() {
                     self.settings_open = !self.settings_open;
@@ -1896,6 +1900,40 @@ impl App {
         self.worker.send(Job::Scan(self.config.roots().to_vec()));
     }
 
+    /// The search box: it searches the whole library, whatever folder the tab shows.
+    fn ui_search(&mut self, ui: &mut egui::Ui) {
+        let focused = ui.memory(|m| m.has_focus(self.search_id));
+        let box_frame = egui::Frame::new()
+            .fill(self.theme.surface)
+            .stroke(Stroke::new(1.0, if focused { self.theme.accent2 } else { self.theme.line }))
+            .corner_radius(CornerRadius::same(6))
+            .inner_margin(Margin::symmetric(8, 0));
+        const SEARCH_W: f32 = 280.0;
+        ui.allocate_ui_with_layout(egui::vec2(SEARCH_W, CONTROL_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            box_frame.show(ui, |ui| {
+                // The box keeps its width whether or not the clear button shows.
+                ui.set_width(SEARCH_W - 18.0);
+                ui.set_min_height(CONTROL_H - 2.0);
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(theme::icon(icons::MAGNIFYING_GLASS).color(self.theme.muted));
+                let search = ui.add(egui::TextEdit::singleline(&mut self.search).id(self.search_id).frame(egui::Frame::NONE).hint_text("Search the library").desired_width(ui.available_width() - 20.0));
+                if search.changed() {
+                    self.list_dirty = true;
+                }
+                // egui takes the focus away on Escape before any widget runs.
+                if ui.input(|i| i.key_pressed(Key::Escape)) && search.lost_focus() {
+                    self.search.clear();
+                    self.list_dirty = true;
+                }
+                self.search_focused = search.has_focus();
+                if !self.search.is_empty() && ui.add(egui::Button::new(theme::icon(icons::X).color(self.theme.muted)).frame(false)).clicked() {
+                    self.search.clear();
+                    self.list_dirty = true;
+                }
+            });
+        });
+    }
+
     fn ui_filter(&mut self, ui: &mut egui::Ui) {
         let n = self.filter.count();
         let label = if n == 0 { "Filter".to_string() } else { format!("Filter · {n}") };
@@ -1929,9 +1967,9 @@ impl App {
                     egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
                         egui::Frame::new().inner_margin(Margin { left: theme::MENU_INSET as i8, ..Margin::ZERO }).show(ui, |ui| ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                            for (k, t) in tags.iter().enumerate() {
+                            for t in &tags {
                                 let on = self.filter.tags.contains(&t.name);
-                                if chip(ui, &theme, &t.name, theme.color_of(k, Some(t)), on, true).clicked() {
+                                if chip(ui, &theme, &t.name, theme.color_of(Some(t)), 12.0, on, true).clicked() {
                                     toggle_in(&mut self.filter.tags, t.name.clone());
                                     changed = true;
                                 }
@@ -2187,9 +2225,14 @@ impl App {
                     switch = Some(i);
                 }
             }
-            if ui.add(egui::Button::new(theme::icon(icons::PLUS).color(theme.muted)).frame(false)).on_hover_text(format!("New tab on the list as it is ({}); a folder's menu opens one there", hint(Action::NewTab))).clicked() {
-                new = true;
+            ui.add_space(4.0);
+            let (rect, plus) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::click());
+            let plus = plus.on_hover_text(format!("New tab on the list as it is ({}); a folder's menu opens one there", hint(Action::NewTab)));
+            if plus.hovered() {
+                ui.painter().rect_filled(rect, CornerRadius::same(5), theme.overlay);
             }
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icons::PLUS, FontId::new(14.0, egui::FontFamily::Name(theme::ICONS.into())), if plus.hovered() { theme.text } else { theme.muted });
+            new = plus.clicked();
         });
         if let Some(i) = close {
             self.close_tab(i);
@@ -2205,7 +2248,7 @@ impl App {
         ui.add_space(4.0);
         let n = self.files.len();
         let heading = if !self.search.trim().is_empty() {
-            if n >= SEARCH_LIMIT { format!("First {n} results") } else { format!("{n} results") }
+            if n >= SEARCH_LIMIT { format!("First {n} results in the library") } else { format!("{n} results in the library") }
         } else {
             match &self.location {
                 Some(Location::Folder(d)) => {
@@ -2219,9 +2262,14 @@ impl App {
                 None => "Pick a folder".to_string(),
             }
         };
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(RichText::new(heading).color(self.theme.muted));
+        // The heading names what the list shows; the search and the filter beside it are the
+        // tab's own.
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), CONTROL_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            self.ui_search(ui);
+            self.ui_filter(ui);
+            ui.add_space(theme::GAP);
+            ui.add(egui::Label::new(RichText::new(heading).color(self.theme.muted)).truncate());
         });
         ui.add_space(6.0);
         let row_h = theme::ROW_H;
@@ -2232,9 +2280,10 @@ impl App {
         let mut fav_toggle: Option<usize> = None;
         self.list_rect = ui.max_rect();
         let mut action: Option<(usize, FileAction)> = None;
+        let mut row_menus: Vec<(usize, egui::Response)> = Vec::new();
+        let mut menu_file = self.menu_file.take();
         let defs = self.config.tags.clone();
         let favorite_key = self.key_of(Action::Favorite);
-        let mut new_tag = std::mem::take(&mut self.new_tag);
         let shown_folder = match &self.location {
             Some(Location::Folder(d)) if self.search.trim().is_empty() => Some(d.clone()),
             _ => None,
@@ -2293,8 +2342,8 @@ impl App {
             self.scroll_to_selected = false;
         }
         let theme = self.theme.clone();
-        let tag_colors: HashMap<String, Color32> = self.config.tags.iter().enumerate().map(|(i, t)| (t.name.clone(), self.theme.color_of(i, Some(t)))).collect();
-        let unknown_color = self.theme.tag_color(self.theme.tag_colors.len() - 1);
+        let tag_colors: HashMap<String, Color32> = self.config.tags.iter().map(|t| (t.name.clone(), self.theme.color_of(Some(t)))).collect();
+        let unknown_color = self.theme.color_of(None);
         let files = &self.files;
         let selected = self.selected;
         let config = &self.config;
@@ -2304,14 +2353,6 @@ impl App {
                 Some(base) => dir.strip_prefix(base).ok().map(Path::to_path_buf),
                 None => config.root_of(&f.path).and_then(|r| dir.strip_prefix(&r.path).ok().map(|rel| Path::new(&r.name).join(rel))),
             }
-        };
-        let chip = |ui: &mut egui::Ui, text: &str, color: Color32| {
-            let font = FontId::new(11.0, egui::FontFamily::Name(theme::MEDIUM.into()));
-            let galley = ui.painter().layout_no_wrap(text.to_string(), font, Color32::WHITE);
-            let pad = egui::vec2(7.0, 2.0);
-            let (rect, _) = ui.allocate_exact_size(galley.size() + pad * 2.0, Sense::hover());
-            ui.painter().rect_filled(rect, CornerRadius::same(9), color.gamma_multiply(0.28));
-            ui.painter().galley(rect.min + pad, galley, color.gamma_multiply(1.5).to_opaque());
         };
         let sort = self.config.list_sort;
         let mut sort_by: Option<SortKey> = None;
@@ -2387,7 +2428,7 @@ impl App {
                     row.col(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         for t in &f.tags {
-                            chip(ui, t, tag_colors.get(t).copied().unwrap_or(unknown_color));
+                            chip(ui, &theme, t, tag_colors.get(t).copied().unwrap_or(unknown_color), 11.0, true, false);
                         }
                     });
                     let info = f.info.as_ref();
@@ -2413,7 +2454,7 @@ impl App {
                     row.col(|_| {});
                     let resp = row.response();
                     if fav_toggle == Some(i) {
-                    } else if resp.drag_started() {
+                    } else if resp.drag_started_by(egui::PointerButton::Primary) {
                         dragged = Some(i);
                     } else if resp.double_clicked() {
                         double = Some(i);
@@ -2421,14 +2462,25 @@ impl App {
                         clicked = Some(i);
                     } else if resp.secondary_clicked() {
                         context = Some(i);
+                        menu_file = Some(f.path.clone());
                     }
-                    egui::Popup::context_menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                        if let Some(a) = file_menu(ui, f, &defs, &theme, &favorite_key, &mut new_tag) {
-                            action = Some((i, a));
-                        }
-                    });
+                    row_menus.push((i, resp));
                 });
             });
+        // The rows' menus open outside the table: a text field in one scrolls the scroll area it
+        // sits in to keep its cursor in view, which inside the table moves the rows.
+        for (i, resp) in &row_menus {
+            egui::Popup::context_menu(resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                if menu_file.as_ref() != Some(&files[*i].path) {
+                    ui.close();
+                    return;
+                }
+                if let Some(a) = file_menu(ui, &files[*i], &defs, &theme, &favorite_key) {
+                    action = Some((*i, a));
+                }
+            });
+        }
+        self.menu_file = menu_file;
         // The dividers, after the table so they sit above its rows: a tick in the header at
         // every column edge, and a grab on the three that resize, which shows its line down
         // the whole table while hovered or dragged. A drag trades width between the columns
@@ -2486,7 +2538,6 @@ impl App {
                 ui.data_mut(|d| d.insert_persisted(widths_id, widths));
             }
         }
-        self.new_tag = new_tag;
         if let Some(i) = fav_toggle {
             self.toggle_favorite_of(i);
         }
@@ -2524,7 +2575,8 @@ impl App {
             FileAction::NewTag(name) => {
                 // A name already defined is put on the file as it is.
                 if self.config.tag(&name).is_none() {
-                    self.config.tags.push(hark_core::TagDef { name: name.clone(), color: None });
+                    let color = Some(hark_core::tag_color::fresh(&self.config.tags));
+                    self.config.tags.push(hark_core::TagDef { name: name.clone(), color });
                     if let Err(e) = self.config.save() {
                         self.set_status(format!("Save config: {e:#}"), true);
                     }
@@ -2573,14 +2625,29 @@ impl App {
         };
         let duration = self.current.as_ref().map(|c| c.duration_secs).unwrap_or(0.0);
 
-        // The file's tag chips and the tag button sit at the right of the header when they fit
+        // The file's tag chips and its menu button sit at the right of the header when they fit
         // beside the name, else on a row of their own.
         let carried: Vec<String> = self.selected.map(|i| self.files[i].tags.clone()).unwrap_or_default();
-        let chips_w = carried.iter().map(|t| self.chip_width(ui, t) + 6.0).sum::<f32>() + 80.0 + theme::GAP;
+        let chips_w = carried.iter().map(|t| self.chip_width(ui, t) + 6.0).sum::<f32>() + 36.0 + theme::GAP;
         let mut chips_below = false;
         ui.horizontal(|ui| {
             if let Some(c) = self.current.clone() {
                 let name = c.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let favorite = self.selected.and_then(|i| self.files.get(i)).filter(|f| f.path == c.path).map(|f| f.favorite);
+                if let Some(on) = favorite {
+                    let (rect, star) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), Sense::click());
+                    let hot = star.hovered();
+                    let color = match (on, hot) {
+                        (true, true) => self.theme.accent.gamma_multiply(1.4).to_opaque(),
+                        (true, false) | (false, true) => self.theme.accent,
+                        (false, false) => self.theme.muted,
+                    };
+                    let family = if on || hot { theme::ICONS_FILL } else { theme::ICONS };
+                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icons::STAR, FontId::new(15.0, egui::FontFamily::Name(family.into())), color);
+                    if star.on_hover_text(format!("Favorite ({})", self.key_of(Action::Favorite))).clicked() {
+                        self.toggle_favorite();
+                    }
+                }
                 ui.label(theme::semibold(name).size(15.0));
                 let mut meta = format!("{} Hz  ·  {} ch  ·  {}", c.source_rate, c.channels, waveform::fmt_time(c.duration_secs));
                 let record = self.selected.and_then(|i| self.files.get(i)).filter(|f| f.path == c.path);
@@ -2679,7 +2746,7 @@ impl App {
         if let Some(left) = self.span_asked.as_ref().map(|a| MEASURING_SHOWS_AFTER.saturating_sub(a.since.elapsed())).filter(|left| !left.is_zero()) {
             ui.ctx().request_repaint_after(left);
         }
-        let play_gain = hark_core::pcm::db_to_gain(level_db);
+        let play_gain = if self.wave.muted { 0.0 } else { hark_core::pcm::db_to_gain(level_db) };
         if let Some(p) = self.player.as_ref().filter(|p| p.gain() != play_gain) {
             p.set_gain(play_gain);
         }
@@ -2698,11 +2765,13 @@ impl App {
         };
         let mut event = WaveEvent::None;
         let mut wave_resp = None;
-        let source_channels = self.current.as_ref().map_or(1, |c| c.channels);
+        let source_channels = self.current.as_ref().map(|c| c.channels);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if source_channels > 1 {
-                self.channel_strip(ui, source_channels, wave_h);
+            if let Some(channels) = source_channels {
+                self.channel_strip(ui, channels, wave_h);
+            } else {
+                ui.allocate_exact_size(egui::vec2(STRIP_W, wave_h), Sense::hover());
             }
             let wave_w = ui.available_width() - FADER_W - 8.0;
             ui.allocate_ui_with_layout(egui::vec2(wave_w, wave_h), egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -2757,15 +2826,16 @@ impl App {
                 if item(ui, icons::ARROWS_IN_LINE_HORIZONTAL, "Trim to the sound", &self.key_of(Action::Trim), true) {
                     action = Some(WaveAction::Trim);
                 }
-                let reverse = if self.wave.reverse { "Play forwards" } else { "Reverse" };
-                if item(ui, icons::ARROWS_LEFT_RIGHT, reverse, &self.key_of(Action::Reverse), true) {
-                    action = Some(WaveAction::Reverse);
-                }
                 if item(ui, icons::MAGNIFYING_GLASS_PLUS, "Zoom to selection", &self.key_of(Action::Zoom), has_selection) {
                     action = Some(WaveAction::Zoom);
                 }
                 if item(ui, icons::X, "Clear selection", &self.key_of(Action::ClearSelection), has_selection) {
                     action = Some(WaveAction::Clear);
+                }
+                ui.separator();
+                let reverse = if self.wave.reverse { "Play forwards" } else { "Reverse the file" };
+                if item(ui, icons::ARROWS_LEFT_RIGHT, reverse, &self.key_of(Action::Reverse), true) {
+                    action = Some(WaveAction::Reverse);
                 }
             });
             match action {
@@ -2782,18 +2852,27 @@ impl App {
             WaveEvent::DragOut => {
                 let gain = hark_core::pcm::db_to_gain(self.clip_level_db());
                 let fades = self.wave.clip_fades;
-                let gain_at = |t: f64| gain * fades.map_or(1.0, |f| f.gain(t));
                 let bounds = self.wave.bounds(duration);
+                let gain_at = |t: f64| gain * fades.map_or(1.0, |f| f.gain(bounds.0 + t));
+                let source = self.source_span(bounds);
                 // A folded envelope is already of the kept channels alone.
                 let kept = |p: &Peaks| self.wave.channels.filter(|_| p.channels > 1);
                 let reversed = self.wave.reverse;
-                let image = peaks.as_ref().map(|p| self.ghost(ui.ctx(), p, bounds, kept(p), reversed, &gain_at));
-                let pending = peaks.as_ref().map(|p| self.pending_ghost(ui.ctx(), p, bounds, kept(p), reversed, &gain_at));
+                let image = peaks.as_ref().map(|p| self.ghost(ui.ctx(), p, source, kept(p), reversed, &gain_at));
+                let pending = peaks.as_ref().map(|p| self.pending_ghost(ui.ctx(), p, source, kept(p), reversed, &gain_at));
                 self.drag_selection(ui.ctx(), image, pending);
             }
             WaveEvent::None => {}
         }
-        let row = ui.scope(|ui| self.ui_transport(ui, playing, playhead, duration)).response.rect.height();
+        let row = ui
+            .horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add_space(STRIP_W + 8.0);
+                ui.vertical(|ui| self.ui_transport(ui, playing, playhead, duration));
+            })
+            .response
+            .rect
+            .height();
         if (row - self.transport_h).abs() > 0.5 {
             self.transport_h = row;
             ui.ctx().request_repaint();
@@ -2802,16 +2881,14 @@ impl App {
 
     /// A toggle per channel of the file beside the wave, each level with its channel's lane:
     /// a click mutes or unmutes the channel, an Alt-click hears it alone, or all of them again
-    /// when it already was. What is kept is heard, drawn and exported; the last channel kept
-    /// stays.
+    /// when it already was. What is kept is heard, drawn and exported.
     fn channel_strip(&mut self, ui: &mut egui::Ui, channels: u16, height: f32) {
-        const STRIP_W: f32 = 22.0;
         let (rect, _) = ui.allocate_exact_size(egui::vec2(STRIP_W, height), Sense::hover());
         let n = (channels as usize).min(Channels::MAX);
         let lanes = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.top() + waveform::LANE_H), rect.max);
         let lane_h = lanes.height() / n as f32;
         let button_h = (lane_h - 4.0).clamp(4.0, 22.0);
-        let kept = |c: usize| self.wave.channels.is_none_or(|k| k.contains(c));
+        let kept = |c: usize| !self.wave.muted && self.wave.channels.is_none_or(|k| k.contains(c));
         let mut next: Option<Vec<usize>> = None;
         for c in 0..n {
             let name = match (channels, c) {
@@ -2851,8 +2928,11 @@ impl App {
                 });
             }
         }
-        if let Some(next) = next.filter(|k| !k.is_empty()) {
-            self.wave.channels = Channels::pick(next, channels);
+        if let Some(next) = next {
+            self.wave.muted = next.is_empty();
+            if !self.wave.muted {
+                self.wave.channels = Channels::pick(next, channels);
+            }
         }
     }
 
@@ -2861,7 +2941,7 @@ impl App {
         ui.painter().layout_no_wrap(text.to_string(), font, Color32::WHITE).size().x + 16.0
     }
 
-    /// The selected file's own tags as chips, and a tag button opening the file menu;
+    /// The selected file's own tags as chips, and a button opening the file menu;
     /// `reversed` keeps the reading order inside a right-to-left layout.
     fn tag_chips(&mut self, ui: &mut egui::Ui, reversed: bool) {
         let Some(i) = self.selected else { return };
@@ -2870,27 +2950,29 @@ impl App {
         let favorite_key = self.key_of(Action::Favorite);
         let file = self.files[i].clone();
         let mut action = None;
-        let mut new_tag = std::mem::take(&mut self.new_tag);
         let theme = self.theme.clone();
-        let mut menu_button = |ui: &mut egui::Ui, action: &mut Option<FileAction>| {
-            let b = theme::tool_button(ui, icons::TAG, "Tags").on_hover_text("Favorite, tags and more; also on right-click of a row");
-            egui::Popup::menu(&b).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                *action = file_menu(ui, &file, &defs, &theme, &favorite_key, &mut new_tag);
+        let menu_button = |ui: &mut egui::Ui, action: &mut Option<FileAction>| {
+            let b = theme::tool_button(ui, icons::DOTS_THREE, "").on_hover_text("Favorite, tags, the file on disk; also on right-click of a row");
+            let popup = egui::Popup::menu(&b).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+            if std::env::var_os("HARK_OPEN_POPUP").is_some_and(|v| v == "file") {
+                egui::Popup::open_id(ui.ctx(), popup.get_id());
+            }
+            popup.show(|ui| {
+                *action = file_menu(ui, &file, &defs, &theme, &favorite_key);
             });
         };
         let chips: Vec<(usize, &str)> = file.tags.iter().map(|t| (defs.iter().position(|d| &d.name == t).unwrap_or(defs.len()), t.as_str())).collect();
         if reversed {
             menu_button(ui, &mut action);
             for (k, t) in chips.iter().rev() {
-                chip(ui, &theme, t, theme.color_of(*k, defs.get(*k)), true, false);
+                chip(ui, &theme, t, theme.color_of(defs.get(*k)), 12.0, true, false);
             }
         } else {
             for (k, t) in &chips {
-                chip(ui, &theme, t, theme.color_of(*k, defs.get(*k)), true, false);
+                chip(ui, &theme, t, theme.color_of(defs.get(*k)), 12.0, true, false);
             }
             menu_button(ui, &mut action);
         }
-        self.new_tag = new_tag;
         if let Some(a) = action {
             self.apply_file_action(i, a);
         }
@@ -2926,6 +3008,9 @@ impl App {
             if icon_btn(ui, icons::EAR, self.preview).on_hover_text(format!("Preview export: hear and see the card's channels and level ({})", self.key_of(Action::Preview))).clicked() {
                 self.preview = !self.preview;
             }
+            if icon_btn(ui, icons::ARROWS_LEFT_RIGHT, self.wave.reverse).on_hover_text(format!("Reverse the file ({}): heard, drawn and exported backwards; the selection stays on the same sound", self.key_of(Action::Reverse))).clicked() {
+                self.toggle_reverse();
+            }
             let t = playhead.unwrap_or(0.0);
             ui.add_sized(egui::vec2(52.0, CONTROL_H), egui::Label::new(RichText::new(waveform::fmt_time(t)).monospace().color(if playing { self.theme.text } else { self.theme.muted })));
             group(ui);
@@ -2947,13 +3032,10 @@ impl App {
             if icon_btn(ui, icons::ARROWS_IN_LINE_HORIZONTAL, false).on_hover_text(format!("Trim the selection to the sound ({}): what sits {} dB under its peak goes", self.key_of(Action::Trim), hark_core::pcm::TRIM_BELOW_PEAK_DB)).clicked() {
                 self.trim_selection();
             }
-            if icon_btn(ui, icons::ARROWS_LEFT_RIGHT, self.wave.reverse).on_hover_text(format!("Reverse the selection, or the whole file ({}): heard, drawn and exported backwards, the fades where they are heard", self.key_of(Action::Reverse))).clicked() {
-                self.toggle_reverse();
-            }
             if icon_btn(ui, icons::MAGNIFYING_GLASS_PLUS, false).on_hover_text(format!("Zoom to selection ({})", self.key_of(Action::Zoom))).clicked() {
                 self.wave.zoom_to_selection(duration);
             }
-            if icon_btn(ui, icons::X, false).on_hover_text(format!("Clear the selection, its fades and its reverse ({})", self.key_of(Action::ClearSelection))).clicked() {
+            if icon_btn(ui, icons::X, false).on_hover_text(format!("Clear the selection and its fades ({})", self.key_of(Action::ClearSelection))).clicked() {
                 self.clear_selection();
             }
             group(ui);
@@ -2995,10 +3077,13 @@ impl App {
         ui.spacing_mut().interact_size = egui::vec2(CONTROL_H, CONTROL_H);
         ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
         let small = |text: String, color: Color32| egui::Label::new(RichText::new(text).color(color).size(12.5)).truncate();
-        let key_w = 52.0;
+        const KEYS: [&str; 7] = ["Format", "Rate", "Channels", "Level", "Folder", "Name", "Writes"];
+        let key_w = KEYS.iter().map(|k| ui.painter().layout_no_wrap(k.to_string(), FontId::proportional(12.5), theme.muted).size().x).fold(0.0, f32::max).ceil();
         let value_w = ui.available_width() - key_w - 6.0;
+        // Right-aligned, so every label sits the same distance from its control.
         let key = |ui: &mut egui::Ui, text: &str| {
-            ui.add_sized(egui::vec2(key_w, CONTROL_H), egui::Label::new(RichText::new(text).color(theme.muted).size(12.5)));
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(key_w, CONTROL_H), Sense::hover());
+            ui.painter().text(rect.right_center(), egui::Align2::RIGHT_CENTER, text, FontId::proportional(12.5), theme.muted);
         };
         let rule = |ui: &mut egui::Ui| {
             ui.add_space(2.0);
@@ -3013,8 +3098,6 @@ impl App {
         rule(ui);
 
         let mut edited = false;
-        // Mono turned on folds as the preset the card came from does, or by average.
-        let law = self.preset_name.as_deref().and_then(|n| self.config.preset(n)).and_then(|p| p.mono).unwrap_or_default();
         let p = &mut self.preset;
         egui::Grid::new("export-preset").num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
             key(ui, "Format");
@@ -3028,7 +3111,7 @@ impl App {
             edited |= preset_ui::sample_rate(ui, "card", p);
             ui.end_row();
             key(ui, "Channels");
-            edited |= preset_ui::mono(ui, p, law);
+            edited |= preset_ui::channels(ui, "card", p);
             ui.end_row();
             key(ui, "Level");
             ui.horizontal(|ui| edited |= preset_ui::normalize(ui, "card", p));
@@ -3334,7 +3417,8 @@ impl App {
                     name = format!("new{n}");
                     n += 1;
                 }
-                self.config.tags.push(hark_core::TagDef { name: name.clone(), color: None });
+                let color = Some(hark_core::tag_color::fresh(&self.config.tags));
+                self.config.tags.push(hark_core::TagDef { name: name.clone(), color });
                 self.tag_edit = Some((self.config.tags.len() - 1, name));
             }
         }
@@ -3362,8 +3446,7 @@ impl App {
                     ("↑ ↓".to_string(), "Browse"),
                     (pair(Action::PreviousTake, Action::NextTake), "Takes"),
                     (self.key_of(Action::Favorite), "Favorite"),
-                    ("1–9".to_string(), "Tags"),
-                    (pair(Action::SelectionStart, Action::SelectionEnd), "Selection"),
+                    (self.key_of(Action::Reverse), "Reverse"),
                     (self.key_of(Action::Preview), "Preview"),
                     (self.key_of(Action::Export), "Export"),
                     (format!("{}+C", keys::COMMAND), "Copy"),
@@ -3404,10 +3487,10 @@ impl App {
 }
 
 /// A tag as a rounded chip in its colour: filled when `on`, outlined when not.
-fn chip(ui: &mut egui::Ui, theme: &Theme, text: &str, color: Color32, on: bool, clickable: bool) -> egui::Response {
-    let font = FontId::new(12.0, egui::FontFamily::Name(theme::MEDIUM.into()));
+fn chip(ui: &mut egui::Ui, theme: &Theme, text: &str, color: Color32, size: f32, on: bool, clickable: bool) -> egui::Response {
+    let font = FontId::new(size, egui::FontFamily::Name(theme::MEDIUM.into()));
     let galley = ui.painter().layout_no_wrap(text.to_string(), font, Color32::PLACEHOLDER);
-    let pad = egui::vec2(8.0, 3.0);
+    let pad = egui::vec2((size * 2.0 / 3.0).round(), (size / 4.0).round());
     let size = galley.size() + pad * 2.0;
     let (rect, resp) = ui.allocate_exact_size(size, if clickable { Sense::click() } else { Sense::hover() });
     let hovered = clickable && resp.hovered();
@@ -3458,10 +3541,10 @@ enum FileAction {
     CopyPath,
 }
 
-/// The per-file menu: favorite, every tag with the carried ones checked, a field that creates
-/// a tag and puts it on the file, and the file's place on disk. Returns what was clicked;
-/// toggles keep the menu open, the rest close it. `new_tag` holds the field's text.
-fn file_menu(ui: &mut egui::Ui, file: &FileRecord, defs: &[hark_core::TagDef], theme: &Theme, favorite_key: &str, new_tag: &mut String) -> Option<FileAction> {
+/// The per-file menu: favorite, every tag with the carried ones checked, a row that creates a
+/// tag and puts it on the file, and the file's place on disk. Returns what was clicked;
+/// toggles keep the menu open, the rest close it.
+fn file_menu(ui: &mut egui::Ui, file: &FileRecord, defs: &[hark_core::TagDef], theme: &Theme, favorite_key: &str) -> Option<FileAction> {
     theme::menu_items(ui);
     let mut action = None;
     let mut fav = file.favorite;
@@ -3469,20 +3552,15 @@ fn file_menu(ui: &mut egui::Ui, file: &FileRecord, defs: &[hark_core::TagDef], t
         action = Some(FileAction::Favorite);
     }
     ui.separator();
-    for (k, t) in defs.iter().enumerate() {
+    for t in defs {
         let mut on = file.tags.contains(&t.name);
-        let color = theme.color_of(k, Some(t)).gamma_multiply(1.3).to_opaque();
-        let label = theme::menu_check(ui, &mut on, RichText::new(&t.name).color(color));
-        let label = if k < 9 { label.on_hover_text(format!("key {}", k + 1)) } else { label };
-        if label.changed() {
+        let color = theme.color_of(Some(t)).gamma_multiply(1.3).to_opaque();
+        if theme::menu_check(ui, &mut on, RichText::new(&t.name).color(color)).changed() {
             action = Some(FileAction::Tag(t.name.clone()));
         }
     }
-    let field = ui.add(egui::TextEdit::singleline(new_tag).hint_text("New tag").desired_width(150.0).margin(egui::vec2(theme::MENU_INSET, 2.0)));
-    let field = field.on_hover_text("Enter creates the tag and puts it on this file");
-    if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !new_tag.trim().is_empty() {
-        action = Some(FileAction::NewTag(std::mem::take(new_tag).trim().to_string()));
-        field.request_focus();
+    if let Some(name) = new_tag_row(ui, theme) {
+        action = Some(FileAction::NewTag(name));
     }
     ui.separator();
     if ui.button(theme::icon_text(icons::FOLDER_OPEN, "Show in folder", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
@@ -3495,6 +3573,68 @@ fn file_menu(ui: &mut egui::Ui, file: &FileRecord, defs: &[hark_core::TagDef], t
         ui.close();
     }
     action
+}
+
+/// The tag list's last row: "New tag…" with a plus where the tags have their check boxes,
+/// which a click turns into a field in place. Enter gives the name typed; Escape or a click
+/// elsewhere puts the row back.
+fn new_tag_row(ui: &mut egui::Ui, theme: &Theme) -> Option<String> {
+    const BOX: f32 = 18.0;
+    const GAP: f32 = 8.0;
+    let id = ui.id().with("new-tag");
+    let field_id = id.with("field");
+    // A menu closed while the field was open never draws it to lose focus, so a row not
+    // drawn last pass starts over.
+    let pass = ui.ctx().cumulative_pass_nr();
+    let last = ui.data_mut(|d| {
+        let last = d.get_temp::<u64>(id.with("pass"));
+        d.insert_temp(id.with("pass"), pass);
+        last
+    });
+    let shown_before = last.is_some_and(|p| p + 1 >= pass);
+    if !shown_before {
+        ui.data_mut(|d| {
+            d.remove::<bool>(id);
+            d.remove::<String>(field_id);
+        });
+    }
+    let editing = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let h = BOX.max(ui.spacing().interact_size.y) + 2.0 * ui.spacing().button_padding.y;
+    let w = if ui.is_sizing_pass() { 180.0 } else { ui.available_width().max(180.0) };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), if editing { Sense::hover() } else { Sense::click() });
+    let icon_at = egui::pos2(rect.left() + theme::MENU_INSET + BOX / 2.0, rect.center().y);
+    let text_left = rect.left() + theme::MENU_INSET + BOX + GAP;
+    let icon_font = FontId::new(14.0, egui::FontFamily::Name(theme::ICONS.into()));
+    if !editing {
+        let hot = resp.hovered();
+        if hot {
+            ui.painter().rect_filled(rect, ui.style().interact(&resp).corner_radius, ui.style().interact(&resp).weak_bg_fill);
+        }
+        let ink = if hot { theme.text } else { theme.muted };
+        ui.painter().text(icon_at, egui::Align2::CENTER_CENTER, icons::PLUS, icon_font, ink);
+        ui.painter().text(egui::pos2(text_left, rect.center().y), egui::Align2::LEFT_CENTER, "New tag…", egui::TextStyle::Button.resolve(ui.style()), ink);
+        if resp.on_hover_text("Creates a tag and puts it on this file").clicked() {
+            ui.data_mut(|d| d.insert_temp(id, true));
+            ui.memory_mut(|m| m.request_focus(field_id));
+        }
+        return None;
+    }
+    let well = rect.shrink2(egui::vec2(4.0, 2.0));
+    ui.painter().rect(well, CornerRadius::same(5), ui.visuals().extreme_bg_color, Stroke::new(1.0, theme.accent2.gamma_multiply(0.8)), StrokeKind::Inside);
+    ui.painter().text(icon_at, egui::Align2::CENTER_CENTER, icons::TAG, icon_font, theme.accent2);
+    let mut text = ui.data(|d| d.get_temp::<String>(field_id)).unwrap_or_default();
+    let field_rect = egui::Rect::from_min_max(egui::pos2(text_left, well.top()), egui::pos2(well.right() - 6.0, well.bottom()));
+    let field = ui.put(field_rect, egui::TextEdit::singleline(&mut text).id(field_id).frame(egui::Frame::NONE).hint_text("Tag name").margin(egui::Margin::ZERO).vertical_align(egui::Align::Center));
+    let mut made = None;
+    if field.lost_focus() {
+        if ui.input(|i| i.key_pressed(Key::Enter)) && !text.trim().is_empty() {
+            made = Some(text.trim().to_string());
+        }
+        text.clear();
+        ui.data_mut(|d| d.insert_temp(id, false));
+    }
+    ui.data_mut(|d| d.insert_temp(field_id, text));
+    made
 }
 
 /// A folder path in a cell; when it is too wide, leading components give way to an ellipsis

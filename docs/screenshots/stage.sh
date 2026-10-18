@@ -130,16 +130,9 @@ config() {
   "$cli" projects new "$game/Pigeon Wizard.hark" --output "$game/Assets/Audio" >/dev/null
   "$cli" roots add "$lib" --name "Pigeon Wizard SFX" >/dev/null
   "$cli" scan >/dev/null
-  local t
-  for t in sfx ambient music voice ui foley; do "$cli" tags remove "$t" >/dev/null; done
-  "$cli" tags add sfx --color '#e07a5f' >/dev/null
-  "$cli" tags add foley --color '#6c8ebf' >/dev/null
-  "$cli" tags add combat --color '#c94c4c' >/dev/null
-  "$cli" tags add ui --color '#7fb069' >/dev/null
-  "$cli" tags add ambience --color '#5aa9a0' >/dev/null
-  "$cli" tags add voice --color '#d9a441' >/dev/null
-  "$cli" tags add music --color '#9b7bd0' >/dev/null
-  "$cli" tags add loop --color '#8a8f98' >/dev/null
+  # The default tags keep their colours; the stage's own two get fixed ones, so every run looks alike.
+  "$cli" tags add combat --color red >/dev/null
+  "$cli" tags add loop --color grey >/dev/null
   local f
   for f in "$lib"/Footsteps/*.wav; do "$cli" tag "$f" +sfx +foley >/dev/null; done
   for f in "$lib"/Impacts/*.wav; do "$cli" tag "$f" +sfx >/dev/null; done
@@ -147,7 +140,7 @@ config() {
   "$cli" tag "$lib/Impacts/impact_metal_heavy_01.wav" +combat >/dev/null
   "$cli" tag "$lib/Impacts/impact_metal_heavy_02.wav" +combat >/dev/null
   for f in "$lib"/UI/*.wav; do "$cli" tag "$f" +ui >/dev/null; done
-  for f in "$lib"/Ambience/*; do "$cli" tag "$f" +ambience >/dev/null; done
+  for f in "$lib"/Ambience/*; do "$cli" tag "$f" +ambient >/dev/null; done
   "$cli" tag "$lib/Ambience/forest_day_loop.wav" +loop >/dev/null
   "$cli" tag "$lib/Ambience/cave_drips_loop.flac" +loop >/dev/null
   for f in "$lib"/Voice/*.wav; do "$cli" tag "$f" +voice >/dev/null; done

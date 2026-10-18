@@ -24,7 +24,8 @@ pub struct ExportRequest {
     pub selection: Option<Selection>,
     /// The source's channels kept, before anything else is done; `None` keeps them all.
     pub channels: Option<Channels>,
-    /// Play the selection, or the whole file, backwards; the fades apply to it reversed.
+    /// Play the selection, a span of the source, backwards, or the whole file; the fades apply
+    /// to it reversed.
     pub reverse: bool,
     /// Shrink the selection, or the whole file, to the sound in its kept channels.
     pub trim: bool,

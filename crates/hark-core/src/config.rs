@@ -18,7 +18,7 @@ pub struct Root {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TagDef {
     pub name: String,
-    /// `#rrggbb`; a tag without one takes a color from its position.
+    /// `#rrggbb`. Loading the config gives a tag without one a color of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
 }
@@ -246,7 +246,8 @@ impl Default for Config {
                 ..ExportPreset::default()
             },
         );
-        let tag = |name: &str| TagDef { name: name.into(), color: None };
+        let tag = |(name, swatch): (&str, &str)| TagDef { name: name.into(), color: crate::tag_color::swatch(swatch).map(str::to_string) };
+        let tags = [("sfx", "coral"), ("ambient", "teal"), ("music", "violet"), ("voice", "amber"), ("ui", "sky"), ("foley", "green")].map(tag).to_vec();
         Config {
             roots: Vec::new(),
             output_root: None,
@@ -257,7 +258,7 @@ impl Default for Config {
             legacy_projects: Vec::new(),
             legacy_active: None,
             active: None,
-            tags: ["sfx", "ambient", "music", "voice", "ui", "foley"].map(tag).to_vec(),
+            tags,
             presets,
             default_preset: default_preset_name(),
             output_sample_rate: None,
@@ -282,7 +283,7 @@ impl Config {
         match std::fs::read(path) {
             Ok(bytes) => {
                 let mut cfg: Config = serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
-                if cfg.migrate() | cfg.drop_tag_placeholders() {
+                if cfg.migrate() | cfg.drop_tag_placeholders() | crate::tag_color::fill(&mut cfg.tags) {
                     cfg.save_to(path)?;
                 }
                 if let Some(file) = cfg.project.clone() {

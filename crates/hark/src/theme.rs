@@ -25,7 +25,6 @@ pub struct Theme {
     pub ok: Color32,
     pub warn: Color32,
     pub err: Color32,
-    pub tag_colors: Vec<Color32>,
 }
 
 /// Inner margin of every panel, in points.
@@ -43,12 +42,7 @@ pub const ICONS: &str = "icons";
 pub const ICONS_FILL: &str = "phosphor-fill";
 
 pub fn hex(s: &str) -> Option<Color32> {
-    let s = s.trim().trim_start_matches('#');
-    if s.len() != 6 {
-        return None;
-    }
-    let v = u32::from_str_radix(s, 16).ok()?;
-    Some(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+    hark_core::tag_color::parse(s).map(|[r, g, b]| Color32::from_rgb(r, g, b))
 }
 
 impl Default for Theme {
@@ -69,16 +63,11 @@ impl Default for Theme {
             ok: hex("#6fbf73").unwrap(),
             warn: hex("#e8c75c").unwrap(),
             err: hex("#f05a5a").unwrap(),
-            tag_colors: Self::default_tag_colors(),
         }
     }
 }
 
 impl Theme {
-    fn default_tag_colors() -> Vec<Color32> {
-        ["#e06c75", "#e5a44c", "#d7c653", "#79b86a", "#4fb5c0", "#5f8fe8", "#a77cf2", "#e078c0", "#8f8f8f"].iter().filter_map(|h| hex(h)).collect()
-    }
-
     pub fn from_file(path: &Path) -> Option<Theme> {
         let text = std::fs::read_to_string(path).ok()?;
         let map: HashMap<String, serde_json::Value> = serde_json::from_str(&text).ok()?;
@@ -100,7 +89,6 @@ impl Theme {
             ok: get("ok").unwrap_or(d.ok),
             warn: get("warn").unwrap_or(d.warn),
             err: get("err").unwrap_or(d.err),
-            tag_colors: Self::default_tag_colors(),
         })
     }
 
@@ -111,13 +99,9 @@ impl Theme {
         if luma > 140.0 { self.bg_deep } else { Color32::WHITE }
     }
 
-    pub fn tag_color(&self, index: usize) -> Color32 {
-        self.tag_colors[index % self.tag_colors.len()]
-    }
-
-    /// A tag's color: its own when set, else one picked by its position.
-    pub fn color_of(&self, index: usize, def: Option<&hark_core::TagDef>) -> Color32 {
-        def.and_then(|d| d.color.as_deref()).and_then(hex).unwrap_or_else(|| self.tag_color(index))
+    /// A tag's color: its own, or grey for a tag on a file that is no longer defined.
+    pub fn color_of(&self, def: Option<&hark_core::TagDef>) -> Color32 {
+        def.and_then(|d| d.color.as_deref()).and_then(hex).unwrap_or(self.muted)
     }
 
     pub fn apply(&self, ctx: &egui::Context) {

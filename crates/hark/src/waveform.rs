@@ -45,8 +45,10 @@ pub struct WaveState {
     /// The file's channels kept, picked beside the wave; the lanes of the rest draw dimmed.
     /// `None` keeps them all.
     pub channels: Option<Channels>,
-    /// The selection, or the whole file, plays backwards; it draws mirrored inside its span,
-    /// so the picture reads as it is heard and the fades sit where they are heard.
+    /// Every channel is muted: the file plays silent, draws dimmed and exports nothing.
+    pub muted: bool,
+    /// The file plays backwards and draws mirrored, so the picture reads as it is heard. The
+    /// view, the selection and the fades count along it as it is heard.
     pub reverse: bool,
     /// Linear gain the drawing is scaled by, so the picture follows the playback volume.
     pub gain: f32,
@@ -136,7 +138,7 @@ impl WaveState {
 
 impl Default for WaveState {
     fn default() -> Self {
-        WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), channels: None, reverse: false, gain: 1.0, selection_level: SelectionLevel::Same, clip_fades: None, drag: None, flash: None, last_edge: None, last_fade: None }
+        WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), channels: None, muted: false, reverse: false, gain: 1.0, selection_level: SelectionLevel::Same, clip_fades: None, drag: None, flash: None, last_edge: None, last_fade: None }
     }
 }
 
@@ -147,6 +149,7 @@ impl WaveState {
         self.fade_in = 0.0;
         self.fade_out = 0.0;
         self.channels = None;
+        self.muted = false;
         self.reverse = false;
         self.drag = None;
         self.last_edge = None;
@@ -487,34 +490,30 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
 
     // The wave itself.
     let frames_per_px = span * peaks.sample_rate as f64 / rect.width().max(1.0) as f64;
-    let wave = if status.is_some() { dimmed(colors) } else { *colors };
+    let wave = if status.is_some() || state.muted { dimmed(colors) } else { *colors };
     // A folded wave is one lane, the fold of the kept channels, so only a wave of the file's
-    // own lanes dims the ones left out.
-    let kept = state.channels.filter(|_| peaks.channels > 1);
+    // own lanes dims the ones left out. With every channel muted the whole wave dims once.
+    let kept = state.channels.filter(|_| peaks.channels > 1 && !state.muted);
     // The wave goes down in segments when the selection has a gain of its own: the file at
     // its gain either side, the selection at its, dimmed while a measurement of it runs.
     // Each segment is the span, its gain, whether it is dimmed, and whether it is the clip,
     // which alone draws under the fades.
-    // A reversed selection also goes down apart, mirrored about its middle; the whole file
-    // reversed mirrors about the file's.
     let mut segments: Vec<(f64, f64, f32, bool, bool)> = Vec::new();
-    let split = state.selection_level != SelectionLevel::Same || state.reverse;
-    let mirror = match (state.selection, state.selection_level) {
-        (Some((a, b)), level) if split && b > a => {
-            segments.push((v0, a, state.gain, false, false));
-            match level {
-                SelectionLevel::Gain(g) => segments.push((a, b, g, false, true)),
-                SelectionLevel::Busy { gain, .. } => segments.push((a, b, gain, true, true)),
-                SelectionLevel::Same => segments.push((a, b, state.gain, false, true)),
-            }
-            segments.push((b, v1, state.gain, false, false));
-            state.reverse.then_some((a, b))
-        }
-        (selection, _) => {
-            segments.push((v0, v1, state.gain, false, true));
-            (state.reverse && selection.is_none()).then_some((0.0, duration))
-        }
+    let own = match state.selection_level {
+        SelectionLevel::Same => None,
+        SelectionLevel::Gain(g) => Some((g, false)),
+        SelectionLevel::Busy { gain, .. } => Some((gain, true)),
     };
+    match (state.selection, own) {
+        (Some((a, b)), Some((gain, dim))) if b > a => {
+            segments.push((v0, a, state.gain, false, false));
+            segments.push((a, b, gain, dim, true));
+            segments.push((b, v1, state.gain, false, false));
+        }
+        _ => segments.push((v0, v1, state.gain, false, true)),
+    }
+    // A reversed file draws mirrored about its middle, as it is heard.
+    let mirrored = state.reverse.then_some((0.0, duration));
     for (s0, s1, gain, dim, clip) in segments {
         let (s0, s1) = (s0.max(v0), s1.min(v1));
         let seg = Rect::from_min_max(Pos2::new(x_of(s0), rect.top()), Pos2::new(x_of(s1), rect.bottom()));
@@ -523,8 +522,7 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
         }
         let wave = if dim { dimmed(&wave) } else { wave };
         let fades = state.clip_fades.filter(|_| clip);
-        // What shows at `t` of a mirrored clip is the file at `a + b - t`.
-        let mirrored = mirror.filter(|_| clip);
+        // What shows at `t` mirrored is the file at `a + b - t`.
         let heard = |t: f64| mirrored.map_or(t, |(a, b)| a + b - t);
         let (f0, f1) = match mirrored {
             Some((a, b)) => (a + b - s1, a + b - s0),
@@ -722,9 +720,10 @@ pub struct GhostColors {
     pub hatch: Option<Color32>,
 }
 
-/// The drag picture: the span's envelope, its `kept` channels (all with `None`) folded into
-/// one and backwards when `reversed`, on a rounded translucent card of 200 by 56 logical
-/// pixels, drawn at `scale` buffer pixels per logical. `gain_at` takes the time as heard.
+/// The drag picture: the source span's envelope, its `kept` channels (all with `None`) folded
+/// into one and backwards when `reversed`, on a rounded translucent card of 200 by 56 logical
+/// pixels, drawn at `scale` buffer pixels per logical. `gain_at` takes the seconds into the
+/// span as heard.
 #[allow(clippy::too_many_arguments)]
 pub fn ghost(peaks: &Peaks, span: (f64, f64), kept: Option<Channels>, reversed: bool, gain_at: &dyn Fn(f64) -> f32, colors: &GhostColors, scale: i32) -> crate::dnd::Image {
     let (w, h) = (200 * scale as usize, 56 * scale as usize);
@@ -764,7 +763,7 @@ pub fn ghost(peaks: &Peaks, span: (f64, f64), kept: Option<Channels>, reversed: 
     let rms = Color32::from_rgba_unmultiplied(colors.rms.r(), colors.rms.g(), colors.rms.b(), 240);
     for (k, b) in merged.iter().enumerate() {
         let x = inset + k;
-        let gain = gain_at(span.0 + (k as f64 + 0.5) / cols as f64 * (span.1 - span.0));
+        let gain = gain_at((k as f64 + 0.5) / cols as f64 * (span.1 - span.0));
         let y_of = |v: f32| (mid - (v * gain).clamp(-1.0, 1.0) * half).round() as usize;
         let (top, bottom) = (y_of(b.max).min(y_of(b.min)), y_of(b.min).max(y_of(b.max)));
         for y in top..=bottom.min(h - 1) {

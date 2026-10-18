@@ -12,6 +12,7 @@ pub mod pcm;
 pub mod peaks;
 pub mod project;
 pub mod resample;
+pub mod tag_color;
 pub mod copies;
 pub mod update;
 pub mod wav;

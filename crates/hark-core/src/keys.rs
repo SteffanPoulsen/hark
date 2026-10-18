@@ -1,7 +1,7 @@
 //! The window's rebindable keys: the actions, each one's default chord, and the chords the
 //! config overrides. A chord is `Ctrl+Shift+Alt+Key` text; the key name is the window's
 //! (`E`, `Space`, `ArrowLeft`, `OpenBracket`), which the window resolves and the CLI only
-//! carries. Navigation and the tag digits are not here, being positional, and neither is copy,
+//! carries. Navigation is not here, being positional, and neither is copy,
 //! which stays the desktop's own Ctrl+C.
 
 use std::collections::BTreeMap;
@@ -121,9 +121,9 @@ impl Action {
             Action::PreviousTake => "Select the previous take, the spans of sound parted by silence.",
             Action::NextTake => "Select the next take.",
             Action::Trim => "Trim the selection, or the whole file, to the sound.",
-            Action::Reverse => "Play and export the selection, or the whole file, backwards.",
+            Action::Reverse => "Turn the file around, heard, drawn and exported backwards; the selection stays on the same sound.",
             Action::Zoom => "Fit the selection to the waveform.",
-            Action::ClearSelection => "Clear the selection, its fades and its reverse.",
+            Action::ClearSelection => "Clear the selection and its fades.",
             Action::Export => "Export the selection with the chosen preset.",
             Action::NewTab => "Open a tab on the list as it is now.",
             Action::CloseTab => "Close the list's tab; the last one stays.",
