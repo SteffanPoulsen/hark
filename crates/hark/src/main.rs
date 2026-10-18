@@ -3567,12 +3567,14 @@ fn chip(ui: &mut egui::Ui, text: &str, color: Color32, size: f32) -> egui::Respo
     let font = FontId::new(size, egui::FontFamily::Name(theme::MEDIUM.into()));
     let galley = ui.painter().layout_no_wrap(text.to_string(), font, Color32::PLACEHOLDER);
     let pad = egui::vec2((size * 2.0 / 3.0).round(), (size / 4.0).round());
+    // Inter's x-height is centred 0.09 em below the middle of its line, and tags are lowercase.
+    let lift = egui::vec2(0.0, size * 0.09);
     let size = galley.size() + pad * 2.0;
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(10), color.gamma_multiply(0.32));
     p.rect_stroke(rect, CornerRadius::same(10), Stroke::new(1.0, color.gamma_multiply(0.9)), StrokeKind::Inside);
-    p.galley(rect.min + pad, galley, color.gamma_multiply(1.6).to_opaque());
+    p.galley(rect.min + pad - lift, galley, color.gamma_multiply(1.6).to_opaque());
     resp
 }
 
