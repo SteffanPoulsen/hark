@@ -89,6 +89,32 @@ fn vorbis_comment(fields: &[(&str, &str)]) -> Vec<u8> {
     v
 }
 
+/// Body (after the 4-byte application id) of the first APPLICATION block with `app_id`.
+pub fn read_application_block(path: &Path, app_id: &[u8; 4]) -> Result<Option<Vec<u8>>> {
+    let mut f = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut magic = [0u8; 4];
+    if f.read_exact(&mut magic).is_err() || &magic != b"fLaC" {
+        return Ok(None);
+    }
+    loop {
+        let mut hdr = [0u8; 4];
+        if f.read_exact(&mut hdr).is_err() {
+            return Ok(None);
+        }
+        let last = hdr[0] & 0x80 != 0;
+        let kind = hdr[0] & 0x7F;
+        let len = u32::from_be_bytes([0, hdr[1], hdr[2], hdr[3]]) as usize;
+        let mut body = vec![0u8; len];
+        f.read_exact(&mut body)?;
+        if kind == BLOCK_APPLICATION && body.len() >= 4 && &body[..4] == app_id {
+            return Ok(Some(body[4..].to_vec()));
+        }
+        if last {
+            return Ok(None);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,31 +143,5 @@ mod tests {
         assert!(worst < 2.0 / (1 << 23) as f32, "sample {at} drifts by {worst}: {} became {}; first bad frame {}", pcm.samples[at], back.samples[at], at / 4096);
         let plain = pcm.samples.len() * 3;
         assert!(size < plain + plain / 10, "{size} bytes for {plain} bytes of samples");
-    }
-}
-
-/// Body (after the 4-byte application id) of the first APPLICATION block with `app_id`.
-pub fn read_application_block(path: &Path, app_id: &[u8; 4]) -> Result<Option<Vec<u8>>> {
-    let mut f = std::io::BufReader::new(std::fs::File::open(path)?);
-    let mut magic = [0u8; 4];
-    if f.read_exact(&mut magic).is_err() || &magic != b"fLaC" {
-        return Ok(None);
-    }
-    loop {
-        let mut hdr = [0u8; 4];
-        if f.read_exact(&mut hdr).is_err() {
-            return Ok(None);
-        }
-        let last = hdr[0] & 0x80 != 0;
-        let kind = hdr[0] & 0x7F;
-        let len = u32::from_be_bytes([0, hdr[1], hdr[2], hdr[3]]) as usize;
-        let mut body = vec![0u8; len];
-        f.read_exact(&mut body)?;
-        if kind == BLOCK_APPLICATION && body.len() >= 4 && &body[..4] == app_id {
-            return Ok(Some(body[4..].to_vec()));
-        }
-        if last {
-            return Ok(None);
-        }
     }
 }

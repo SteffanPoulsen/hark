@@ -809,6 +809,33 @@ where
     Ok(stream)
 }
 
+fn open_host() -> (cpal::Host, &'static str) {
+    #[cfg(all(target_os = "linux", feature = "pipewire"))]
+    {
+        if let Ok(host) = cpal::host_from_id(cpal::HostId::PipeWire) {
+            if host.default_output_device().is_some() {
+                return (host, "pipewire");
+            }
+        }
+    }
+    let host = cpal::default_host();
+    let name = host.id().name();
+    (host, name)
+}
+
+fn default_device(host: &cpal::Host) -> Result<cpal::Device> {
+    #[cfg(target_os = "linux")]
+    {
+        let named = |want: &str| {
+            host.output_devices().ok().and_then(|mut it| it.find(|d| d.description().map(|desc| desc.name() == want).unwrap_or(false)))
+        };
+        if let Some(d) = named("pipewire").or_else(|| named("pulse")) {
+            return Ok(d);
+        }
+    }
+    host.default_output_device().ok_or_else(|| anyhow!("no audio output device"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -913,9 +940,9 @@ mod tests {
         let (start, end, from) = (24_000, 48_000, 36_000);
         let stream = b.play(&path, 48_000, bounds(start, end, false), from);
         let out = b.render(&stream, 48_000);
-        for k in 1..(end - from) {
+        for (k, got) in out.iter().enumerate().take(end - from).skip(1) {
             let want = expected(48_000, from + k);
-            assert!((out[k] - want).abs() < 1e-3, "frame {k}: got {}, want {want}", out[k]);
+            assert!((got - want).abs() < 1e-3, "frame {k}: got {got}, want {want}");
         }
         assert!(out[end - from..].iter().all(|s| *s == 0.0));
         assert!(!b.mixer.shared.playing.load(Ordering::Relaxed));
@@ -963,31 +990,4 @@ mod tests {
         assert!(second.strong_count() > 0);
         std::fs::remove_file(&path).unwrap();
     }
-}
-
-fn open_host() -> (cpal::Host, &'static str) {
-    #[cfg(all(target_os = "linux", feature = "pipewire"))]
-    {
-        if let Ok(host) = cpal::host_from_id(cpal::HostId::PipeWire) {
-            if host.default_output_device().is_some() {
-                return (host, "pipewire");
-            }
-        }
-    }
-    let host = cpal::default_host();
-    let name = host.id().name();
-    (host, name)
-}
-
-fn default_device(host: &cpal::Host) -> Result<cpal::Device> {
-    #[cfg(target_os = "linux")]
-    {
-        let named = |want: &str| {
-            host.output_devices().ok().and_then(|mut it| it.find(|d| d.description().map(|desc| desc.name() == want).unwrap_or(false)))
-        };
-        if let Some(d) = named("pipewire").or_else(|| named("pulse")) {
-            return Ok(d);
-        }
-    }
-    host.default_output_device().ok_or_else(|| anyhow!("no audio output device"))
 }
