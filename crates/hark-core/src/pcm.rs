@@ -245,6 +245,41 @@ impl Pcm {
 
 /// A trim cuts what stays this far below the span's peak.
 pub const TRIM_BELOW_PEAK_DB: f64 = 40.0;
+
+/// A clip's fades: lengths in seconds from its start and back from its end, and their shape.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Fades {
+    pub in_secs: f64,
+    pub out_secs: f64,
+    pub shape: FadeShape,
+}
+
+impl Fades {
+    pub fn is_zero(&self) -> bool {
+        self.in_secs <= 0.0 && self.out_secs <= 0.0
+    }
+
+    /// The gain at `frame` of a clip `total` frames long at `rate`, as `apply` would leave it.
+    pub fn gain(&self, frame: usize, total: usize, rate: u32) -> f32 {
+        let frames = |secs: f64| ((secs * rate as f64).round() as usize).min(total);
+        let (n_in, n_out) = (frames(self.in_secs), frames(self.out_secs));
+        let mut g = 1.0;
+        if n_in > 0 && frame < n_in {
+            g *= self.shape.gain(frame as f32 / n_in as f32);
+        }
+        if n_out > 0 && frame + n_out >= total {
+            g *= self.shape.gain(1.0 - (frame + n_out - total + 1) as f32 / n_out as f32);
+        }
+        g
+    }
+
+    pub fn apply(&self, pcm: &mut Pcm) {
+        let rate = pcm.sample_rate as f64;
+        let frames = |secs: f64| (secs * rate).round() as usize;
+        pcm.fade_in(frames(self.in_secs), self.shape);
+        pcm.fade_out(frames(self.out_secs), self.shape);
+    }
+}
 /// A silence at least this long parts two takes.
 pub const TAKE_GAP_SECS: f64 = 0.25;
 

@@ -4,7 +4,7 @@ use anyhow::Result;
 use ebur128::{EbuR128, Mode};
 use serde::{Deserialize, Serialize};
 
-use crate::pcm::{gain_to_db, DownmixMode, Pcm};
+use crate::pcm::{gain_to_db, DownmixMode, Fades, Pcm};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Loudness {
@@ -62,27 +62,56 @@ pub fn measure(pcm: &Pcm) -> Result<Loudness> {
     }
 }
 
-/// Measures a file one packet at a time, folded to one channel when `fold` is set; only a clip
-/// too short to gate is decoded whole. Gives up as soon as `abort` says so.
-pub fn measure_file(path: &Path, fold: Option<DownmixMode>, abort: &dyn Fn() -> bool) -> Result<Loudness> {
+/// Measures `span` of a file in seconds, or the whole of it, one packet at a time, under
+/// `fades` and folded to one channel when `fold` is set, as an export of it is before it is
+/// normalised; only a clip too short to gate is decoded whole. Gives up as soon as `abort`
+/// says so.
+pub fn measure_file(path: &Path, span: Option<(f64, f64)>, fades: Fades, fold: Option<DownmixMode>, abort: &dyn Fn() -> bool) -> Result<Loudness> {
     let mut reader = crate::decode::Reader::open(path)?;
     let channels = reader.channels as usize;
+    let rate = reader.sample_rate as f64;
+    let (start, end) = match span {
+        Some((a, b)) if rate > 0.0 => ((a.max(0.0) * rate).round() as u64, (b.max(0.0) * rate).round() as u64),
+        _ => (0, u64::MAX),
+    };
+    // A fade-out needs the clip's length; a file whose header does not state it gets none.
+    let total = if end == u64::MAX { reader.frames } else { Some(end - start) }.map(|n| n as usize).unwrap_or(usize::MAX);
+    // A seek may land late in some codecs, so it aims a second early and the frames before
+    // the span are dropped, as `decode_span` does.
+    let mut counted = if start > 0 { reader.seek(start.saturating_sub(reader.sample_rate as u64))? } else { 0 };
     let mut chunk = Vec::new();
-    let mut folded = Vec::new();
+    let mut shaped = Vec::new();
     let mut meter = None;
     while reader.next_chunk(&mut chunk)? {
+        let frames = (chunk.len() / channels.max(1)) as u64;
+        let pos = reader.chunk_start.unwrap_or(counted);
+        counted = pos + frames;
+        if pos >= end {
+            break;
+        }
+        let from = start.saturating_sub(pos).min(frames) as usize;
+        let to = (end - pos).min(frames) as usize;
+        let part = &chunk[from * channels..to * channels];
+        let first = (pos + from as u64).saturating_sub(start) as usize;
+        let gain = |k: usize| if fades.is_zero() { 1.0 } else { fades.gain(first + k, total, reader.sample_rate) };
         let samples = match fold {
             Some(mode) => {
-                folded.clear();
-                folded.extend(chunk.chunks(channels).map(|f| mode.fold(f)));
-                &folded
+                shaped.clear();
+                shaped.extend(part.chunks(channels).enumerate().map(|(k, f)| mode.fold(f) * gain(k)));
+                &shaped
             }
-            None => &chunk,
+            None if fades.is_zero() => part,
+            None => {
+                shaped.clear();
+                shaped.extend(part.chunks(channels).enumerate().flat_map(|(k, f)| f.iter().map(move |s| s * gain(k))));
+                &shaped
+            }
         };
-        if meter.is_none() {
-            meter = Some(Meter::new(if fold.is_some() { 1 } else { reader.channels }, reader.sample_rate)?);
-        }
-        meter.as_mut().unwrap().push(samples)?;
+        let m = match &mut meter {
+            Some(m) => m,
+            None => meter.insert(Meter::new(if fold.is_some() { 1 } else { reader.channels }, reader.sample_rate)?),
+        };
+        m.push(samples)?;
         chunk.clear();
         if abort() {
             anyhow::bail!("superseded");
@@ -91,7 +120,11 @@ pub fn measure_file(path: &Path, fold: Option<DownmixMode>, abort: &dyn Fn() -> 
     match meter.and_then(|m| m.finish()) {
         Some(l) => Ok(l),
         None => {
-            let pcm = crate::decode::decode(path)?;
+            let mut pcm = match span {
+                Some((a, b)) => crate::decode::decode_span(path, a, b)?,
+                None => crate::decode::decode(path)?,
+            };
+            fades.apply(&mut pcm);
             measure(&match fold {
                 Some(mode) => pcm.to_mono(mode),
                 None => pcm,
@@ -115,4 +148,42 @@ fn momentary_max(pcm: &Pcm) -> Result<f64> {
         }
     }
     Ok(if best.is_finite() { best } else { -70.0 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A span metered from the file, through a seek that lands early and packets the span's
+    /// edges fall inside, reads the same as the span cut from the decoded file.
+    #[test]
+    fn streamed_span_reads_as_the_cut_span() {
+        let rate = 48_000usize;
+        let samples: Vec<f32> = (0..rate * 3 * 2)
+            .map(|i| {
+                let f = i / 2;
+                let amp = if (rate..rate * 2).contains(&f) { 0.1 } else { 0.8 };
+                amp * ((f as f32 / rate as f32) * 440.0 * std::f32::consts::TAU).sin()
+            })
+            .collect();
+        let pcm = Pcm { sample_rate: rate as u32, channels: 2, samples };
+        let path = std::env::temp_dir().join(format!("hark-span-{}.wav", std::process::id()));
+        crate::wav::write(&path, &pcm, 24, false, b"{}", &Default::default()).unwrap();
+        let span = (1.0 + 1.0 / 3.0, 1.0 + 6.0 / 7.0);
+        let fades = Fades { in_secs: 0.2, out_secs: 0.3, shape: crate::pcm::FadeShape::Linear };
+        let streamed = measure_file(&path, Some(span), Fades::default(), None, &|| false);
+        let faded = measure_file(&path, Some(span), fades, None, &|| false);
+        let _ = std::fs::remove_file(&path);
+        let (streamed, faded) = (streamed.unwrap(), faded.unwrap());
+        let mut cut = pcm.slice_frames(pcm.frame_at(span.0), pcm.frame_at(span.1));
+        let plain = measure(&cut).unwrap();
+        assert!((streamed.integrated_lufs - plain.integrated_lufs).abs() < 0.05, "{} vs {} LUFS", streamed.integrated_lufs, plain.integrated_lufs);
+        assert!((streamed.sample_peak_dbfs - plain.sample_peak_dbfs).abs() < 0.05, "{} vs {} dBFS", streamed.sample_peak_dbfs, plain.sample_peak_dbfs);
+        let whole = measure(&pcm).unwrap();
+        assert!(whole.integrated_lufs - streamed.integrated_lufs > 6.0, "the quiet second must read well under the file");
+        fades.apply(&mut cut);
+        let cut = measure(&cut).unwrap();
+        assert!((faded.integrated_lufs - cut.integrated_lufs).abs() < 0.05, "faded: {} vs {} LUFS", faded.integrated_lufs, cut.integrated_lufs);
+        assert!(plain.integrated_lufs - faded.integrated_lufs > 0.5, "the fades must take something off the level");
+    }
 }

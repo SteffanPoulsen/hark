@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{Config, ExportPreset, Normalize, OutputFormat, Root};
 use crate::loudness::{self, Loudness};
 use crate::origin::{Measured, Origin, OutputRef, SelectionRef, SourceRef};
-use crate::pcm::{db_to_gain, gain_to_db, Pcm};
+use crate::pcm::{db_to_gain, gain_to_db, Fades, Pcm};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Selection {
@@ -301,17 +301,19 @@ pub struct PreviewLevel {
     pub warnings: Vec<String>,
 }
 
-/// The gain `preset` would give the whole of `path`, folded as it folds, by the rule an
-/// export applies to its selection. Measured in one streaming pass, so a long file is never
-/// held whole; the preset's resampling is skipped, which can move the true peak by a hair.
-pub fn preview_level(path: &Path, preset: &ExportPreset, abort: &dyn Fn() -> bool) -> Result<PreviewLevel> {
+/// The gain `preset` would give `selection` of `path`, or the whole of it, under `fades` and
+/// folded as the preset folds, by the rule an export applies. Measured in one streaming pass,
+/// so a long span is never held whole; the preset's resampling is skipped, which can move the
+/// true peak by a hair.
+pub fn preview_level(path: &Path, preset: &ExportPreset, selection: Option<Selection>, fades: Fades, abort: &dyn Fn() -> bool) -> Result<PreviewLevel> {
     if matches!(preset.normalize, Normalize::None) {
         return Ok(PreviewLevel::default());
     }
-    Ok(preview_level_from(&loudness::measure_file(path, preset.mono, abort)?, preset))
+    let span = selection.map(|s| (s.start_secs, s.end_secs));
+    Ok(preview_level_from(&loudness::measure_file(path, span, fades, preset.mono, abort)?, preset))
 }
 
-/// `preview_level` from a measurement of the file folded as `preset` folds it.
+/// `preview_level` from a measurement of the span folded as `preset` folds it.
 pub fn preview_level_from(l: &Loudness, preset: &ExportPreset) -> PreviewLevel {
     let mut level = PreviewLevel::default();
     level.gain_db = normalize_gain(&preset.normalize, db_to_gain(l.sample_peak_dbfs), || Ok(*l), &mut Measured::default(), &mut level.warnings).unwrap_or_default();

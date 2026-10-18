@@ -19,15 +19,15 @@ use egui_phosphor::regular as icons;
 use hark_core::audition::{Clip, Player, Source};
 use hark_core::config::Normalize;
 use hark_core::export::{ExportRequest, PreviewLevel, Selection};
-use hark_core::pcm::DownmixMode;
+use hark_core::pcm::{DownmixMode, Fades};
 use hark_core::library::{CardState, ChannelClass, Query, Sort, SortKey};
 use hark_core::copies::CopyRequest;
 use hark_core::keys::Action;
 use hark_core::{Config, Db, ExportPreset, FileRecord, Loudness, Peaks};
 
 use theme::Theme;
-use waveform::{WaveEvent, WaveState};
-use worker::{Done, Folded, Job, LoadRequest, Loaded, ScanPhase, Worker};
+use waveform::{ClipFades, SelectionLevel, WaveEvent, WaveState};
+use worker::{Done, Folded, Job, LoadRequest, Loaded, ScanPhase, Span, Worker};
 
 /// Twenty minutes of stereo at 48 kHz, decoded audio and peaks together.
 const CACHE_BYTES: usize = 48_000 * 60 * 20 * 2 * 4;
@@ -170,6 +170,16 @@ fn clip_key(c: &Clip) -> ClipKey {
     (c.start, c.end, c.looped, c.fade_in, c.fade_out, c.fade_shape, c.fold)
 }
 
+/// A span's measurement in flight, and when it was asked for.
+struct Asked {
+    span: Span,
+    since: Instant,
+}
+
+/// A measurement still running this long after it was asked for shows in the selection; a
+/// shorter one lands before anyone would see it.
+const MEASURING_SHOWS_AFTER: Duration = Duration::from_millis(150);
+
 /// An envelope a whole-file pass is building: the analysis of `path` (`mode` `None`) or its
 /// fold.
 struct Building {
@@ -290,6 +300,13 @@ struct App {
     /// it was to measure.
     folded: Option<(PathBuf, DownmixMode, Arc<Folded>)>,
     fold_asked: Option<(PathBuf, DownmixMode, bool)>,
+    /// The selection's level under the preview: the last span measured, and the measurement
+    /// in flight.
+    span_level: Option<(Span, Result<Loudness, String>)>,
+    span_asked: Option<Asked>,
+    /// A selection or fade number field is being dragged, which edits the clip as a drag on
+    /// the wave does.
+    fields_dragging: bool,
     /// At most one analysis and one fold, each as far as its pass has got. Each kind runs one
     /// pass at a time, so a result of that kind ends whatever of it is still here.
     building: Vec<Building>,
@@ -405,6 +422,9 @@ impl App {
             analysis_asked: None,
             folded: None,
             fold_asked: None,
+            span_level: None,
+            span_asked: None,
+            fields_dragging: false,
             building: Vec::new(),
             pass_error: None,
             transport_h: 34.0,
@@ -682,6 +702,8 @@ impl App {
         let path = self.files[i].path.clone();
         let is_new = self.current.as_ref().map(|c| c.path != path).unwrap_or(true);
         if is_new {
+            self.stop();
+            self.synced = None;
             self.export_name.clear();
             if let Some(l) = self.cache.get(&path).cloned() {
                 self.show_loaded(l);
@@ -751,6 +773,12 @@ impl App {
         (self.preset.mono.is_some() && self.folded_exact().is_none()) || (self.previewing_level() && self.preview_measurement().is_none())
     }
 
+    /// The clip is being edited by a drag, on the wave or on a number field: what follows an
+    /// edit waits for it to end.
+    fn editing(&self) -> bool {
+        self.wave.dragging() || self.fields_dragging
+    }
+
     /// The current file folded by the preset's own downmix.
     fn folded_exact(&self) -> Option<&Arc<Folded>> {
         let (cur, mode) = (self.current.as_ref()?, self.preset.mono?);
@@ -771,6 +799,52 @@ impl App {
         self.preview_measurement().filter(|_| self.previewing_level()).map(|l| hark_core::export::preview_level_from(&l, &self.preset))
     }
 
+    /// What the preview's level is of when it is not the whole file as it stands: the
+    /// selection, or the whole file under its fades, faded and folded as the preview hears it.
+    fn preview_span(&self) -> Option<Span> {
+        let cur = self.current.as_ref()?;
+        let w = &self.wave;
+        let fades = Fades { in_secs: w.fade_in, out_secs: w.fade_out, shape: w.fade_shape };
+        if w.selection.is_none() && fades.is_zero() {
+            return None;
+        }
+        Some(Span { path: cur.path.clone(), secs: w.bounds(cur.duration_secs), fades, fold: self.preset.mono })
+    }
+
+    /// The preset's level of the preview's span, once measured.
+    fn selection_level(&self) -> Option<PreviewLevel> {
+        let span = self.preview_span().filter(|_| self.previewing_level())?;
+        let (measured, result) = self.span_level.as_ref()?;
+        (*measured == span).then(|| result.as_ref().ok()).flatten().map(|l| hark_core::export::preview_level_from(l, &self.preset))
+    }
+
+    /// How the wave draws the selection: at its own level once measured, as far as the
+    /// measurement has got until then, and as the rest of the file when nothing is selected or
+    /// the preview's level is off.
+    fn wave_selection_level(&self) -> SelectionLevel {
+        let Some(span) = self.preview_span().filter(|_| self.previewing_level() && self.wave.selection.is_some()) else { return SelectionLevel::Same };
+        let gain_of = |l: &Loudness| hark_core::pcm::db_to_gain(hark_core::export::preview_level_from(l, &self.preset).gain_db.unwrap_or(0.0));
+        let last = self.span_level.as_ref().filter(|(s, _)| s.path == span.path);
+        if let Some((s, result)) = last {
+            if *s == span {
+                return match result {
+                    Ok(l) => SelectionLevel::Gain(gain_of(l)),
+                    Err(_) => SelectionLevel::Same,
+                };
+            }
+        }
+        // Until this span is measured the selection keeps the level it had: an edit of the
+        // measured selection keeps that one's, a selection drawn elsewhere has the file's.
+        // Nothing shows through a drag or a measurement quick enough to land unseen; only one
+        // still running after `MEASURING_SHOWS_AFTER` shows itself.
+        let overlaps = |s: &Span| s.secs.0 < span.secs.1 && span.secs.0 < s.secs.1;
+        let kept = last.filter(|(s, _)| overlaps(s)).and_then(|(_, r)| r.as_ref().ok()).map(gain_of).unwrap_or(hark_core::pcm::db_to_gain(self.file_level_db()));
+        match self.span_asked.as_ref().filter(|a| a.span == span && a.since.elapsed() >= MEASURING_SHOWS_AFTER) {
+            Some(_) => SelectionLevel::Measuring { gain: kept },
+            None => SelectionLevel::Gain(kept),
+        }
+    }
+
     /// The selection with its fades as a clip, or the whole file without one.
     fn selection_clip(&self) -> Option<Clip> {
         let (Some(player), Some(cur)) = (&self.player, &self.current) else { return None };
@@ -788,14 +862,33 @@ impl App {
     /// Asks the worker for what the preview of the current file needs and does not have yet.
     fn request_preview(&mut self) {
         let Some(cur) = self.current.as_ref().filter(|_| self.preview) else { return };
-        let Some(mode) = self.preset.mono else { return };
-        let measure = !matches!(self.preset.normalize, Normalize::None);
-        let have = self.folded_exact().map(|f| f.loudness.is_some() || !measure).unwrap_or(false);
-        let asked = |m: bool| self.fold_asked.as_ref() == Some(&(cur.path.clone(), mode, m));
-        if !have && !asked(true) && !asked(measure) {
-            self.worker.fold(cur.path.clone(), cur.source.clone(), mode, measure);
-            self.fold_asked = Some((cur.path.clone(), mode, measure));
+        if let Some(mode) = self.preset.mono {
+            let measure = !matches!(self.preset.normalize, Normalize::None);
+            let have = self.folded_exact().map(|f| f.loudness.is_some() || !measure).unwrap_or(false);
+            let asked = |m: bool| self.fold_asked.as_ref() == Some(&(cur.path.clone(), mode, m));
+            if !have && !asked(true) && !asked(measure) {
+                self.worker.fold(cur.path.clone(), cur.source.clone(), mode, measure);
+                self.fold_asked = Some((cur.path.clone(), mode, measure));
+            }
         }
+        // The span's level waits for the selection and fades to rest: a drag would replace
+        // the request every frame.
+        let Some(span) = self.preview_span().filter(|_| self.previewing_level() && !self.editing()) else { return };
+        let measured = self.span_level.as_ref().is_some_and(|(s, _)| *s == span);
+        let asked = self.span_asked.as_ref().is_some_and(|a| a.span == span);
+        if measured || asked {
+            return;
+        }
+        let held = match (&cur.source, span.fold) {
+            (Source::File { .. }, _) => None,
+            (Source::Whole(pcm), None) => Some(pcm.clone()),
+            (Source::Whole(_), Some(_)) => match self.folded_exact() {
+                Some(f) => f.samples.clone(),
+                None => return,
+            },
+        };
+        self.worker.measure_span(span.clone(), held);
+        self.span_asked = Some(Asked { span, since: Instant::now() });
     }
 
     /// The preview's level owns playback and the waveform: the preset normalises.
@@ -803,13 +896,44 @@ impl App {
         self.preview && !matches!(self.preset.normalize, Normalize::None)
     }
 
-    /// The gain playback and the waveform run at, in dB: the preset's level under the preview
-    /// (unity until the file's first level comes, and for silence), the fader otherwise.
-    fn level_db(&self) -> f64 {
+    /// The fades the wave draws the clip under: none with the preview off or nothing to fade,
+    /// the handles' own when the preview has no level to wait for, and the measured span's
+    /// otherwise.
+    fn wave_clip_fades(&self) -> Option<ClipFades> {
+        let span = self.preview_span().filter(|_| self.preview)?;
+        if !self.previewing_level() {
+            return Some(ClipFades { secs: span.secs, fades: span.fades });
+        }
+        let (measured, _) = self.span_level.as_ref().filter(|(s, _)| s.path == span.path)?;
+        Some(ClipFades { secs: measured.secs, fades: measured.fades })
+    }
+
+    /// The gain the file plays and draws at, in dB: the preset's level of the whole file under
+    /// the preview (unity until its first level comes, and for silence), the fader otherwise.
+    fn file_level_db(&self) -> f64 {
         if !self.previewing_level() {
             return self.gain_db as f64;
         }
         self.preview_level().and_then(|l| l.gain_db).unwrap_or(0.0)
+    }
+
+    /// The gain the selection plays and draws at, in dB: the preset's level of the selection
+    /// once measured, the file's until then and without a selection.
+    fn clip_level_db(&self) -> f64 {
+        match self.selection_level() {
+            Some(l) => l.gain_db.unwrap_or(0.0),
+            None => self.file_level_db(),
+        }
+    }
+
+    /// The gain playback runs at, in dB: the selection's, or the file's while playing outside
+    /// the selection.
+    fn level_db(&self) -> f64 {
+        if self.is_playing() && self.synced.is_none() {
+            self.file_level_db()
+        } else {
+            self.clip_level_db()
+        }
     }
 
     fn play(&mut self, from_secs: Option<f64>) {
@@ -838,7 +962,7 @@ impl App {
             return;
         }
         if clip.source.is_streamed() {
-            if self.wave.dragging() {
+            if self.editing() {
                 return;
             }
             player.play_from(clip, player.position());
@@ -1009,10 +1133,10 @@ impl App {
 
     /// The picture under the pointer while a span of a file is dragged out: its envelope on a
     /// translucent card, at the display's scale.
-    fn ghost(&self, ctx: &egui::Context, peaks: &hark_core::Peaks, span: (f64, f64), gain: f32) -> dnd::Image {
+    fn ghost(&self, ctx: &egui::Context, peaks: &hark_core::Peaks, span: (f64, f64), gain_at: &dyn Fn(f64) -> f32) -> dnd::Image {
         let scale = ctx.pixels_per_point().round().max(1.0) as i32;
         let colors = waveform::GhostColors { card: self.theme.bg_deep, peak: self.theme.accent.gamma_multiply(0.7), rms: self.theme.accent };
-        waveform::ghost(peaks, span, gain, &colors, scale)
+        waveform::ghost(peaks, span, gain_at, &colors, scale)
     }
 
     fn copy_out(&mut self, paths: Vec<PathBuf>) {
@@ -1112,6 +1236,15 @@ impl App {
                         for (have, new) in b.peaks.bins.iter_mut().zip(bins) {
                             have.extend(new);
                         }
+                    }
+                }
+                Done::SpanMeasured(span, result) => {
+                    if self.span_asked.as_ref().is_some_and(|a| a.span == span) {
+                        self.span_asked = None;
+                        if let Err(e) = &result {
+                            self.set_status(format!("Level of the selection: {e}"), true);
+                        }
+                        self.span_level = Some((span, result));
                     }
                 }
                 Done::Copied { result, dragged } => match result {
@@ -1880,7 +2013,7 @@ impl App {
         if let Some(i) = dragged {
             let path = self.files[i].path.clone();
             let what = self.files[i].name.clone();
-            let image = self.cache.get(&path).and_then(|l| l.peaks.clone()).map(|p| self.ghost(ui.ctx(), &p, (0.0, p.duration_secs()), 1.0));
+            let image = self.cache.get(&path).and_then(|l| l.peaks.clone()).map(|p| self.ghost(ui.ctx(), &p, (0.0, p.duration_secs()), &|_| 1.0));
             self.drag_out(vec![path], image, None, &what);
         } else if let Some(i) = double {
             self.select(i, true);
@@ -2040,13 +2173,28 @@ impl App {
         const FADER_W: f32 = 36.0;
         let level_db = self.level_db();
         let inert = self.previewing_level();
-        self.wave.gain = hark_core::pcm::db_to_gain(level_db);
-        if let Some(p) = self.player.as_ref().filter(|p| p.gain() != self.wave.gain) {
-            p.set_gain(self.wave.gain);
+        // Without a selection the whole file is the clip, fades and all; with one, the file
+        // around it keeps its own level.
+        self.wave.gain = hark_core::pcm::db_to_gain(if self.wave.selection.is_some() { self.file_level_db() } else { self.clip_level_db() });
+        self.wave.selection_level = self.wave_selection_level();
+        // Taken up between drags only, so the picture moves when a drag ends, as the level does.
+        if !self.editing() {
+            self.wave.clip_fades = self.wave_clip_fades();
         }
-        let level_hint = match self.preview_level() {
-            Some(l) => std::iter::once("Previewing the preset's level".to_string()).chain(l.warnings).collect::<Vec<_>>().join("\n"),
-            None => "Previewing the preset's level: measuring the file".to_string(),
+        if let Some(a) = self.span_asked.as_ref().filter(|a| a.since.elapsed() < MEASURING_SHOWS_AFTER) {
+            ui.ctx().request_repaint_after(MEASURING_SHOWS_AFTER - a.since.elapsed());
+        }
+        let play_gain = hark_core::pcm::db_to_gain(level_db);
+        if let Some(p) = self.player.as_ref().filter(|p| p.gain() != play_gain) {
+            p.set_gain(play_gain);
+        }
+        let with_warnings = |head: &str, l: PreviewLevel| std::iter::once(head.to_string()).chain(l.warnings).collect::<Vec<_>>().join("\n");
+        let of = if self.wave.selection.is_some() { "the selection" } else { "the file under its fades" };
+        let level_hint = match (self.preview_span().is_some(), self.selection_level(), self.preview_level()) {
+            (true, Some(l), _) => with_warnings(&format!("Previewing the preset's level of {of}"), l),
+            (true, None, _) => format!("Previewing the preset's level: measuring {of}"),
+            (false, _, Some(l)) => with_warnings("Previewing the preset's level", l),
+            (false, _, None) => "Previewing the preset's level: measuring the file".to_string(),
         };
         let mut event = WaveEvent::None;
         let mut wave_resp = None;
@@ -2127,7 +2275,9 @@ impl App {
         match event {
             WaveEvent::Seek(t) => self.play(Some(t)),
             WaveEvent::DragOut => {
-                let image = peaks.as_ref().map(|p| self.ghost(ui.ctx(), p, self.wave.bounds(duration), self.wave.gain));
+                let gain = hark_core::pcm::db_to_gain(self.clip_level_db());
+                let fades = self.wave.clip_fades;
+                let image = peaks.as_ref().map(|p| self.ghost(ui.ctx(), p, self.wave.bounds(duration), &|t| gain * fades.map_or(1.0, |f| f.gain(t))));
                 self.drag_selection(image);
             }
             WaveEvent::None => {}
@@ -2214,6 +2364,7 @@ impl App {
             let had = self.wave.selection.is_some();
             let a = ui.add(secs_field(&mut sel.0, duration));
             let b = ui.add(secs_field(&mut sel.1, duration));
+            self.fields_dragging = a.dragged() || b.dragged();
             if (a.changed() || b.changed()) && (had || sel.1 > sel.0) {
                 self.wave.selection = if sel.1 > sel.0 { Some(sel) } else { None };
             }
@@ -2234,12 +2385,15 @@ impl App {
             }
             group(ui);
             ui.label(RichText::new("Fade").color(self.theme.muted));
-            if ui.add(secs_field(&mut self.wave.fade_in, duration)).changed() {
+            let fade_in = ui.add(secs_field(&mut self.wave.fade_in, duration));
+            if fade_in.changed() {
                 self.wave.touch_fade(waveform::Fade::In);
             }
-            if ui.add(secs_field(&mut self.wave.fade_out, duration)).changed() {
+            let fade_out = ui.add(secs_field(&mut self.wave.fade_out, duration));
+            if fade_out.changed() {
                 self.wave.touch_fade(waveform::Fade::Out);
             }
+            self.fields_dragging |= fade_in.dragged() || fade_out.dragged();
             egui::ComboBox::from_id_salt("fade-shape")
                 .width(64.0)
                 .selected_text(match self.wave.fade_shape {

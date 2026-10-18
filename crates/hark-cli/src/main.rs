@@ -197,7 +197,7 @@ enum Cmd {
         #[arg(long, value_name = "MB")]
         stream_above: Option<f64>,
         /// Play it as an export through this preset would sound: folded to mono when the
-        /// preset downmixes, and at the level it normalises the whole file to.
+        /// preset downmixes, and at the level it normalises the selection, or the whole file, to.
         #[arg(long)]
         preset: Option<String>,
     },
@@ -711,7 +711,7 @@ fn run() -> Result<()> {
         }
         Cmd::Analyze { file, store } => {
             let file = abs(&file)?;
-            let l = hark_core::loudness::measure_file(&file, None, &|| false)?;
+            let l = hark_core::loudness::measure_file(&file, None, Default::default(), None, &|| false)?;
             if store {
                 open_db(&project)?.set_loudness(&file, &l)?;
             }
@@ -1117,7 +1117,8 @@ fn run() -> Result<()> {
             let info = hark_core::probe(&file)?;
             let preset = preset.map(|n| config.preset(&n).cloned().ok_or_else(|| anyhow!("unknown preset {n}"))).transpose()?;
             let fold = preset.as_ref().and_then(|p| p.mono);
-            let level = preset.as_ref().map(|p| hark_core::export::preview_level(&file, p, &|| false)).transpose()?.unwrap_or_default();
+            let selection = (start.is_some() || end.is_some()).then(|| hark_core::Selection { start_secs: start.unwrap_or(0.0), end_secs: end.unwrap_or(info.duration_secs) });
+            let level = preset.as_ref().map(|p| hark_core::export::preview_level(&file, p, selection, Default::default(), &|| false)).transpose()?.unwrap_or_default();
             if let Some(db) = level.gain_db {
                 player.set_gain(hark_core::pcm::db_to_gain(db));
             }

@@ -12,7 +12,7 @@ use hark_core::config::Normalize;
 use hark_core::copies::Plan;
 use hark_core::export::{ExportRequest, ExportResult};
 use hark_core::library::ScanReport;
-use hark_core::pcm::DownmixMode;
+use hark_core::pcm::{DownmixMode, Fades};
 use hark_core::peaks::{Bin, PeaksBuilder};
 use hark_core::{ExportPreset, Loudness, Pcm, Peaks};
 
@@ -73,6 +73,16 @@ pub struct Folded {
     pub loudness: Option<Loudness>,
 }
 
+/// A span of a file in seconds, faded and folded as the preview hears it: what one
+/// measurement of the preview's level is of.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Span {
+    pub path: PathBuf,
+    pub secs: (f64, f64),
+    pub fades: Fades,
+    pub fold: Option<DownmixMode>,
+}
+
 /// Where a running scan is: walking the roots, or hashing files so moved marks find theirs.
 #[derive(Clone, Copy, Debug)]
 pub enum ScanPhase {
@@ -95,6 +105,8 @@ pub enum Done {
     /// Bins an analysis (`mode` `None`) or a fold of `path` closed since its last part, from
     /// bin `from`; a part from bin 0 starts the envelope over.
     Partial { path: PathBuf, mode: Option<DownmixMode>, from: usize, sample_rate: u32, bins: Vec<Vec<Bin>> },
+    /// The loudness of a span, for the preview's level of a selection.
+    SpanMeasured(Span, Result<Loudness, String>),
 }
 
 /// How often a whole-file pass sends the bins it has closed.
@@ -171,6 +183,7 @@ pub struct Worker {
     selected: Arc<Latest<LoadRequest>>,
     analysis: Arc<Latest<(PathBuf, Option<Arc<Peaks>>)>>,
     fold: Arc<Latest<(PathBuf, Source, DownmixMode, bool)>>,
+    span: Arc<Latest<(Span, Option<Arc<Pcm>>)>>,
 }
 
 impl Worker {
@@ -215,11 +228,15 @@ impl Worker {
             let result = analyze(&path, cached, abort, emit);
             (!abort()).then(|| Done::Analyzed(path, result.map_err(|e| format!("{e:#}"))))
         });
-        let fold = Latest::spawn(done_tx, ctx, |(path, source, mode, measure): (PathBuf, Source, DownmixMode, bool), abort, emit| {
+        let fold = Latest::spawn(done_tx.clone(), ctx.clone(), |(path, source, mode, measure): (PathBuf, Source, DownmixMode, bool), abort, emit| {
             let result = fold(&path, &source, mode, measure, abort, emit).map_err(|e| format!("{e:#}"));
             (!abort()).then_some(Done::Folded { path, mode, measure, result })
         });
-        Worker { tx, rx, selected, analysis, fold }
+        let span = Latest::spawn(done_tx, ctx, |(span, held): (Span, Option<Arc<Pcm>>), abort, _| {
+            let result = measure_span(&span, held, abort).map_err(|e| format!("{e:#}"));
+            (!abort()).then_some(Done::SpanMeasured(span, result))
+        });
+        Worker { tx, rx, selected, analysis, fold, span }
     }
 
     pub fn send(&self, job: Job) {
@@ -242,6 +259,13 @@ impl Worker {
     /// `measure` its loudness, for the preview's level.
     pub fn fold(&self, path: PathBuf, source: Source, mode: DownmixMode, measure: bool) {
         self.fold.put((path, source, mode, measure));
+    }
+
+    /// Asks for the loudness of `span`, for the preview's level of a selection: metered from
+    /// `held`, the file's samples already folded as the span says, or streamed from the file
+    /// without them. Replaces any request still waiting.
+    pub fn measure_span(&self, span: Span, held: Option<Arc<Pcm>>) {
+        self.span.put((span, held));
     }
 
     pub fn poll(&self) -> Vec<Done> {
@@ -382,6 +406,18 @@ fn fold(path: &Path, source: &Source, mode: DownmixMode, measure: bool, abort: &
         }
     }
     Ok(Folded { peaks: Arc::new(builder.finish()), samples: None, loudness: meter.and_then(|m| m.finish()) })
+}
+
+/// The loudness of a span from samples in memory, or streamed from its file; gives up as
+/// soon as `abort` says so.
+fn measure_span(span: &Span, held: Option<Arc<Pcm>>, abort: &dyn Fn() -> bool) -> anyhow::Result<Loudness> {
+    let (a, b) = span.secs;
+    if let Some(pcm) = held {
+        let mut cut = pcm.slice_frames(pcm.frame_at(a), pcm.frame_at(b));
+        span.fades.apply(&mut cut);
+        return hark_core::loudness::measure(&cut);
+    }
+    hark_core::loudness::measure_file(&span.path, Some((a, b)), span.fades, span.fold, abort)
 }
 
 /// Scans every root, then matches orphaned marks; `progress` hears the phase a few times a

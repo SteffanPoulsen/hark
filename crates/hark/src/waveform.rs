@@ -5,7 +5,7 @@
 
 use egui::epaint::{Mesh, Vertex, WHITE_UV};
 use egui::{Align2, Color32, CursorIcon, FontId, PointerButton, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
-use hark_core::pcm::FadeShape;
+use hark_core::pcm::{FadeShape, Fades};
 use hark_core::peaks::sample_columns;
 use hark_core::{Pcm, Peaks};
 
@@ -44,6 +44,11 @@ pub struct WaveState {
     pub fade_shape: FadeShape,
     /// Linear gain the drawing is scaled by, so the picture follows the playback volume.
     pub gain: f32,
+    /// How the selection draws against the rest of the file.
+    pub selection_level: SelectionLevel,
+    /// The fades the clip draws under, as the preview hears them; `None` draws the file as it
+    /// is on disk, with the fades as curves over it.
+    pub clip_fades: Option<ClipFades>,
     drag: Option<Drag>,
     /// A span lit up for a moment, from when: the part just exported.
     flash: Option<((f64, f64), std::time::Instant)>,
@@ -59,6 +64,42 @@ pub struct WaveState {
 pub enum Fade {
     In,
     Out,
+}
+
+/// The selection's gain under the preview's level, while the rest of the file keeps its own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SelectionLevel {
+    /// The file's gain.
+    Same,
+    Gain(f32),
+    /// Being measured: drawn dimmed at `gain`, the level it had, until the result lands.
+    Measuring { gain: f32 },
+}
+
+/// The fades the clip draws under, and the span they belong to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipFades {
+    pub secs: (f64, f64),
+    pub fades: Fades,
+}
+
+impl ClipFades {
+    /// The fades' gain at `t` seconds; unity outside their span.
+    pub fn gain(&self, t: f64) -> f32 {
+        let (a, b) = self.secs;
+        let f = &self.fades;
+        if t < a || t > b {
+            return 1.0;
+        }
+        let mut g = 1.0;
+        if f.in_secs > 0.0 && t < a + f.in_secs {
+            g *= f.shape.gain(((t - a) / f.in_secs) as f32);
+        }
+        if f.out_secs > 0.0 && t > b - f.out_secs {
+            g *= f.shape.gain(((b - t) / f.out_secs) as f32);
+        }
+        g
+    }
 }
 
 pub enum WaveEvent {
@@ -87,7 +128,7 @@ impl WaveState {
 
 impl Default for WaveState {
     fn default() -> Self {
-        WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), gain: 1.0, drag: None, flash: None, last_edge: None, last_fade: None }
+        WaveState { view: (0.0, 0.0), selection: None, fade_in: 0.0, fade_out: 0.0, fade_shape: FadeShape::default(), gain: 1.0, selection_level: SelectionLevel::Same, clip_fades: None, drag: None, flash: None, last_edge: None, last_fade: None }
     }
 }
 
@@ -268,12 +309,14 @@ fn draw_lane_dividers(painter: &egui::Painter, rect: Rect, channels: usize, colo
     }
 }
 
-/// With `samples`, the columns come from them instead of the peaks' bins.
+/// With `samples`, the columns come from them instead of the peaks' bins. `gain_at` scales a
+/// column by the gain at its time, so the picture follows the level and the fades.
 #[allow(clippy::too_many_arguments)]
-fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, samples: Option<&Pcm>, rect: Rect, v0: f64, v1: f64, gain: f32, colors: &WaveColors) {
+fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, samples: Option<&Pcm>, rect: Rect, v0: f64, v1: f64, gain_at: &dyn Fn(f64) -> f32, colors: &WaveColors) {
     let channels = peaks.channels.max(1) as usize;
     let lane_h = rect.height() / channels as f32;
     let cols = rect.width().max(1.0) as usize;
+    let gains: Vec<f32> = (0..cols).map(|i| gain_at(v0 + (i as f64 + 0.5) / cols as f64 * (v1 - v0))).collect();
     for ch in 0..channels {
         let mid = rect.top() + lane_h * (ch as f32 + 0.5);
         let amp = lane_h * 0.46;
@@ -283,11 +326,11 @@ fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, samples: Option<&Pcm>, 
             None => peaks.columns(ch, v0, v1, cols),
         };
         let xs: Vec<f32> = (0..cols).map(|i| rect.left() + i as f32 + 0.5).collect();
-        let top: Vec<f32> = bins.iter().map(|b| mid - (b.max * gain).clamp(-1.0, 1.0) * amp).collect();
-        let bottom: Vec<f32> = bins.iter().map(|b| mid - (b.min * gain).clamp(-1.0, 1.0) * amp).collect();
+        let top: Vec<f32> = bins.iter().zip(&gains).map(|(b, g)| mid - (b.max * g).clamp(-1.0, 1.0) * amp).collect();
+        let bottom: Vec<f32> = bins.iter().zip(&gains).map(|(b, g)| mid - (b.min * g).clamp(-1.0, 1.0) * amp).collect();
         painter.add(band(&xs, &top, &bottom, colors.peak));
-        let rms_top: Vec<f32> = bins.iter().map(|b| mid - (b.rms * gain).clamp(0.0, 1.0) * amp).collect();
-        let rms_bottom: Vec<f32> = bins.iter().map(|b| mid + (b.rms * gain).clamp(0.0, 1.0) * amp).collect();
+        let rms_top: Vec<f32> = bins.iter().zip(&gains).map(|(b, g)| mid - (b.rms * g).clamp(0.0, 1.0) * amp).collect();
+        let rms_bottom: Vec<f32> = bins.iter().zip(&gains).map(|(b, g)| mid + (b.rms * g).clamp(0.0, 1.0) * amp).collect();
         painter.add(band(&xs, &rms_top, &rms_bottom, colors.rms));
         let outline: Vec<Pos2> = xs.iter().zip(&top).map(|(&x, &y)| Pos2::new(x, y)).collect();
         painter.add(Shape::line(outline, Stroke::new(1.0, colors.peak.gamma_multiply(1.3))));
@@ -297,7 +340,7 @@ fn draw_envelope(painter: &egui::Painter, peaks: &Peaks, samples: Option<&Pcm>, 
     draw_lane_dividers(painter, rect, channels, colors);
 }
 
-fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64, gain: f32, colors: &WaveColors) {
+fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64, gain_at: &dyn Fn(f64) -> f32, colors: &WaveColors) {
     let channels = pcm.channels.max(1) as usize;
     let lane_h = rect.height() / channels as f32;
     let rate = pcm.sample_rate as f64;
@@ -307,11 +350,12 @@ fn draw_samples(painter: &egui::Painter, pcm: &Pcm, rect: Rect, v0: f64, v1: f64
     let span = v1 - v0;
     let x_of = |f: usize| rect.left() + ((f as f64 / rate - v0) / span) as f32 * rect.width();
     let frames_per_px = (f1 - f0) as f64 / rect.width().max(1.0) as f64;
+    let gains: Vec<f32> = (f0..f1).map(|f| gain_at(f as f64 / rate)).collect();
     for ch in 0..channels {
         let mid = rect.top() + lane_h * (ch as f32 + 0.5);
         let amp = lane_h * 0.46;
         painter.hline(rect.x_range(), mid, Stroke::new(1.0, colors.axis));
-        let pts: Vec<Pos2> = (f0..f1).map(|f| Pos2::new(x_of(f), mid - (pcm.samples[f * channels + ch] * gain).clamp(-1.0, 1.0) * amp)).collect();
+        let pts: Vec<Pos2> = (f0..f1).zip(&gains).map(|(f, g)| Pos2::new(x_of(f), mid - (pcm.samples[f * channels + ch] * g).clamp(-1.0, 1.0) * amp)).collect();
         if pts.len() >= 2 {
             let xs: Vec<f32> = pts.iter().map(|p| p.x).collect();
             let top: Vec<f32> = pts.iter().map(|p| p.y.min(mid)).collect();
@@ -400,13 +444,38 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
 
     // The wave itself.
     let frames_per_px = span * peaks.sample_rate as f64 / rect.width().max(1.0) as f64;
-    let wave = match status {
-        Some(_) => WaveColors { peak: colors.peak.gamma_multiply(0.2), rms: colors.rms.gamma_multiply(0.2), ..*colors },
-        None => *colors,
-    };
-    match samples {
-        Some(pcm) if frames_per_px * (pcm.sample_rate as f64 / peaks.sample_rate as f64) <= SAMPLE_VIEW_FRAMES_PER_PX => draw_samples(&painter, pcm, rect, v0, v1, state.gain, &wave),
-        _ => draw_envelope(&painter, peaks, samples.filter(|_| frames_per_px < peaks.bin_frames as f64), rect, v0, v1, state.gain, &wave),
+    let dimmed = |c: &WaveColors| WaveColors { peak: c.peak.gamma_multiply(0.2), rms: c.rms.gamma_multiply(0.2), ..*c };
+    let wave = if status.is_some() { dimmed(colors) } else { *colors };
+    // The wave goes down in segments when the selection has a gain of its own: the file at
+    // its gain either side, the selection at its, dimmed while a measurement of it runs.
+    // Each segment is the span, its gain, whether it is dimmed, and whether it is the clip,
+    // which alone draws under the fades.
+    let mut segments: Vec<(f64, f64, f32, bool, bool)> = Vec::new();
+    match (state.selection, state.selection_level) {
+        (Some((a, b)), level) if level != SelectionLevel::Same && b > a => {
+            segments.push((v0, a, state.gain, false, false));
+            match level {
+                SelectionLevel::Gain(g) => segments.push((a, b, g, false, true)),
+                SelectionLevel::Measuring { gain } => segments.push((a, b, gain, true, true)),
+                SelectionLevel::Same => {}
+            }
+            segments.push((b, v1, state.gain, false, false));
+        }
+        _ => segments.push((v0, v1, state.gain, false, true)),
+    }
+    for (s0, s1, gain, dim, clip) in segments {
+        let (s0, s1) = (s0.max(v0), s1.min(v1));
+        let seg = Rect::from_min_max(Pos2::new(x_of(s0), rect.top()), Pos2::new(x_of(s1), rect.bottom()));
+        if s1 <= s0 || seg.width() < 1.0 {
+            continue;
+        }
+        let wave = if dim { dimmed(&wave) } else { wave };
+        let fades = state.clip_fades.filter(|_| clip);
+        let gain_at = |t: f64| gain * fades.map_or(1.0, |f| f.gain(t));
+        match samples {
+            Some(pcm) if frames_per_px * (pcm.sample_rate as f64 / peaks.sample_rate as f64) <= SAMPLE_VIEW_FRAMES_PER_PX => draw_samples(&painter, pcm, seg, s0, s1, &gain_at, &wave),
+            _ => draw_envelope(&painter, peaks, samples.filter(|_| frames_per_px < peaks.bin_frames as f64), seg, s0, s1, &gain_at, &wave),
+        }
     }
     if let Some((text, busy)) = status {
         draw_status(ui, &painter, rect, text, busy);
@@ -431,6 +500,18 @@ pub fn show(ui: &mut Ui, state: &mut WaveState, peaks: Option<&Peaks>, samples: 
             let at = Pos2::new((xa + xb) * 0.5 - length.size().x * 0.5, lane.center().y - length.size().y * 0.5);
             painter.rect_filled(Rect::from_min_size(at, length.size()).expand2(Vec2::new(4.0, 1.0)), 2.0, visuals.faint_bg_color);
             painter.galley(at, length, colors.fade);
+        }
+        // A measurement under way reads like the whole wave's status, inside the selection;
+        // one too narrow for the words gets the spinner alone.
+        if matches!(state.selection_level, SelectionLevel::Measuring { .. }) && status.is_none() {
+            const SPINNER: f32 = 14.0;
+            let text = "Measuring level";
+            let needed = SPINNER + 8.0 + painter.layout_no_wrap(text.to_string(), FontId::proportional(14.0), Color32::WHITE).size().x;
+            if xb - xa >= needed + 8.0 {
+                draw_status(ui, &painter, Rect::from_min_max(Pos2::new(xa, rect.top()), Pos2::new(xb, rect.bottom())), text, true);
+            } else if xb - xa >= SPINNER {
+                egui::Spinner::new().size(SPINNER).color(visuals.weak_text_color()).paint_at(ui, Rect::from_center_size(Pos2::new((xa + xb) * 0.5, rect.center().y), Vec2::splat(SPINNER)));
+            }
         }
     }
     if let Some((span, since)) = state.flash {
@@ -583,7 +664,7 @@ pub struct GhostColors {
 
 /// The drag picture: the span's envelope, all channels folded into one, on a rounded
 /// translucent card of 200 by 56 logical pixels, drawn at `scale` buffer pixels per logical.
-pub fn ghost(peaks: &Peaks, span: (f64, f64), gain: f32, colors: &GhostColors, scale: i32) -> crate::dnd::Image {
+pub fn ghost(peaks: &Peaks, span: (f64, f64), gain_at: &dyn Fn(f64) -> f32, colors: &GhostColors, scale: i32) -> crate::dnd::Image {
     let (w, h) = (200 * scale as usize, 56 * scale as usize);
     let radius = 6.0 * scale as f32;
     let mut rgba = vec![0u8; w * h * 4];
@@ -616,6 +697,7 @@ pub fn ghost(peaks: &Peaks, span: (f64, f64), gain: f32, colors: &GhostColors, s
     let rms = Color32::from_rgba_unmultiplied(colors.rms.r(), colors.rms.g(), colors.rms.b(), 240);
     for (k, b) in merged.iter().enumerate() {
         let x = inset + k;
+        let gain = gain_at(span.0 + (k as f64 + 0.5) / cols as f64 * (span.1 - span.0));
         let y_of = |v: f32| (mid - (v * gain).clamp(-1.0, 1.0) * half).round() as usize;
         let (top, bottom) = (y_of(b.max).min(y_of(b.min)), y_of(b.min).max(y_of(b.max)));
         for y in top..=bottom.min(h - 1) {

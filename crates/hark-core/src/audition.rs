@@ -105,6 +105,16 @@ impl Bounds {
         Bounds { start: clip.start, end: clip.end, looped: clip.looped, fade_in: clip.fade_in, fade_out: clip.fade_out, fade_shape: clip.fade_shape, fold: clip.fold }
     }
 
+    /// Kept inside a whole source: the window may send the bounds of the file it now shows to
+    /// a voice still playing the one before, and the callback must never read past its buffer.
+    fn within(mut self, feed: &Feed) -> Bounds {
+        if let Feed::Whole(p) = feed {
+            self.end = self.end.min(p.frames());
+            self.start = self.start.min(self.end);
+        }
+        self
+    }
+
     fn envelope(&self, pos: usize) -> f32 {
         let mut g = 1.0;
         if self.fade_in > 0 && pos >= self.start && pos < self.start + self.fade_in {
@@ -334,6 +344,7 @@ impl Mixer {
             match cmd {
                 Cmd::Play(feed, bounds, from) => {
                     self.retire();
+                    let bounds = bounds.within(&feed);
                     let pos = from.clamp(bounds.start, bounds.end);
                     self.voice = Some(Voice { feed, bounds, pos, age: 0 });
                     self.shared.playing.store(true, Ordering::Relaxed);
@@ -360,7 +371,7 @@ impl Mixer {
                                 self.dying = Some((Voice { feed: Feed::Whole(p.clone()), bounds: v.bounds, pos: v.pos, age: v.age }, self.declick));
                                 v.age = 0;
                             }
-                            v.bounds = bounds;
+                            v.bounds = bounds.within(&v.feed);
                         }
                     }
                 }
