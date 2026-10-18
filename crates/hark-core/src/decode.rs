@@ -267,7 +267,7 @@ pub fn is_audio_extension(ext: &str) -> bool {
     matches!(
         ext.to_ascii_lowercase().as_str(),
         "wav" | "wave" | "flac" | "ogg" | "oga" | "mp3" | "aac" | "aif" | "aiff" | "aifc" | "m4a" | "mp4"
-            | "caf" | "mka" | "webm" | "opus"
+            | "caf" | "mka" | "webm"
     )
 }
 

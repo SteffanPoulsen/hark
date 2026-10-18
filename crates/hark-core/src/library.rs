@@ -313,6 +313,9 @@ impl Db {
         if !has_sample_peak {
             conn.execute_batch("ALTER TABLE files ADD COLUMN sample_peak REAL")?;
         }
+        // 0.5.0 listed files it had no decoder for, under the codec's bare id; the next scan
+        // skips them.
+        conn.execute("DELETE FROM files WHERE codec LIKE '0x%'", [])?;
         Ok(())
     }
 

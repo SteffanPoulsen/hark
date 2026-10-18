@@ -84,14 +84,13 @@ const CONTROL_H: f32 = 28.0;
 const SEARCH_LIMIT: usize = 2000;
 
 /// File types offered by the filter, each with the extensions it stands for.
-const FILE_TYPES: [(&str, &[&str]); 7] = [
+const FILE_TYPES: [(&str, &[&str]); 6] = [
     ("wav", &["wav", "wave"]),
     ("flac", &["flac"]),
     ("ogg", &["ogg", "oga"]),
     ("mp3", &["mp3"]),
     ("aiff", &["aif", "aiff", "aifc"]),
     ("m4a", &["m4a", "mp4"]),
-    ("opus", &["opus"]),
 ];
 
 type ConfigStamp = (Option<std::time::SystemTime>, Option<std::time::SystemTime>);
