@@ -390,6 +390,8 @@ struct App {
     /// egui does not centre buttons on the row they are in.
     search_id: egui::Id,
     tag_edit: Option<(usize, String)>,
+    /// The file menu's new-tag field.
+    new_tag: String,
     /// The action whose key the settings window is waiting for.
     key_capture: Option<Action>,
     /// The bounds the voice was given when it was last played from the selection, which it
@@ -497,6 +499,7 @@ impl App {
             copies_clear: false,
             search_id: egui::Id::new("search"),
             tag_edit: None,
+            new_tag: String::new(),
             key_capture: None,
             play_on_load: false,
             export_name: String::new(),
@@ -1933,6 +1936,7 @@ impl App {
         let mut action: Option<(usize, FileAction)> = None;
         let defs = self.config.tags.clone();
         let favorite_key = self.key_of(Action::Favorite);
+        let mut new_tag = std::mem::take(&mut self.new_tag);
         let shown_folder = match &self.location {
             Some(Location::Folder(d)) if self.search.trim().is_empty() => Some(d.clone()),
             _ => None,
@@ -2117,7 +2121,7 @@ impl App {
                         context = Some(i);
                     }
                     egui::Popup::context_menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                        if let Some(a) = file_menu(ui, f, &defs, &theme, &favorite_key) {
+                        if let Some(a) = file_menu(ui, f, &defs, &theme, &favorite_key, &mut new_tag) {
                             action = Some((i, a));
                         }
                     });
@@ -2180,6 +2184,7 @@ impl App {
                 ui.data_mut(|d| d.insert_persisted(widths_id, widths));
             }
         }
+        self.new_tag = new_tag;
         if let Some(i) = fav_toggle {
             self.toggle_favorite_of(i);
         }
@@ -2214,6 +2219,18 @@ impl App {
         match action {
             FileAction::Favorite => self.toggle_favorite_of(i),
             FileAction::Tag(t) => self.toggle_tag_of(i, &t),
+            FileAction::NewTag(name) => {
+                // A name already defined is put on the file as it is.
+                if self.config.tag(&name).is_none() {
+                    self.config.tags.push(hark_core::TagDef { name: name.clone(), color: None });
+                    if let Err(e) = self.config.save() {
+                        self.set_status(format!("Save config: {e:#}"), true);
+                    }
+                }
+                if !self.files[i].tags.contains(&name) {
+                    self.toggle_tag_of(i, &name);
+                }
+            }
             FileAction::Reveal => {
                 if let Err(e) = reveal(&f.path) {
                     self.set_status(format!("Show in folder: {e}"), true);
@@ -2487,10 +2504,12 @@ impl App {
         let favorite_key = self.key_of(Action::Favorite);
         let file = self.files[i].clone();
         let mut action = None;
-        let menu_button = |ui: &mut egui::Ui, action: &mut Option<FileAction>| {
+        let mut new_tag = std::mem::take(&mut self.new_tag);
+        let theme = self.theme.clone();
+        let mut menu_button = |ui: &mut egui::Ui, action: &mut Option<FileAction>| {
             let b = theme::tool_button(ui, icons::TAG, "Tags").on_hover_text("Favorite, tags and more; also on right-click of a row");
             egui::Popup::menu(&b).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-                *action = file_menu(ui, &file, &defs, &self.theme, &favorite_key);
+                *action = file_menu(ui, &file, &defs, &theme, &favorite_key, &mut new_tag);
             });
         };
         let chips: Vec<(usize, &str)> = file.tags.iter().map(|t| (defs.iter().position(|d| &d.name == t).unwrap_or(defs.len()), t.as_str())).collect();
@@ -2505,6 +2524,7 @@ impl App {
             }
             menu_button(ui, &mut action);
         }
+        self.new_tag = new_tag;
         if let Some(a) = action {
             self.apply_file_action(i, a);
         }
@@ -3035,13 +3055,16 @@ enum WaveAction {
 enum FileAction {
     Favorite,
     Tag(String),
+    /// A tag typed into the menu, to create if it is new and put on the file.
+    NewTag(String),
     Reveal,
     CopyPath,
 }
 
-/// The per-file menu: favorite, every tag with the carried ones checked, and the file's place
-/// on disk. Returns what was clicked; toggles keep the menu open, the rest close it.
-fn file_menu(ui: &mut egui::Ui, file: &FileRecord, defs: &[hark_core::TagDef], theme: &Theme, favorite_key: &str) -> Option<FileAction> {
+/// The per-file menu: favorite, every tag with the carried ones checked, a field that creates
+/// a tag and puts it on the file, and the file's place on disk. Returns what was clicked;
+/// toggles keep the menu open, the rest close it. `new_tag` holds the field's text.
+fn file_menu(ui: &mut egui::Ui, file: &FileRecord, defs: &[hark_core::TagDef], theme: &Theme, favorite_key: &str, new_tag: &mut String) -> Option<FileAction> {
     theme::menu_items(ui);
     let mut action = None;
     let mut fav = file.favorite;
@@ -3057,6 +3080,12 @@ fn file_menu(ui: &mut egui::Ui, file: &FileRecord, defs: &[hark_core::TagDef], t
         if label.changed() {
             action = Some(FileAction::Tag(t.name.clone()));
         }
+    }
+    let field = ui.add(egui::TextEdit::singleline(new_tag).hint_text("New tag").desired_width(150.0).margin(egui::vec2(theme::MENU_INSET, 2.0)));
+    let field = field.on_hover_text("Enter creates the tag and puts it on this file");
+    if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !new_tag.trim().is_empty() {
+        action = Some(FileAction::NewTag(std::mem::take(new_tag).trim().to_string()));
+        field.request_focus();
     }
     ui.separator();
     if ui.button(theme::icon_text(icons::FOLDER_OPEN, "Show in folder", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).clicked() {
