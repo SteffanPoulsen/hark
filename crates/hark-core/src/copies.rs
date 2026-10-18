@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use crate::config::{Config, ExportPreset, Root};
 use crate::export::{ExportRequest, ExportResult, Selection};
+use crate::loudness::Level;
 
 #[derive(Clone, Debug)]
 pub struct CopyRequest {
@@ -31,6 +32,8 @@ pub struct CopyRequest {
     pub folder: PathBuf,
     /// The source's blake3 when known, as the library keeps it.
     pub source_hash: Option<String>,
+    /// Measurements the caller holds, for the export to take instead of measuring again.
+    pub levels: Vec<Level>,
 }
 
 impl CopyRequest {
@@ -48,6 +51,7 @@ impl CopyRequest {
             favorite,
             folder: config.copy_folder(),
             source_hash: None,
+            levels: Vec::new(),
         }
     }
 
@@ -137,6 +141,7 @@ impl CopyRequest {
             overwrite: true,
             source_hash: self.source_hash.clone(),
             measure_output: false,
+            levels: self.levels.clone(),
         };
         Ok(Plan { output, pending: Some(export) })
     }
@@ -236,6 +241,7 @@ mod tests {
             favorite: false,
             folder: dir.join("copies"),
             source_hash: None,
+            levels: Vec::new(),
         };
         let quiet = request(-6.0).plan().unwrap();
         let loud = request(0.0).plan().unwrap();

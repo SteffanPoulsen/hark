@@ -7,7 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, ExportPreset, Normalize, OutputFormat, Root};
-use crate::loudness::{self, Loudness};
+use crate::loudness::{self, Level, Loudness, Span};
 use crate::origin::{Measured, Origin, OutputRef, SelectionRef, SourceRef};
 use crate::pcm::{db_to_gain, gain_to_db, Fades, Pcm};
 
@@ -43,6 +43,9 @@ pub struct ExportRequest {
     /// Measure the result's loudness for the origin and the BWF chunk. An export does; a copy
     /// skips it, since on a long selection the measurement costs more than the rest together.
     pub measure_output: bool,
+    /// Measurements the caller already holds. One of exactly the audio this export shapes
+    /// stands in for measuring it again.
+    pub levels: Vec<Level>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -80,6 +83,7 @@ impl ExportRequest {
             overwrite: false,
             source_hash: None,
             measure_output: true,
+            levels: Vec::new(),
         })
     }
 
@@ -96,6 +100,10 @@ impl ExportRequest {
         };
         path.set_extension(self.preset.format.extension());
         path
+    }
+
+    pub fn fades(&self, preset: &ExportPreset) -> Fades {
+        Fades { in_secs: self.fade_in_secs, out_secs: self.fade_out_secs, shape: preset.fade_shape }
     }
 
     pub fn effective_preset(&self) -> ExportPreset {
@@ -150,7 +158,12 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
         source = source.slice_frames(source.frame_at(a), source.frame_at(b));
     }
     let req = &req;
-    let (pcm, warnings, measured) = process(source, req, &preset)?;
+    let span = Span::new(&req.source, req.selection.map(|s| (s.start_secs, s.end_secs)), req.fades(&preset), preset.mono, preset.sample_rate, source.sample_rate);
+    let start = req.selection.map(|s| (s.start_secs.max(0.0) * source.sample_rate as f64).round() as u64).unwrap_or(0);
+    let frames = (start, start + source.frames() as u64);
+    let stamp = loudness::Stamp::from(&source_meta);
+    let known = req.levels.iter().find(|l| l.span == span && l.stamp == stamp && l.frames == frames).map(|l| l.loudness);
+    let (pcm, warnings, measured) = process(source, req, &preset, known)?;
     let output_loudness = if req.measure_output { loudness::measure(&pcm).ok() } else { None };
     let measured = Measured {
         output_lufs: output_loudness.map(|l| l.integrated_lufs),
@@ -214,27 +227,25 @@ pub fn run(req: &ExportRequest) -> Result<ExportResult> {
     Ok(ExportResult { output, origin, warnings })
 }
 
-/// Shapes the selection, already cut from the source, into the output.
-fn process(mut pcm: Pcm, req: &ExportRequest, preset: &ExportPreset) -> Result<(Pcm, Vec<String>, Measured)> {
-    let mut warnings = Vec::new();
-    let mut measured = Measured::default();
-
-    if req.fade_in_secs > 0.0 {
-        pcm.fade_in((req.fade_in_secs * pcm.sample_rate as f64).round() as usize, preset.fade_shape);
-    }
-    if req.fade_out_secs > 0.0 {
-        pcm.fade_out((req.fade_out_secs * pcm.sample_rate as f64).round() as usize, preset.fade_shape);
-    }
-
-    if let Some(mode) = preset.mono {
+/// The selection, already cut from the source, faded, folded and resampled: what an export's
+/// level is set on, and what a measurement of that level is of.
+pub fn shape(mut pcm: Pcm, fades: Fades, fold: Option<crate::pcm::DownmixMode>, rate: Option<u32>) -> Result<Pcm> {
+    fades.apply(&mut pcm);
+    if let Some(mode) = fold {
         pcm = pcm.to_mono(mode);
     }
-
-    if let Some(rate) = preset.sample_rate {
-        if rate != pcm.sample_rate {
-            pcm = crate::resample::resample(&pcm, rate)?;
-        }
+    match rate {
+        Some(rate) if rate != pcm.sample_rate => crate::resample::resample(&pcm, rate),
+        _ => Ok(pcm),
     }
+}
+
+/// Shapes the selection into the output and sets its level, from `known` when the caller
+/// measured exactly this audio already.
+fn process(pcm: Pcm, req: &ExportRequest, preset: &ExportPreset, known: Option<Loudness>) -> Result<(Pcm, Vec<String>, Measured)> {
+    let mut warnings = Vec::new();
+    let mut measured = Measured::default();
+    let mut pcm = shape(pcm, req.fades(preset), preset.mono, preset.sample_rate)?;
 
     match preset.normalize {
         Normalize::None => {
@@ -248,7 +259,7 @@ fn process(mut pcm: Pcm, req: &ExportRequest, preset: &ExportPreset) -> Result<(
             }
         }
         normalize => {
-            if let Some(gain_db) = normalize_gain(&normalize, pcm.peak(), || loudness::measure(&pcm), &mut measured, &mut warnings)? {
+            if let Some(gain_db) = normalize_gain(&normalize, pcm.peak(), || known.map(Ok).unwrap_or_else(|| loudness::measure(&pcm)), &mut measured, &mut warnings)? {
                 measured.applied_gain_db = gain_db;
                 pcm.apply_gain(db_to_gain(gain_db));
             }
@@ -301,16 +312,16 @@ pub struct PreviewLevel {
     pub warnings: Vec<String>,
 }
 
-/// The gain `preset` would give `selection` of `path`, or the whole of it, under `fades` and
-/// folded as the preset folds, by the rule an export applies. Measured in one streaming pass,
-/// so a long span is never held whole; the preset's resampling is skipped, which can move the
-/// true peak by a hair.
+/// The gain `preset` would give `selection` of `path`, or the whole of it, under `fades`, by
+/// the rule an export applies to the audio an export shapes. Measured in one streaming pass,
+/// so a long span is never held whole.
 pub fn preview_level(path: &Path, preset: &ExportPreset, selection: Option<Selection>, fades: Fades, abort: &dyn Fn() -> bool) -> Result<PreviewLevel> {
     if matches!(preset.normalize, Normalize::None) {
         return Ok(PreviewLevel::default());
     }
-    let span = selection.map(|s| (s.start_secs, s.end_secs));
-    Ok(preview_level_from(&loudness::measure_file(path, span, fades, preset.mono, abort)?, preset))
+    let source_rate = crate::decode::probe(path)?.sample_rate;
+    let span = Span::new(path, selection.map(|s| (s.start_secs, s.end_secs)), fades, preset.mono, preset.sample_rate, source_rate);
+    Ok(preview_level_from(&loudness::measure_file(&span, abort)?.loudness, preset))
 }
 
 /// `preview_level` from a measurement of the span folded as `preset` folds it.
@@ -343,5 +354,82 @@ pub fn request_from_origin(origin: &Origin, output_root: &Path, output_path: Opt
         overwrite: true,
         source_hash: None,
         measure_output: true,
+        levels: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pcm::{DownmixMode, FadeShape};
+
+    /// A span streamed from the file reads as the export reads the audio it shapes from that
+    /// span, through fades, a fold and a rate change; an export handed that measurement sets
+    /// its level from it, and one handed a measurement of other frames measures for itself.
+    #[test]
+    fn streamed_level_is_the_exports_own() {
+        let dir = std::env::temp_dir().join(format!("hark-export-level-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("bed.wav");
+        let rate = 44_100usize;
+        let samples: Vec<f32> = (0..rate * 4 * 2).map(|i| (((i / 2) as f32 / rate as f32) * 300.0 * std::f32::consts::TAU).sin() * if i % 2 == 0 { 0.6 } else { 0.2 }).collect();
+        crate::wav::write(&source, &Pcm { sample_rate: rate as u32, channels: 2, samples }, 24, false, b"{}", &Default::default()).unwrap();
+
+        let preset = ExportPreset { sample_rate: Some(48_000), mono: Some(DownmixMode::Average), normalize: Normalize::Lufs { target_lufs: -20.0, true_peak_ceiling_dbfs: -1.0 }, fade_shape: FadeShape::Linear, ..Default::default() };
+        let mut req = ExportRequest {
+            source: source.clone(),
+            root: None,
+            selection: Some(Selection { start_secs: 0.7, end_secs: 3.1 }),
+            trim: false,
+            fade_in_secs: 0.25,
+            fade_out_secs: 0.5,
+            gain_db: 0.0,
+            preset_name: None,
+            preset: preset.clone(),
+            output_root: dir.clone(),
+            subfolder: None,
+            output_path: Some(dir.join("out.wav")),
+            tags: Vec::new(),
+            favorite: false,
+            overwrite: true,
+            source_hash: None,
+            measure_output: false,
+            levels: Vec::new(),
+        };
+        let span = Span::new(&source, Some((0.7, 3.1)), req.fades(&preset), preset.mono, preset.sample_rate, rate as u32);
+        let streamed = loudness::measure_file(&span, &|| false).unwrap();
+        let own = run(&req).unwrap().origin.measured;
+        assert!((streamed.loudness.integrated_lufs - own.source_lufs.unwrap()).abs() < 1e-4, "{} vs {} LUFS", streamed.loudness.integrated_lufs, own.source_lufs.unwrap());
+
+        let mut doctored = streamed.clone();
+        doctored.loudness.integrated_lufs -= 6.0;
+        doctored.loudness.true_peak_dbfs = -40.0;
+        req.levels = vec![doctored.clone()];
+        let taken = run(&req).unwrap().origin.measured;
+        assert!((taken.applied_gain_db - (own.applied_gain_db + 6.0)).abs() < 1e-6, "the handed level was not used");
+
+        let mut other_frames = doctored.clone();
+        other_frames.frames.1 += 1;
+        req.levels = vec![other_frames];
+        assert_eq!(run(&req).unwrap().origin.measured.applied_gain_db, own.applied_gain_db, "a level of other frames was used");
+
+        let mut overwritten = doctored;
+        overwritten.stamp.len += 1;
+        req.levels = vec![overwritten];
+        assert_eq!(run(&req).unwrap().origin.measured.applied_gain_db, own.applied_gain_db, "a level of the file before it was written over was used");
+
+        // A fade-in placed by the length the header states, over a file cut short of it.
+        let bytes = std::fs::read(&source).unwrap();
+        std::fs::write(&source, &bytes[..bytes.len() * 3 / 5]).unwrap();
+        req.selection = Some(Selection { start_secs: 0.0, end_secs: 3.5 });
+        (req.fade_in_secs, req.fade_out_secs) = (3.0, 0.0);
+        req.levels = Vec::new();
+        let fresh = run(&req).unwrap().origin.measured;
+        let mut cut = loudness::measure_file(&Span::new(&source, Some((0.0, 3.5)), req.fades(&preset), preset.mono, preset.sample_rate, rate as u32), &|| false).unwrap();
+        cut.loudness.integrated_lufs -= 6.0;
+        req.levels = vec![cut];
+        let after_cut = run(&req).unwrap().origin.measured;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(after_cut.applied_gain_db, fresh.applied_gain_db, "a level faded by the header's length was used");
     }
 }

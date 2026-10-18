@@ -3,6 +3,7 @@
 mod dnd;
 mod keys;
 mod preset_ui;
+mod promise;
 mod settings;
 mod theme;
 mod waveform;
@@ -27,7 +28,8 @@ use hark_core::{Config, Db, ExportPreset, FileRecord, Loudness, Peaks};
 
 use theme::Theme;
 use waveform::{ClipFades, SelectionLevel, WaveEvent, WaveState};
-use worker::{Done, Folded, Job, LoadRequest, Loaded, ScanPhase, Span, Worker};
+use hark_core::loudness::{Level, Span};
+use worker::{Done, Folded, Job, LoadRequest, Loaded, ScanPhase, Worker};
 
 /// Twenty minutes of stereo at 48 kHz, decoded audio and peaks together.
 const CACHE_BYTES: usize = 48_000 * 60 * 20 * 2 * 4;
@@ -170,10 +172,11 @@ fn clip_key(c: &Clip) -> ClipKey {
     (c.start, c.end, c.looped, c.fade_in, c.fade_out, c.fade_shape, c.fold)
 }
 
-/// A span's measurement in flight, and when it was asked for.
+/// A span's measurement in flight, when it was asked for, and the level it promises.
 struct Asked {
     span: Span,
     since: Instant,
+    level: promise::Promise<Option<Level>>,
 }
 
 /// A measurement still running this long after it was asked for shows in the selection; a
@@ -302,7 +305,7 @@ struct App {
     fold_asked: Option<(PathBuf, DownmixMode, bool)>,
     /// The selection's level under the preview: the last span measured, and the measurement
     /// in flight.
-    span_level: Option<(Span, Result<Loudness, String>)>,
+    span_level: Option<(Span, Result<Level, String>)>,
     span_asked: Option<Asked>,
     /// A selection or fade number field is being dragged, which edits the clip as a drag on
     /// the wave does.
@@ -743,7 +746,7 @@ impl App {
         }
         let recorded = self.record_of(&l.path).and_then(FileRecord::loudness).is_some();
         if l.loudness.is_some() && !recorded {
-            self.record_loudness(&l.path, l.loudness);
+            self.record_loudness(&l.path, l.loudness.as_ref().map(|l| l.loudness));
         }
         let measured = l.loudness.is_some() || recorded;
         if (l.peaks.is_none() || !measured) && self.analysis_asked.as_ref() != Some(&l.path) {
@@ -790,8 +793,8 @@ impl App {
     fn preview_measurement(&self) -> Option<Loudness> {
         let cur = self.current.as_ref()?;
         match self.preset.mono {
-            Some(_) => self.folded.as_ref().filter(|(p, _, _)| *p == cur.path).and_then(|(_, _, f)| f.loudness),
-            None => cur.loudness.or_else(|| self.record_of(&cur.path).and_then(FileRecord::loudness)),
+            Some(_) => self.folded.as_ref().filter(|(p, _, _)| *p == cur.path).and_then(|(_, _, f)| f.loudness.as_ref()).map(|l| l.loudness),
+            None => cur.loudness.as_ref().map(|l| l.loudness).or_else(|| self.record_of(&cur.path).and_then(FileRecord::loudness)),
         }
     }
 
@@ -799,16 +802,20 @@ impl App {
         self.preview_measurement().filter(|_| self.previewing_level()).map(|l| hark_core::export::preview_level_from(&l, &self.preset))
     }
 
-    /// What the preview's level is of when it is not the whole file as it stands: the
-    /// selection, or the whole file under its fades, faded and folded as the preview hears it.
+    /// What the preview's level is of when the passes over the whole file cannot give it: the
+    /// selection, the whole file under its fades, or the whole file at a rate the preset
+    /// resamples it to; shaped as an export shapes it.
     fn preview_span(&self) -> Option<Span> {
         let cur = self.current.as_ref()?;
         let w = &self.wave;
         let fades = Fades { in_secs: w.fade_in, out_secs: w.fade_out, shape: w.fade_shape };
-        if w.selection.is_none() && fades.is_zero() {
-            return None;
-        }
-        Some(Span { path: cur.path.clone(), secs: w.bounds(cur.duration_secs), fades, fold: self.preset.mono })
+        let span = Span::new(&cur.path, w.selection, fades, self.preset.mono, self.preset.sample_rate, cur.source_rate);
+        (span.secs.is_some() || !fades.is_zero() || span.rate.is_some()).then_some(span)
+    }
+
+    /// Where a span starts and ends in seconds.
+    fn span_bounds(&self, span: &Span) -> (f64, f64) {
+        span.secs.unwrap_or((0.0, self.current.as_ref().map(|c| c.duration_secs).unwrap_or(0.0)))
     }
 
     /// The level the preview's span has: the preset's level of it once measured, and until
@@ -817,8 +824,19 @@ impl App {
     fn selection_level(&self) -> Option<PreviewLevel> {
         let span = self.preview_span().filter(|_| self.previewing_level())?;
         let (measured, result) = self.span_level.as_ref()?;
-        let edit_of = measured.path == span.path && measured.fold == span.fold && measured.secs.0 < span.secs.1 && span.secs.0 < measured.secs.1;
-        (*measured == span || edit_of).then(|| result.as_ref().ok()).flatten().map(|l| hark_core::export::preview_level_from(l, &self.preset))
+        let ((a, b), (c, d)) = (self.span_bounds(measured), self.span_bounds(&span));
+        let edit_of = measured.path == span.path && measured.fold == span.fold && measured.rate == span.rate && a < d && c < b;
+        (*measured == span || edit_of).then(|| result.as_ref().ok()).flatten().map(|l| hark_core::export::preview_level_from(&l.loudness, &self.preset))
+    }
+
+    /// Every measurement held of the current file, for an export or a copy to take the one
+    /// of exactly its audio instead of measuring it again.
+    fn levels_held(&self) -> Vec<Level> {
+        let cur = self.current.as_ref();
+        let span = self.span_level.as_ref().and_then(|(_, r)| r.as_ref().ok());
+        let folded = self.folded.as_ref().and_then(|(_, _, f)| f.loudness.as_ref());
+        let file = cur.and_then(|c| c.loudness.as_ref());
+        [span, folded, file].into_iter().flatten().filter(|l| cur.is_some_and(|c| c.path == l.span.path)).cloned().collect()
     }
 
     /// How the wave draws the selection: at its own level once measured, as far as the
@@ -858,7 +876,7 @@ impl App {
             let have = self.folded_exact().map(|f| f.loudness.is_some() || !measure).unwrap_or(false);
             let asked = |m: bool| self.fold_asked.as_ref() == Some(&(cur.path.clone(), mode, m));
             if !have && !asked(true) && !asked(measure) {
-                self.worker.fold(cur.path.clone(), cur.source.clone(), mode, measure);
+                self.worker.fold(cur, mode, measure);
                 self.fold_asked = Some((cur.path.clone(), mode, measure));
             }
         }
@@ -870,7 +888,10 @@ impl App {
         if measured || asked {
             return;
         }
+        // Samples in hand are the export's own only at the file's rate; otherwise the span is
+        // read from the file as an export reads it.
         let held = match (&cur.source, span.fold) {
+            (Source::Whole(pcm), _) if pcm.sample_rate != cur.source_rate || span.rate.is_some() => None,
             (Source::File { .. }, _) => None,
             (Source::Whole(pcm), None) => Some(pcm.clone()),
             (Source::Whole(_), Some(_)) => match self.folded_exact() {
@@ -878,8 +899,8 @@ impl App {
                 None => return,
             },
         };
-        self.worker.measure_span(span.clone(), held);
-        self.span_asked = Some(Asked { span, since: Instant::now() });
+        let level = self.worker.measure_span(span.clone(), held.map(|pcm| (pcm, cur.stamp)));
+        self.span_asked = Some(Asked { span, since: Instant::now(), level });
     }
 
     /// The preview's level owns playback and the waveform: the preset normalises.
@@ -891,12 +912,12 @@ impl App {
     /// the handles' own when the preview has no level to wait for, and the measured span's
     /// otherwise.
     fn wave_clip_fades(&self) -> Option<ClipFades> {
-        let span = self.preview_span().filter(|_| self.preview)?;
+        let span = self.preview_span().filter(|s| self.preview && (s.secs.is_some() || !s.fades.is_zero()))?;
         if !self.previewing_level() {
-            return Some(ClipFades { secs: span.secs, fades: span.fades });
+            return Some(ClipFades { secs: self.span_bounds(&span), fades: span.fades });
         }
         let (measured, _) = self.span_level.as_ref().filter(|(s, _)| s.path == span.path)?;
-        Some(ClipFades { secs: measured.secs, fades: measured.fades })
+        Some(ClipFades { secs: self.span_bounds(measured), fades: measured.fades })
     }
 
     /// The gain the file plays and draws at, in dB: the preset's level of the whole file under
@@ -1028,6 +1049,7 @@ impl App {
         req.gain_db = self.gain_db as f64;
         req.preset.fade_shape = self.wave.fade_shape;
         req.overwrite = self.overwrite;
+        req.levels = self.levels_held();
         let name: String = self.export_name.trim().chars().filter(|c| !matches!(c, '/' | '\\')).collect();
         if !name.is_empty() {
             let templated = req.output_path();
@@ -1078,7 +1100,14 @@ impl App {
         req.fade_out_secs = self.wave.fade_out;
         req.preset.fade_shape = self.wave.fade_shape;
         req.gain_db = self.gain_db as f64;
+        req.levels = self.levels_held();
         Some(req)
+    }
+
+    /// The measurement of the span a copy would take, while it is still running.
+    fn measuring(&self) -> Option<promise::Promise<Option<Level>>> {
+        let span = self.preview_span()?;
+        self.span_asked.as_ref().filter(|a| a.span == span).map(|a| a.level.clone())
     }
 
     /// Puts the selection on the clipboard as a file: at once when a copy from this recipe is
@@ -1089,7 +1118,7 @@ impl App {
             Ok(plan) if plan.pending.is_none() => self.copy_out(vec![plan.output]),
             Ok(plan) => {
                 self.set_status(format!("Copying {}", tilde(&plan.output)), false);
-                self.worker.copy(plan, None);
+                self.worker.copy(plan, None, self.measuring());
             }
             Err(e) => self.set_status(format!("Copy: {e:#}"), true),
         }
@@ -1108,7 +1137,7 @@ impl App {
         let output = plan.output.clone();
         // Windows waits for the file inside the drag call, so the job must already be queued.
         if plan.pending.is_some() {
-            self.worker.copy(plan, ready.clone());
+            self.worker.copy(plan, ready.clone(), self.measuring());
         }
         self.drag_out(vec![output], image, ready, &what);
     }
@@ -1190,10 +1219,10 @@ impl App {
                     self.building.retain(|b| b.mode.is_some());
                     match result {
                         Ok((peaks, loudness)) => {
-                            self.record_loudness(&path, loudness);
+                            self.record_loudness(&path, loudness.as_ref().map(|l| l.loudness));
                             let current = self.current.clone().filter(|c| c.path == path);
                             if let Some(old) = self.cache.get(&path).cloned().or(current) {
-                                let l = Arc::new(Loaded { path: old.path.clone(), source_rate: old.source_rate, channels: old.channels, duration_secs: old.duration_secs, source: old.source.clone(), peaks: Some(peaks), loudness, folded: old.folded.clone() });
+                                let l = Arc::new(Loaded { path: old.path.clone(), stamp: old.stamp, source_rate: old.source_rate, channels: old.channels, duration_secs: old.duration_secs, source: old.source.clone(), peaks: Some(peaks), loudness, folded: old.folded.clone() });
                                 if self.cache.contains_key(&path) {
                                     self.cache.insert(path.clone(), l.clone());
                                 }
@@ -2085,7 +2114,7 @@ impl App {
                 ui.label(theme::semibold(name).size(15.0));
                 let mut meta = format!("{} Hz  ·  {} ch  ·  {}", c.source_rate, c.channels, waveform::fmt_time(c.duration_secs));
                 let record = self.selected.and_then(|i| self.files.get(i)).filter(|f| f.path == c.path);
-                let loudness = c.loudness.map(|l| (l.integrated_lufs, l.true_peak_dbfs, l.momentary)).or_else(|| record.and_then(|f| Some((f.lufs?, f.true_peak_dbfs?, false))));
+                let loudness = c.loudness.as_ref().map(|l| (l.loudness.integrated_lufs, l.loudness.true_peak_dbfs, l.loudness.momentary)).or_else(|| record.and_then(|f| Some((f.lufs?, f.true_peak_dbfs?, false))));
                 if let Some((lufs, tp, momentary)) = loudness {
                     meta.push_str(&format!("  ·  {lufs:.1} LUFS{}  ·  {tp:.1} dBTP", if momentary { " (M)" } else { "" }));
                 }
@@ -2182,7 +2211,11 @@ impl App {
             p.set_gain(play_gain);
         }
         let with_warnings = |head: &str, l: PreviewLevel| std::iter::once(head.to_string()).chain(l.warnings).collect::<Vec<_>>().join("\n");
-        let of = if self.wave.selection.is_some() { "the selection" } else { "the file under its fades" };
+        let of = match (self.wave.selection.is_some(), self.wave.fade_in > 0.0 || self.wave.fade_out > 0.0) {
+            (true, _) => "the selection",
+            (false, true) => "the file under its fades",
+            (false, false) => "the file",
+        };
         let settled = self.preview_span().is_some_and(|s| self.span_level.as_ref().is_some_and(|(m, _)| *m == s));
         let level_hint = match (self.preview_span().is_some(), settled, self.selection_level(), self.preview_level()) {
             (true, true, Some(l), _) => with_warnings(&format!("Previewing the preset's level of {of}"), l),

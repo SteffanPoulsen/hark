@@ -3,7 +3,8 @@
 //! calls; X11 has no drag source at all, and the status line says so.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
+
+use crate::promise::Promise;
 
 #[cfg(all(unix, not(target_os = "macos")))]
 mod wayland;
@@ -21,28 +22,21 @@ pub struct Image {
 /// Whether a dragged file has been written yet. The drag starts the moment the pointer moves,
 /// with the path known; the file lands on a worker thread, and the drop target is answered
 /// only once it has.
-#[derive(Clone, Default)]
-pub struct Ready(Arc<(Mutex<Option<bool>>, Condvar)>);
+#[derive(Clone)]
+pub struct Ready(Promise<bool>);
 
 impl Ready {
     pub fn new() -> Ready {
-        Ready::default()
+        Ready(Promise::new())
     }
 
     pub fn set(&self, ok: bool) {
-        *self.0 .0.lock().unwrap() = Some(ok);
-        self.0 .1.notify_all();
+        self.0.set(ok);
     }
 
     /// Blocks until the file is there, or gives up after a couple of minutes.
     pub fn wait(&self) -> bool {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        let mut state = self.0 .0.lock().unwrap();
-        while state.is_none() {
-            let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else { return false };
-            state = self.0 .1.wait_timeout(state, left).unwrap().0;
-        }
-        *state == Some(true)
+        self.0.wait(std::time::Duration::from_secs(120)) == Some(true)
     }
 }
 

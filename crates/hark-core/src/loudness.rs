@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use ebur128::{EbuR128, Mode};
@@ -75,15 +76,67 @@ pub fn measure_with(pcm: &Pcm, abort: &dyn Fn() -> bool) -> Result<Loudness> {
     }
 }
 
-/// Measures `span` of a file in seconds, or the whole of it, one packet at a time, under
-/// `fades` and folded to one channel when `fold` is set, as an export of it is before it is
-/// normalised; only a clip too short to gate is decoded whole. Gives up as soon as `abort`
-/// says so.
-pub fn measure_file(path: &Path, span: Option<(f64, f64)>, fades: Fades, fold: Option<DownmixMode>, abort: &dyn Fn() -> bool) -> Result<Loudness> {
+/// A span of a file shaped as an export shapes it before setting its level: cut, faded,
+/// folded to one channel, resampled. What a measurement of a level is of.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Span {
+    pub path: PathBuf,
+    /// Seconds into the file; `None` is all of it.
+    pub secs: Option<(f64, f64)>,
+    pub fades: Fades,
+    pub fold: Option<DownmixMode>,
+    /// The rate it is resampled to; `None` keeps the file's own.
+    pub rate: Option<u32>,
+}
+
+impl Span {
+    /// `rate` is the one a preset asks for, which resamples nothing when it is `source_rate`.
+    pub fn new(path: &Path, secs: Option<(f64, f64)>, fades: Fades, fold: Option<DownmixMode>, rate: Option<u32>, source_rate: u32) -> Span {
+        Span { path: path.to_path_buf(), secs, fades, fold, rate: rate.filter(|r| *r != source_rate) }
+    }
+}
+
+/// A file's size and modification time when its audio was read: what tells a measurement of
+/// the file from one of the file as it was before something wrote over it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stamp {
+    pub len: u64,
+    pub modified: Option<SystemTime>,
+}
+
+impl Stamp {
+    pub fn of(path: &Path) -> Result<Stamp> {
+        Ok(Stamp::from(&std::fs::metadata(path)?))
+    }
+}
+
+impl From<&std::fs::Metadata> for Stamp {
+    fn from(meta: &std::fs::Metadata) -> Stamp {
+        Stamp { len: meta.len(), modified: meta.modified().ok() }
+    }
+}
+
+/// The loudness of a span, the file as it was read, and the frames of it measured, so whoever
+/// holds the audio can tell the measurement is of exactly that audio.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Level {
+    pub span: Span,
+    pub stamp: Stamp,
+    /// The first frame of the file measured, and one past the last, at the file's rate.
+    pub frames: (u64, u64),
+    pub loudness: Loudness,
+}
+
+/// Measures a span one packet at a time, shaped as an export shapes it before setting its
+/// level; only a clip too short to gate is decoded whole. Gives up as soon as `abort` says so.
+pub fn measure_file(span: &Span, abort: &dyn Fn() -> bool) -> Result<Level> {
+    let Span { path, fades, fold, .. } = span;
+    let (fades, fold) = (*fades, *fold);
+    let stamp = Stamp::of(path)?;
     let mut reader = crate::decode::Reader::open(path)?;
     let channels = reader.channels as usize;
     let rate = reader.sample_rate as f64;
-    let (start, end) = match span {
+    let (start, end) = match span.secs {
         Some((a, b)) if rate > 0.0 => ((a.max(0.0) * rate).round() as u64, (b.max(0.0) * rate).round() as u64),
         _ => (0, u64::MAX),
     };
@@ -97,9 +150,13 @@ pub fn measure_file(path: &Path, span: Option<(f64, f64)>, fades: Fades, fold: O
     // A seek may land late in some codecs, so it aims a second early and the frames before
     // the span are dropped, as `decode_span` does.
     let mut counted = if start > 0 { reader.seek(start.saturating_sub(reader.sample_rate as u64))? } else { 0 };
+    let out_rate = span.rate.unwrap_or(reader.sample_rate);
+    let out_channels = if fold.is_some() { 1 } else { reader.channels };
+    let mut resampler = crate::resample::Stream::new(reader.sample_rate, out_rate, out_channels)?;
+    let mut meter = Meter::new(out_channels, out_rate)?;
     let mut chunk = Vec::new();
-    let mut shaped = Vec::new();
-    let mut meter = None;
+    let mut faded = Vec::new();
+    let mut folded = Vec::new();
     let mut pushed = 0u64;
     while reader.next_chunk(&mut chunk)? {
         let frames = (chunk.len() / channels.max(1)) as u64;
@@ -110,51 +167,48 @@ pub fn measure_file(path: &Path, span: Option<(f64, f64)>, fades: Fades, fold: O
         }
         let from = start.saturating_sub(pos).min(frames) as usize;
         let to = (end - pos).min(frames) as usize;
-        let part = &chunk[from * channels..to * channels];
+        let mut samples = &chunk[from * channels..to * channels];
         let first = (pos + from as u64).saturating_sub(start) as usize;
-        let gain = |k: usize| if fades.is_zero() { 1.0 } else { fades.gain(first + k, total, reader.sample_rate) };
-        let samples = match fold {
-            Some(mode) => {
-                shaped.clear();
-                shaped.extend(part.chunks(channels).enumerate().map(|(k, f)| mode.fold(f) * gain(k)));
-                &shaped
-            }
-            None if fades.is_zero() => part,
-            None => {
-                shaped.clear();
-                shaped.extend(part.chunks(channels).enumerate().flat_map(|(k, f)| f.iter().map(move |s| s * gain(k))));
-                &shaped
-            }
-        };
-        let m = match &mut meter {
-            Some(m) => m,
-            None => meter.insert(Meter::new(if fold.is_some() { 1 } else { reader.channels }, reader.sample_rate)?),
-        };
-        m.push(samples)?;
+        if !fades.is_zero() {
+            faded.clear();
+            faded.extend(samples.chunks(channels).enumerate().flat_map(|(k, f)| {
+                let g = fades.gain(first + k, total, reader.sample_rate);
+                f.iter().map(move |s| s * g)
+            }));
+            samples = &faded;
+        }
+        if let Some(mode) = fold {
+            folded.clear();
+            folded.extend(samples.chunks(channels).map(|f| mode.fold(f)));
+            samples = &folded;
+        }
+        resampler.push(samples, &mut |s| meter.push(s))?;
         pushed += (to - from) as u64;
         chunk.clear();
         if abort() {
             anyhow::bail!("superseded");
         }
     }
-    match meter.as_ref().and_then(|m| m.finish()) {
-        Some(l) => Ok(l),
+    resampler.finish(&mut |s| meter.push(s))?;
+    // The frames measured, unless the fades were placed by a length the decode did not bear
+    // out: then the measurement is of other audio than an export's, and says so by not matching.
+    let measured_end = if fades.is_zero() || total as u64 == pushed { start + pushed } else { u64::MAX };
+    let level = |loudness| Level { span: span.clone(), stamp, frames: (start, measured_end), loudness };
+    match meter.finish() {
+        Some(l) => Ok(level(l)),
         // Long enough to gate and nothing above the gate: silence, read as `measure` reads it,
         // without decoding a span that may be hours long.
         None if pushed as f64 >= GATING_BLOCK_SECS * rate => {
-            let (true_peak_dbfs, sample_peak_dbfs) = meter.as_ref().map(Meter::peaks).unwrap_or((f64::NEG_INFINITY, f64::NEG_INFINITY));
-            Ok(Loudness { integrated_lufs: -70.0, momentary: true, true_peak_dbfs, sample_peak_dbfs, range_lu: None })
+            let (true_peak_dbfs, sample_peak_dbfs) = meter.peaks();
+            Ok(level(Loudness { integrated_lufs: -70.0, momentary: true, true_peak_dbfs, sample_peak_dbfs, range_lu: None }))
         }
         None => {
-            let mut pcm = match span {
+            let pcm = match span.secs {
                 Some((a, b)) => crate::decode::decode_span(path, a, b)?,
                 None => crate::decode::decode(path)?,
             };
-            fades.apply(&mut pcm);
-            measure(&match fold {
-                Some(mode) => pcm.to_mono(mode),
-                None => pcm,
-            })
+            let frames = (start, start + pcm.frames() as u64);
+            Ok(Level { frames, ..level(measure(&crate::export::shape(pcm, fades, fold, span.rate)?)?) })
         }
     }
 }
@@ -197,8 +251,9 @@ mod tests {
         crate::wav::write(&path, &pcm, 24, false, b"{}", &Default::default()).unwrap();
         let span = (1.0 + 1.0 / 3.0, 1.0 + 6.0 / 7.0);
         let fades = Fades { in_secs: 0.2, out_secs: 0.3, shape: crate::pcm::FadeShape::Linear };
-        let streamed = measure_file(&path, Some(span), Fades::default(), None, &|| false);
-        let faded = measure_file(&path, Some(span), fades, None, &|| false);
+        let at = |fades| Span { path: path.clone(), secs: Some(span), fades, fold: None, rate: None };
+        let streamed = measure_file(&at(Fades::default()), &|| false).map(|l| l.loudness);
+        let faded = measure_file(&at(fades), &|| false).map(|l| l.loudness);
         let _ = std::fs::remove_file(&path);
         let (streamed, faded) = (streamed.unwrap(), faded.unwrap());
         let mut cut = pcm.slice_frames(pcm.frame_at(span.0), pcm.frame_at(span.1));
@@ -219,7 +274,7 @@ mod tests {
         let pcm = Pcm { sample_rate: 48_000, channels: 2, samples: vec![0.0; 48_000 * 2 * 3] };
         let path = std::env::temp_dir().join(format!("hark-silent-{}.wav", std::process::id()));
         crate::wav::write(&path, &pcm, 24, false, b"{}", &Default::default()).unwrap();
-        let streamed = measure_file(&path, Some((0.5, 2.5)), Fades::default(), None, &|| false);
+        let streamed = measure_file(&Span { path: path.clone(), secs: Some((0.5, 2.5)), fades: Fades::default(), fold: None, rate: None }, &|| false).map(|l| l.loudness);
         let _ = std::fs::remove_file(&path);
         let (streamed, whole) = (streamed.unwrap(), measure(&pcm).unwrap());
         assert_eq!((streamed.integrated_lufs, streamed.momentary), (whole.integrated_lufs, whole.momentary));

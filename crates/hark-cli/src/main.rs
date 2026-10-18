@@ -711,7 +711,8 @@ fn run() -> Result<()> {
         }
         Cmd::Analyze { file, store } => {
             let file = abs(&file)?;
-            let l = hark_core::loudness::measure_file(&file, None, Default::default(), None, &|| false)?;
+            let whole = hark_core::loudness::Span { path: file.clone(), secs: None, fades: Default::default(), fold: None, rate: None };
+            let l = hark_core::loudness::measure_file(&whole, &|| false)?.loudness;
             if store {
                 open_db(&project)?.set_loudness(&file, &l)?;
             }
