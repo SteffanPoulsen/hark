@@ -1358,7 +1358,7 @@ impl App {
             if self.editing() {
                 return;
             }
-            player.play_from(clip.clone(), player.position());
+            player.play_from(clip.clone(), player.rendered_to());
         } else {
             player.set_bounds(&clip);
         }
@@ -3945,7 +3945,11 @@ impl eframe::App for App {
         self.hold_drag(&ctx);
 
         let analysing = self.current.as_ref().map(|c| c.peaks.is_none()).unwrap_or(false);
-        if self.is_playing() || !self.pending.is_empty() || analysing {
+        // Playback draws on every vsync. A timer would not: egui takes the last frame's length
+        // off the delay, which lands it on every second refresh of a screen faster than 120 Hz.
+        if self.is_playing() {
+            ctx.request_repaint();
+        } else if !self.pending.is_empty() || analysing {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
     }

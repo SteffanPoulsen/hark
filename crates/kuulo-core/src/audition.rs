@@ -6,10 +6,10 @@
 //! sounds the way it will export.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -284,20 +284,121 @@ impl Feed {
 }
 
 enum Cmd {
-    /// A voice and the frame to start from.
-    Play(Feed, Bounds, usize),
+    /// A voice, the frame to start from, and the voice's id.
+    Play(Feed, Bounds, usize, u64),
     Stop,
     Seek(usize),
     /// New bounds for the playing voice, whole sources only.
     Bounds(Bounds),
 }
 
+/// A voice's latest block: where it started, and when its first frame reaches the speaker,
+/// as time since `Shared::epoch`.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct Block {
+    voice: u64,
+    pos: usize,
+    /// Frames the voice had played since it started or was last moved.
+    played: usize,
+    rendered: usize,
+    at: Duration,
+    /// Where the voice started or was last moved to.
+    first: usize,
+    start: usize,
+    end: usize,
+    looped: bool,
+    ended: bool,
+}
+
+impl Block {
+    /// The frame reaching the speaker at `now`, and whether the voice is still heard then.
+    /// Before the block it counts back from its start, which is exact unless the voice was
+    /// moved within the output's latency.
+    fn heard(&self, now: Duration, rate: u32) -> (usize, bool) {
+        let since = ((now.as_secs_f64() - self.at.as_secs_f64()) * rate as f64).round() as i64;
+        if self.ended && since >= self.rendered as i64 {
+            return (self.pos + self.rendered, false);
+        }
+        // An underrun holds the playhead where the block's sound ran out.
+        let since = since.min(self.rendered as i64);
+        if self.played as i64 + since < 0 {
+            return (self.first, true);
+        }
+        (self.within(self.pos as i64 + since), true)
+    }
+
+    /// The frame after the last one handed to the output.
+    fn rendered_to(&self) -> usize {
+        self.within((self.pos + self.rendered) as i64)
+    }
+
+    /// `p` wrapped into a loop, or held at its end. A voice below a start that moved past it
+    /// plays on up to it, so only a block that began inside the loop wraps back from its start.
+    fn within(&self, p: i64) -> usize {
+        let (start, end) = (self.start as i64, self.end as i64);
+        let len = end - start;
+        let p = if !self.looped || len <= 0 {
+            p.min(end)
+        } else if p >= end {
+            start + (p - end) % len
+        } else if p < start && self.pos >= self.start {
+            end - 1 - (start - p - 1) % len
+        } else {
+            p
+        };
+        p.max(0) as usize
+    }
+}
+
+/// The latest `Block`, written by the callback behind a sequence count so it never waits: an
+/// odd count is a write in progress, and a reader retries a read the count moved under.
+#[derive(Default)]
+struct BlockCell {
+    seq: AtomicU64,
+    fields: [AtomicU64; 10],
+}
+
+impl BlockCell {
+    fn write(&self, b: &Block) {
+        let seq = self.seq.load(Ordering::Relaxed);
+        self.seq.store(seq.wrapping_add(1), Ordering::Relaxed);
+        fence(Ordering::Release);
+        let values = [b.voice, b.pos as u64, b.played as u64, b.rendered as u64, b.at.as_nanos() as u64, b.first as u64, b.start as u64, b.end as u64, b.looped as u64, b.ended as u64];
+        for (f, v) in self.fields.iter().zip(values) {
+            f.store(v, Ordering::Relaxed);
+        }
+        self.seq.store(seq.wrapping_add(2), Ordering::Release);
+    }
+
+    fn read(&self) -> Block {
+        loop {
+            let seq = self.seq.load(Ordering::Acquire);
+            if seq % 2 == 1 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let v: [u64; 10] = std::array::from_fn(|i| self.fields[i].load(Ordering::Relaxed));
+            fence(Ordering::Acquire);
+            if self.seq.load(Ordering::Relaxed) == seq {
+                return Block { voice: v[0], pos: v[1] as usize, played: v[2] as usize, rendered: v[3] as usize, at: Duration::from_nanos(v[4]), first: v[5] as usize, start: v[6] as usize, end: v[7] as usize, looped: v[8] != 0, ended: v[9] != 0 };
+            }
+        }
+    }
+}
+
 struct Shared {
-    position: AtomicUsize,
-    playing: AtomicBool,
+    block: BlockCell,
+    /// The clock `Block::at` counts from.
+    epoch: Instant,
     gain: AtomicU32,
     /// Frames of silence played because a stream had not been decoded far enough.
     underruns: AtomicUsize,
+}
+
+impl Shared {
+    fn new() -> Shared {
+        Shared { block: BlockCell::default(), epoch: Instant::now(), gain: AtomicU32::new(1.0f32.to_bits()), underruns: AtomicUsize::new(0) }
+    }
 }
 
 pub struct Player {
@@ -312,6 +413,11 @@ pub struct Player {
     /// Every decoded file played, kept until the callback has let go of it, so the callback
     /// never holds the last reference and never frees one.
     held: std::sync::Mutex<Vec<Arc<Pcm>>>,
+    voices: AtomicU64,
+    /// The voice the window last played and the frame it asked for, or 0 once stopped and
+    /// the frame it was stopped at.
+    asked: AtomicU64,
+    asked_from: AtomicUsize,
     pub sample_rate: u32,
     pub channels: u16,
     pub device_name: String,
@@ -324,9 +430,12 @@ impl Drop for Player {
 }
 
 struct Voice {
+    id: u64,
     feed: Feed,
     bounds: Bounds,
     pos: usize,
+    first: usize,
+    played: usize,
     /// Frames rendered since the voice started, for the declick ramp in.
     age: usize,
     /// The gain heard when the bounds last moved and the frames left to glide from it to the
@@ -364,6 +473,7 @@ impl Voice {
 
     fn step(&mut self) {
         self.pos += 1;
+        self.played += 1;
         self.age += 1;
         self.glide = self.glide.and_then(|(from, left)| (left > 1).then_some((from, left - 1)));
     }
@@ -391,24 +501,23 @@ impl Mixer {
         }
     }
 
-    fn fill(&mut self, out: &mut [f32]) {
+    /// Renders the next block, whose first frame reaches the speaker `latency` from now.
+    fn fill(&mut self, out: &mut [f32], latency: Duration) {
         while let Ok(cmd) = self.rx.try_recv() {
             match cmd {
-                Cmd::Play(feed, bounds, from) => {
+                Cmd::Play(feed, bounds, from, id) => {
                     self.retire();
                     let bounds = bounds.within(&feed);
                     let pos = from.clamp(bounds.start, bounds.end);
-                    self.voice = Some(Voice { feed, bounds, pos, age: 0, glide: None });
-                    self.shared.playing.store(true, Ordering::Relaxed);
+                    self.voice = Some(Voice { id, feed, bounds, pos, first: pos, played: 0, age: 0, glide: None });
                 }
-                Cmd::Stop => {
-                    self.retire();
-                    self.shared.playing.store(false, Ordering::Relaxed);
-                }
+                Cmd::Stop => self.retire(),
                 Cmd::Seek(frame) => {
                     if let Some(v) = &mut self.voice {
                         if let Feed::Whole(_) = v.feed {
                             v.pos = frame.clamp(v.bounds.start, v.bounds.end);
+                            v.first = v.pos;
+                            v.played = 0;
                             v.age = 0;
                         }
                     }
@@ -422,7 +531,7 @@ impl Mixer {
                         if let Feed::Whole(p) = &v.feed {
                             let bounds = bounds.within(&v.feed);
                             if v.bounds.reshapes(&bounds) || v.pos >= bounds.end {
-                                self.dying = Some((Voice { feed: Feed::Whole(p.clone()), bounds: v.bounds, pos: v.pos, age: v.age, glide: v.glide }, v.ramp_out(self.declick)));
+                                self.dying = Some((Voice { feed: Feed::Whole(p.clone()), bounds: v.bounds, ..*v }, v.ramp_out(self.declick)));
                                 v.age = 0;
                                 v.glide = None;
                                 if v.pos >= bounds.end {
@@ -467,6 +576,8 @@ impl Mixer {
         }
 
         let Some(v) = &mut self.voice else { return };
+        let at = self.shared.epoch.elapsed() + latency;
+        let (pos, played) = (v.pos, v.played);
         let mut take = v.feed.begin();
         let mut done = false;
         for (n, frame) in out.chunks_mut(oc).enumerate() {
@@ -490,10 +601,14 @@ impl Mixer {
             v.step();
         }
         v.feed.commit(&take);
-        self.shared.position.store(v.pos, Ordering::Relaxed);
+        // A block that played nothing, a stream priming or starved, leaves the last one
+        // standing, which holds the playhead where the sound ran out.
+        let b = &v.bounds;
+        if v.played > played || done {
+            self.shared.block.write(&Block { voice: v.id, pos, played, rendered: v.played - played, at, first: v.first, start: b.start, end: b.end, looped: b.looped, ended: done });
+        }
         if done {
             self.voice = None;
-            self.shared.playing.store(false, Ordering::Relaxed);
         }
     }
 }
@@ -548,12 +663,7 @@ impl Player {
                 config.sample_rate = rate;
             }
         }
-        let shared = Arc::new(Shared {
-            position: AtomicUsize::new(0),
-            playing: AtomicBool::new(false),
-            gain: AtomicU32::new(1.0f32.to_bits()),
-            underruns: AtomicUsize::new(0),
-        });
+        let shared = Arc::new(Shared::new());
         let (tx, rx) = sync_channel(COMMANDS);
         let mixer = Mixer {
             rx,
@@ -579,6 +689,9 @@ impl Player {
             shared,
             closing,
             held: std::sync::Mutex::new(Vec::new()),
+            voices: AtomicU64::new(0),
+            asked: AtomicU64::new(0),
+            asked_from: AtomicUsize::new(0),
             sample_rate: config.sample_rate,
             channels: config.channels,
             device_name: format!("{device_name} ({host_name})"),
@@ -603,10 +716,13 @@ impl Player {
             }
             Source::File { path, source_rate, channels, .. } => Feed::Stream(start_stream(path, source_rate, channels, self.sample_rate, bounds, from)),
         };
-        // Playing from the moment the command is sent, so a reader on this thread sees the
-        // state it asked for before the callback has drained the channel.
-        self.shared.playing.store(true, Ordering::Relaxed);
-        let _ = self.tx.try_send(Cmd::Play(feed, bounds, from));
+        let id = self.voices.fetch_add(1, Ordering::Relaxed) + 1;
+        let was = (self.asked.swap(id, Ordering::Relaxed), self.asked_from.swap(from, Ordering::Relaxed));
+        // A full queue drops the voice, and the one before plays on.
+        if self.tx.try_send(Cmd::Play(feed, bounds, from, id)).is_err() {
+            self.asked.store(was.0, Ordering::Relaxed);
+            self.asked_from.store(was.1, Ordering::Relaxed);
+        }
     }
 
     /// Gives the playing voice the clip's bounds and fades where it is, when its source is a
@@ -616,7 +732,8 @@ impl Player {
     }
 
     pub fn stop(&self) {
-        self.shared.playing.store(false, Ordering::Relaxed);
+        self.asked_from.store(self.position(), Ordering::Relaxed);
+        self.asked.store(0, Ordering::Relaxed);
         let _ = self.tx.try_send(Cmd::Stop);
         self.release();
     }
@@ -649,13 +766,40 @@ impl Player {
         f32::from_bits(self.shared.gain.load(Ordering::Relaxed))
     }
 
+    /// Whether the clip last played is still heard: from the moment it is asked for until its
+    /// last frame has left the speaker.
     pub fn is_playing(&self) -> bool {
-        self.shared.playing.load(Ordering::Relaxed)
+        self.heard().1
     }
 
-    /// Frame of the current clip the callback last reached.
+    /// The frame of the clip last played that is reaching the speaker now; once it is no
+    /// longer heard, where it ended or was stopped.
     pub fn position(&self) -> usize {
-        self.shared.position.load(Ordering::Relaxed)
+        self.heard().0
+    }
+
+    /// The frame after the last one handed to the output: where the clip last played goes on
+    /// without repeating what is still on its way to the speaker.
+    pub fn rendered_to(&self) -> usize {
+        let b = self.shared.block.read();
+        match self.asked.load(Ordering::Relaxed) {
+            asked if asked != 0 && b.voice == asked => b.rendered_to(),
+            _ => self.asked_from.load(Ordering::Relaxed),
+        }
+    }
+
+    fn heard(&self) -> (usize, bool) {
+        let asked = self.asked.load(Ordering::Relaxed);
+        let from = self.asked_from.load(Ordering::Relaxed);
+        if asked == 0 {
+            return (from, false);
+        }
+        let b = self.shared.block.read();
+        // Asked for, and the callback has not started it yet.
+        if b.voice != asked {
+            return (from, true);
+        }
+        b.heard(self.shared.epoch.elapsed(), self.sample_rate)
     }
 
     /// Frames of silence played so far because a stream fell behind.
@@ -846,9 +990,10 @@ where
     let mut scratch: Vec<f32> = Vec::with_capacity(block * config.channels as usize);
     let stream = device.build_output_stream(
         *config,
-        move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+        move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
             scratch.resize(data.len(), 0.0);
-            mixer.fill(&mut scratch);
+            let t = info.timestamp();
+            mixer.fill(&mut scratch, t.playback.duration_since(t.callback));
             for (o, s) in data.iter_mut().zip(&scratch) {
                 *o = T::from_sample(*s);
             }
@@ -921,14 +1066,8 @@ mod tests {
 
     impl Bench {
         fn new(device_rate: u32) -> Bench {
-            let shared = Arc::new(Shared {
-                position: AtomicUsize::new(0),
-                playing: AtomicBool::new(false),
-                gain: AtomicU32::new(1.0f32.to_bits()),
-                underruns: AtomicUsize::new(0),
-            });
             let (tx, rx) = sync_channel(COMMANDS);
-            let mixer = Mixer { rx, shared, voice: None, dying: None, channels: 2, declick: 1, gain: 1.0 };
+            let mixer = Mixer { rx, shared: Arc::new(Shared::new()), voice: None, dying: None, channels: 2, declick: 1, gain: 1.0 };
             Bench { mixer, tx, device_rate }
         }
 
@@ -936,7 +1075,7 @@ mod tests {
         fn play(&self, path: &Path, source_rate: u32, bounds: Bounds, from: usize) -> Weak<Stream> {
             let stream = start_stream(path.to_path_buf(), source_rate, 2, self.device_rate, bounds, from);
             let weak = Arc::downgrade(&stream);
-            self.tx.send(Cmd::Play(Feed::Stream(stream), bounds, from)).unwrap();
+            self.tx.send(Cmd::Play(Feed::Stream(stream), bounds, from, 1)).unwrap();
             weak
         }
 
@@ -952,7 +1091,7 @@ mod tests {
                         std::thread::sleep(Duration::from_millis(1));
                     }
                 }
-                self.mixer.fill(&mut buf);
+                self.mixer.fill(&mut buf, Duration::ZERO);
                 left.extend(buf.chunks(2).map(|f| f[0]));
             }
             left.truncate(frames);
@@ -981,9 +1120,9 @@ mod tests {
             assert!((s - want).abs() < 1e-3, "frame {k}: got {s}, want {want}");
         }
         assert_eq!(b.mixer.shared.underruns.load(Ordering::Relaxed), 0);
-        assert!(b.mixer.shared.playing.load(Ordering::Relaxed));
-        let pos = b.mixer.shared.position.load(Ordering::Relaxed);
-        assert!(pos >= start && pos <= end);
+        let block = b.mixer.shared.block.read();
+        assert!(!block.ended);
+        assert!(block.pos >= start && block.pos <= end);
         std::fs::remove_file(&path).unwrap();
     }
 
@@ -999,8 +1138,9 @@ mod tests {
             assert!((got - want).abs() < 1e-3, "frame {k}: got {got}, want {want}");
         }
         assert!(out[end - from..].iter().all(|s| *s == 0.0));
-        assert!(!b.mixer.shared.playing.load(Ordering::Relaxed));
-        assert_eq!(b.mixer.shared.position.load(Ordering::Relaxed), end);
+        let block = b.mixer.shared.block.read();
+        assert!(block.ended);
+        assert_eq!(block.pos + block.rendered, end);
         assert_eq!(b.mixer.shared.underruns.load(Ordering::Relaxed), 0);
         let t0 = std::time::Instant::now();
         while stream.strong_count() > 0 && t0.elapsed() < Duration::from_secs(2) {
@@ -1037,12 +1177,12 @@ mod tests {
         let pcm = Arc::new(Pcm { sample_rate: 48_000, channels: 2, samples: (0..frames).flat_map(|f| [expected(48_000, f), 0.25]).collect() });
         let pick = |kept: usize| Bounds { channels: Channels::pick([kept], 2), ..bounds(0, frames, false) };
         let mut out = vec![0.0f32; 512 * 2];
-        b.tx.send(Cmd::Play(Feed::Whole(pcm.clone()), pick(1), 0)).unwrap();
-        b.mixer.fill(&mut out);
+        b.tx.send(Cmd::Play(Feed::Whole(pcm.clone()), pick(1), 0, 1)).unwrap();
+        b.mixer.fill(&mut out, Duration::ZERO);
         assert!(out[2..].iter().all(|s| *s == 0.25), "the right channel alone should reach both outputs");
-        b.tx.send(Cmd::Play(Feed::Whole(pcm), pick(0), 0)).unwrap();
-        b.mixer.fill(&mut out);
-        b.mixer.fill(&mut out);
+        b.tx.send(Cmd::Play(Feed::Whole(pcm), pick(0), 0, 1)).unwrap();
+        b.mixer.fill(&mut out, Duration::ZERO);
+        b.mixer.fill(&mut out, Duration::ZERO);
         assert!(out.chunks(2).enumerate().all(|(k, f)| f[0] == f[1] && (f[0] - expected(48_000, 512 + k)).abs() < 1e-6), "the left channel alone should reach both outputs");
     }
 
@@ -1054,9 +1194,9 @@ mod tests {
         let pcm = Arc::new(tone(48_000, 0.5));
         let len = pcm.frames();
         let (start, end) = (1_000, 9_000);
-        b.tx.send(Cmd::Play(Feed::Whole(pcm), Bounds { reverse: true, ..bounds(start, end, false) }, start)).unwrap();
+        b.tx.send(Cmd::Play(Feed::Whole(pcm), Bounds { reverse: true, ..bounds(start, end, false) }, start, 1)).unwrap();
         let mut out = vec![0.0f32; 512 * 2];
-        b.mixer.fill(&mut out);
+        b.mixer.fill(&mut out, Duration::ZERO);
         assert!(out.chunks(2).enumerate().skip(1).all(|(k, f)| (f[0] - expected(48_000, len - 1 - start - k)).abs() < 1e-6));
     }
 
@@ -1067,7 +1207,7 @@ mod tests {
         let mut b = Bench::new(48_000);
         b.mixer.declick = 240;
         let faded = |end| Bounds { fade_out: 2_400, ..bounds(0, end, true) };
-        b.tx.send(Cmd::Play(Feed::Whole(Arc::new(tone(48_000, 1.0))), faded(31_200), 30_000)).unwrap();
+        b.tx.send(Cmd::Play(Feed::Whole(Arc::new(tone(48_000, 1.0))), faded(31_200), 30_000, 1)).unwrap();
         let mut out = vec![0.0f32; 512 * 2];
         let mut left = Vec::new();
         for k in 0..12 {
@@ -1075,10 +1215,10 @@ mod tests {
                 b.tx.send(Cmd::Bounds(faded(31_200 + 800 * k))).unwrap();
             }
             if k == 6 {
-                let pos = b.mixer.shared.position.load(Ordering::Relaxed);
-                b.tx.send(Cmd::Bounds(faded(pos - 3_000))).unwrap();
+                let block = b.mixer.shared.block.read();
+                b.tx.send(Cmd::Bounds(faded(block.pos + block.rendered - 3_000))).unwrap();
             }
-            b.mixer.fill(&mut out);
+            b.mixer.fill(&mut out, Duration::ZERO);
             left.extend(out.chunks(2).map(|f| f[0]));
         }
         let slope = (2.0 * std::f64::consts::PI * TONE_HZ / 48_000.0) as f32 * AMP * 1.5;
@@ -1102,5 +1242,38 @@ mod tests {
         assert_eq!(first.strong_count(), 0, "retired stream's thread still alive");
         assert!(second.strong_count() > 0);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// A clip shorter than the output's latency: the playhead waits at its start until the
+    /// sound reaches the speaker, moves with it, and is heard until its last frame leaves.
+    #[test]
+    fn the_playhead_follows_the_sound_through_the_latency() {
+        let mut b = Bench::new(48_000);
+        let ms = |n: u64| Duration::from_millis(n);
+        b.tx.send(Cmd::Play(Feed::Whole(Arc::new(tone(48_000, 0.025))), bounds(0, 1_200, false), 0, 1)).unwrap();
+        let mut out = vec![0.0f32; 512 * 2];
+        b.mixer.fill(&mut out, ms(40));
+        let first = b.mixer.shared.block.read();
+        assert_eq!(first.heard(first.at - ms(5), 48_000), (0, true));
+        assert_eq!(first.heard(first.at + ms(5), 48_000), (240, true));
+        b.mixer.fill(&mut out, ms(40));
+        b.mixer.fill(&mut out, ms(40));
+        let last = b.mixer.shared.block.read();
+        assert!(last.ended);
+        assert_eq!(last.heard(last.at - ms(5), 48_000), (1_024 - 240, true));
+        assert_eq!(last.heard(last.at + ms(3), 48_000), (1_168, true));
+        assert_eq!(last.heard(last.at + ms(4), 48_000), (1_200, false));
+    }
+
+    /// Counted back past a loop's start or on past its end, the heard frame wraps.
+    #[test]
+    fn the_heard_frame_wraps_around_a_loop() {
+        let at = Duration::from_secs(1);
+        let block = Block { voice: 1, pos: 110, played: 10_000, rendered: 128, at, first: 0, start: 100, end: 200, looped: true, ended: false };
+        let frames = |n: u64| Duration::from_secs_f64(n as f64 / 48_000.0);
+        assert_eq!(block.heard(at - frames(20), 48_000).0, 190);
+        assert_eq!(block.heard(at + frames(95), 48_000).0, 105);
+        let below = Block { pos: 50, ..block };
+        assert_eq!(below.heard(at - frames(20), 48_000).0, 30);
     }
 }
