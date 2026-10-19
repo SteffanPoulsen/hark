@@ -39,6 +39,13 @@ K_OVERLAP = 40  # how far the chevron's tip runs into the stem
 ICON_STROKE = 280  # in the icon every space equals the stroke: bowls, arch and side margins
 ICON_SIZES = (16, 32, 48, 64, 128, 256, 512)
 
+# macOS 26 sets an icon that strays outside Apple's squircle on a grey plate, so the Mac icon
+# is that squircle on Apple's 1024 grid (824 wide), drawn a few pixels inside it for margin.
+MAC_TILE, MAC_SQUARE = 816, 5.0
+# icns entry types by pixel size; the 2x entries repeat a size under its retina name.
+ICNS = (("icp4", 16), ("icp5", 32), ("ic11", 32), ("ic12", 64), ("ic07", 128), ("ic13", 256),
+        ("ic08", 256), ("ic14", 512), ("ic09", 512), ("ic10", 1024))
+
 
 def sp(v, n):
     return math.copysign(abs(v) ** (2 / n), v)
@@ -136,6 +143,18 @@ def render(path, png, width):
     subprocess.run(["rsvg-convert", "-w", str(width), "-o", str(png), str(path)], check=True)
 
 
+def icns(svg_path, out):
+    """An .icns of PNG entries rendered from svg_path."""
+    entries = b""
+    with tempfile.TemporaryDirectory() as tmp:
+        for kind, size in ICNS:
+            png = Path(tmp, f"{size}.png")
+            render(svg_path, png, size)
+            data = png.read_bytes()
+            entries += kind.encode() + (8 + len(data)).to_bytes(4, "big") + data
+    out.write_bytes(b"icns" + (8 + len(entries)).to_bytes(4, "big") + entries)
+
+
 def main():
     letters, uu, word_w = wordmark()
     word_h = ASC + OVERSHOOT
@@ -150,16 +169,26 @@ def main():
     tx, ty = (256 - icon_w * s) / 2, (256 - icon_h * s) / 2
     icon_wear = gradient("wear", 0, 20, icon_w, XH + 20)
 
-    def icon_body(size, x=0.0, y=0.0):
+    def icon_wave_on(size, x, y):
         k = size / 256
+        return f'  <path transform="translate({x + tx * k:.3f},{y + ty * k:.3f}) scale({s * k:.6f})" d="{icon_d}" fill="url(#wear)"/>\n'
+
+    def icon_body(size, x=0.0, y=0.0):
         return (f'  <defs>{icon_wear}</defs>\n'
-                f'  <rect x="{x:.1f}" y="{y:.1f}" width="{size:.1f}" height="{size:.1f}" rx="{56 * k:.1f}" fill="{TILE}"/>\n'
-                f'  <path transform="translate({x + tx * k:.3f},{y + ty * k:.3f}) scale({s * k:.6f})" d="{icon_d}" fill="url(#wear)"/>\n')
+                f'  <rect x="{x:.1f}" y="{y:.1f}" width="{size:.1f}" height="{size:.1f}" rx="{56 * size / 256:.1f}" fill="{TILE}"/>\n'
+                + icon_wave_on(size, x, y))
 
     icon = ASSETS / "icon/kuulo.svg"
     icon.write_text(svg(256, 256, icon_body(256)))
     for size in ICON_SIZES:
         render(icon, ASSETS / f"icon/kuulo-{size}.png", size)
+
+    m, r = (1024 - MAC_TILE) / 2, MAC_TILE / 2
+    squircle = poly(superellipse(512, 512, r, r, MAC_SQUARE), True)
+    with tempfile.TemporaryDirectory() as tmp:
+        mac = Path(tmp, "kuulo-mac.svg")
+        mac.write_text(svg(1024, 1024, f'  <defs>{icon_wear}</defs>\n  <path d="{squircle}" fill="{TILE}"/>\n' + icon_wave_on(MAC_TILE, m, m)))
+        icns(mac, ASSETS / "icon/kuulo.icns")
 
     # The app tints these from its palette: the letters in the accent, the wave in the second accent.
     (ASSETS / "wordmark").mkdir(exist_ok=True)

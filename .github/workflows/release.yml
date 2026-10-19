@@ -1,4 +1,4 @@
-# Builds the release archives for Linux, Windows and macOS. A pushed tag `v*` attaches them
+# Builds the release downloads for Linux, Windows and macOS. A pushed tag `v*` attaches them
 # to a draft release of that tag, left for a person to publish; a manual run only keeps
 # them as workflow artifacts.
 name: release
@@ -67,19 +67,30 @@ jobs:
               (cd dist && 7z a -tzip -bso0 $dir.zip $dir)
               ;;
             macos-universal)
+              # The linker signs only the arm64 slice, and a bundle without a seal over its
+              # resources reads as damaged, so the whole app is signed once it is assembled.
+              app=dist/$dir/kuulo.app
+              mkdir -p $app/Contents/MacOS $app/Contents/Resources
               for b in kuulo kuulo-cli; do
-                lipo -create -output dist/$dir/$b target/aarch64-apple-darwin/release/$b target/x86_64-apple-darwin/release/$b
+                lipo -create -output $app/Contents/MacOS/$b target/aarch64-apple-darwin/release/$b target/x86_64-apple-darwin/release/$b
               done
-              tar -C dist -czf dist/$dir.tar.gz $dir
+              sed "s/VERSION/$v/g" packaging/Info.plist > $app/Contents/Info.plist
+              cp crates/kuulo/assets/icon/kuulo.icns $app/Contents/Resources/
+              codesign --force --sign - $app/Contents/MacOS/kuulo-cli
+              codesign --force --sign - $app
+              codesign --verify --deep --strict --verbose=2 $app
+              ln -s /Applications dist/$dir/Applications
+              hdiutil create -volname kuulo -srcfolder dist/$dir -format UDZO dist/$dir.dmg
               ;;
           esac
-          ls -l dist/*.tar.gz dist/*.zip 2>/dev/null || true
+          ls -l dist/*.tar.gz dist/*.zip dist/*.dmg 2>/dev/null || true
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.dmg
           if-no-files-found: error
       - name: Attach to the draft release
         if: startsWith(github.ref, 'refs/tags/v')

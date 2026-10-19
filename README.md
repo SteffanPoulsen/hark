@@ -27,7 +27,11 @@ Auditioning a large library in a DAW means importing first, and in a file manage
 
 ## Install
 
-Download the archive for Linux x86_64, Windows x86_64 or macOS (universal) from the [Releases](../../releases) page. On Linux, `install.sh` in the archive puts `kuulo` and `kuulo-cli` in `~/.local/bin` and installs the desktop entry and icon.
+Download kuulo for Linux x86_64, Windows x86_64 or macOS (universal) from the [Releases](../../releases) page.
+
+- **Linux:** `install.sh` in the archive puts `kuulo` and `kuulo-cli` in `~/.local/bin` and installs the desktop entry and icon.
+- **Windows:** unzip and run `kuulo.exe`. kuulo is not code-signed yet, so Windows may say it protected your PC: choose More info, then Run anyway.
+- **macOS:** open the disk image and drag kuulo to Applications. kuulo is not notarized by Apple, so macOS blocks the first launch. Within an hour of that attempt, open System Settings → Privacy & Security, choose Open Anyway beside the note about kuulo, and confirm with your password; from then on it opens like any other app. `kuulo-cli` is inside the app: add `export PATH="/Applications/kuulo.app/Contents/MacOS:$PATH"` to `~/.zprofile` to run it from a terminal.
 
 On Linux, dragging out and clipboard copy need Wayland; everything else runs on all three.
 
