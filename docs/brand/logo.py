@@ -45,6 +45,7 @@ MAC_TILE, MAC_SQUARE = 816, 5.0
 # icns entry types by pixel size; the 2x entries repeat a size under its retina name.
 ICNS = (("icp4", 16), ("icp5", 32), ("ic11", 32), ("ic12", 64), ("ic07", 128), ("ic13", 256),
         ("ic08", 256), ("ic14", 512), ("ic09", 512), ("ic10", 1024))
+ICO_SIZES = (16, 20, 24, 32, 40, 48, 64, 256)
 
 
 def sp(v, n):
@@ -143,16 +144,35 @@ def render(path, png, width):
     subprocess.run(["rsvg-convert", "-w", str(width), "-o", str(png), str(path)], check=True)
 
 
-def icns(svg_path, out):
-    """An .icns of PNG entries rendered from svg_path."""
-    entries = b""
+def pngs(svg_path, sizes):
+    """svg_path rendered at each size, as PNG bytes by size."""
     with tempfile.TemporaryDirectory() as tmp:
-        for kind, size in ICNS:
+        out = {}
+        for size in sizes:
             png = Path(tmp, f"{size}.png")
             render(svg_path, png, size)
-            data = png.read_bytes()
-            entries += kind.encode() + (8 + len(data)).to_bytes(4, "big") + data
+            out[size] = png.read_bytes()
+    return out
+
+
+def icns(svg_path, out):
+    """An .icns of PNG entries rendered from svg_path."""
+    images = pngs(svg_path, {size for _, size in ICNS})
+    entries = b"".join(kind.encode() + (8 + len(images[size])).to_bytes(4, "big") + images[size] for kind, size in ICNS)
     out.write_bytes(b"icns" + (8 + len(entries)).to_bytes(4, "big") + entries)
+
+
+def ico(svg_path, out):
+    """A Windows .ico of PNG entries rendered from svg_path."""
+    images = pngs(svg_path, ICO_SIZES)
+    offset = 6 + 16 * len(ICO_SIZES)
+    head = (0).to_bytes(2, "little") + (1).to_bytes(2, "little") + len(ICO_SIZES).to_bytes(2, "little")
+    for size in ICO_SIZES:
+        n = len(images[size])
+        head += bytes([size % 256, size % 256, 0, 0]) + (1).to_bytes(2, "little") + (32).to_bytes(2, "little")
+        head += n.to_bytes(4, "little") + offset.to_bytes(4, "little")
+        offset += n
+    out.write_bytes(head + b"".join(images[size] for size in ICO_SIZES))
 
 
 def main():
@@ -182,6 +202,7 @@ def main():
     icon.write_text(svg(256, 256, icon_body(256)))
     for size in ICON_SIZES:
         render(icon, ASSETS / f"icon/kuulo-{size}.png", size)
+    ico(icon, ASSETS / "icon/kuulo.ico")
 
     m, r = (1024 - MAC_TILE) / 2, MAC_TILE / 2
     squircle = poly(superellipse(512, 512, r, r, MAC_SQUARE), True)

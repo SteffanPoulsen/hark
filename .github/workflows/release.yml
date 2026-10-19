@@ -65,6 +65,8 @@ jobs:
             windows-x86_64)
               cp target/release/kuulo.exe target/release/kuulo-cli.exe dist/$dir/
               (cd dist && 7z a -tzip -bso0 $dir.zip $dir)
+              iscc=$(ls /c/Program\ Files*/Inno\ Setup*/ISCC.exe | head -1)
+              MSYS_NO_PATHCONV=1 "$iscc" /Q /DVersion=$v 'packaging\kuulo.iss'
               ;;
             macos-universal)
               # The linker signs only the arm64 slice, and a bundle without a seal over its
@@ -91,6 +93,7 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.dmg
+            dist/*.exe
           if-no-files-found: error
       - name: Attach to the draft release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -100,4 +103,4 @@ jobs:
         run: |
           tag=${GITHUB_REF#refs/tags/}
           gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --draft --title "kuulo ${tag#v}" --notes "Draft."
-          gh release upload "$tag" dist/kuulo-*-${{ matrix.name }}.* --clobber
+          gh release upload "$tag" $(find dist -maxdepth 1 -type f -name "kuulo-*-${{ matrix.name }}*") --clobber

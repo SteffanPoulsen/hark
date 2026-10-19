@@ -22,6 +22,9 @@ serde.workspace = true
 serde_json.workspace = true
 raw-window-handle = "0.6"
 
+[build-dependencies]
+winresource = { version = "0.1", default-features = false }
+
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # "system" shares libwayland with winit, so the drag source runs on the window's own connection.
 wayland-client = { version = "0.31", features = ["system"] }
