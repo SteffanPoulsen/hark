@@ -1,0 +1,27 @@
+[package]
+name = "kuulo-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["pipewire"]
+pipewire = ["cpal/pipewire"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+symphonia.workspace = true
+rubato.workspace = true
+ebur128.workspace = true
+rusqlite.workspace = true
+blake3.workspace = true
+walkdir.workspace = true
+directories.workspace = true
+cpal.workspace = true
+flacenc.workspace = true
+chrono.workspace = true
+ureq.workspace = true

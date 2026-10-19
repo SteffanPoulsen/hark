@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["crates/hark-core", "crates/hark-cli", "crates/hark"]
+members = ["crates/kuulo-core", "crates/kuulo-cli", "crates/kuulo"]
 
 [workspace.package]
 version = "0.5.2"
 edition = "2021"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/SteffanPoulsen/hark"
+repository = "https://github.com/SteffanPoulsen/kuulo"
 
 [workspace.dependencies]
-hark-core = { path = "crates/hark-core" }
+kuulo-core = { path = "crates/kuulo-core" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -42,5 +42,5 @@ opt-level = 2
 
 # Decoding, peaks and the mixer run per sample; unoptimised they make a dev build's loads
 # many times slower than a release build's.
-[profile.dev.package.hark-core]
+[profile.dev.package.kuulo-core]
 opt-level = 2

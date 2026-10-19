@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stages hark for the README screenshots and takes them.
+# Stages kuulo for the README screenshots and takes them.
 #
 #   stage.sh library   synthesize the sample library under the stage root (sox, ffmpeg)
 #   stage.sh config    a scratch config, project, tags, marks and exports over that library
@@ -8,19 +8,19 @@
 #   stage.sh social    shot the running window at two to one and compose docs/brand/social-preview.png over it
 #   stage.sh all       library, config, then hero.png, the social preview and presets.png
 #
-# A shot lands beside this script, or in $OUT. Everything else lives under $STAGE (default /tmp/hark-stage): a fake home whose paths read
-# like a real setup, and XDG config, data and cache folders so the user's own hark config
+# A shot lands beside this script, or in $OUT. Everything else lives under $STAGE (default /tmp/kuulo-stage): a fake home whose paths read
+# like a real setup, and XDG config, data and cache folders so the user's own kuulo config
 # is never touched. The window is floated and captured through Hyprland and grim.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
-STAGE=${STAGE:-/tmp/hark-stage}
+STAGE=${STAGE:-/tmp/kuulo-stage}
 home="$STAGE/home"
 lib="$home/Audio/Pigeon Wizard"
 game="$home/Games/Pigeon Wizard"
-cli="$repo/target/release/hark-cli"
-app="$repo/target/release/hark"
+cli="$repo/target/release/kuulo-cli"
+app="$repo/target/release/kuulo"
 export XDG_CONFIG_HOME="$STAGE/xdg/config" XDG_DATA_HOME="$STAGE/xdg/data" XDG_CACHE_HOME="$STAGE/xdg/cache"
 
 rate=48000
@@ -127,7 +127,7 @@ music() {
 config() {
   rm -rf "$STAGE/xdg" "$game"
   mkdir -p "$game"
-  "$cli" projects new "$game/Pigeon Wizard.hark" --output "$game/Assets/Audio" >/dev/null
+  "$cli" projects new "$game/Pigeon Wizard.kuulo" --output "$game/Assets/Audio" >/dev/null
   "$cli" roots add "$lib" --name "Pigeon Wizard SFX" >/dev/null
   "$cli" scan >/dev/null
   # The default tags keep their colours; the stage's own two get fixed ones, so every run looks alike.
@@ -154,7 +154,7 @@ config() {
   "$cli" export "$lib/UI/ui_confirm.wav" --preset sfx --into ui >/dev/null
   "$cli" export "$lib/Impacts/impact_metal_heavy_02.wav" --preset sfx --into sfx/combat >/dev/null
   "$cli" config --default-preset sfx --ui-zoom 1.0 >/dev/null
-  echo "config: project $game/Pigeon Wizard.hark, xdg under $STAGE/xdg"
+  echo "config: project $game/Pigeon Wizard.kuulo, xdg under $STAGE/xdg"
 }
 
 # The window the user had focused, to give focus back to after the stage touches theirs.
@@ -162,25 +162,25 @@ active() { hyprctl activewindow -j | python3 -I -c "import json,sys; print(json.
 refocus() { [ -n "$1" ] && hyprctl eval "hl.dispatch(hl.dsp.focus({ window = 'address:$1' }))" >/dev/null || true; }
 
 run() {
-  local extra=() prev title=hark
-  [ "${1:-}" = settings ] && extra=(--settings presets) && title="hark settings"
+  local extra=() prev title=kuulo
+  [ "${1:-}" = settings ] && extra=(--settings presets) && title="kuulo settings"
   prev=$(active)
-  pkill -x hark 2>/dev/null || true
+  pkill -x kuulo 2>/dev/null || true
   sleep 0.3
-  HOME="$home" "$app" --project "$game/Pigeon Wizard.hark" --open "$lib/Impacts/sword_hits_take03.wav" --in 1.43 --out 2.62 --fade-in 0.008 --fade-out 0.18 "${extra[@]}" >/dev/null 2>&1 &
+  HOME="$home" "$app" --project "$game/Pigeon Wizard.kuulo" --open "$lib/Impacts/sword_hits_take03.wav" --in 1.43 --out 2.62 --fade-in 0.008 --fade-out 0.18 "${extra[@]}" >/dev/null 2>&1 &
   disown
   window "$title" >/dev/null || true
   refocus "$prev"
 }
 
-# The address of the hark window with this title, once Hyprland lists it.
+# The address of the kuulo window with this title, once Hyprland lists it.
 window() {
   local title=$1 i
   for i in $(seq 1 60); do
-    hyprctl clients -j | python3 -I -c "import json,sys; c=[x for x in json.load(sys.stdin) if x['class']=='hark' and x['title']==sys.argv[1]]; print(c[0]['address']) if c else sys.exit(1)" "$title" && return
+    hyprctl clients -j | python3 -I -c "import json,sys; c=[x for x in json.load(sys.stdin) if x['class']=='kuulo' and x['title']==sys.argv[1]]; print(c[0]['address']) if c else sys.exit(1)" "$title" && return
     sleep 0.25
   done
-  echo "no hark window titled $title" >&2; return 1
+  echo "no kuulo window titled $title" >&2; return 1
 }
 
 # The capture goes on the monitor with the highest scale, so the pixels are the crispest
@@ -188,7 +188,7 @@ window() {
 # multiple of four logical pixels so the position is whole at any scale up to 1.25 and
 # grim's region starts on the window's own first pixel.
 shot() {
-  local name=${1:-hero} title=${2:-hark} w=${3:-1500} h=${4:-900} addr geo d pos prev
+  local name=${1:-hero} title=${2:-kuulo} w=${3:-1500} h=${4:-900} addr geo d pos prev
   prev=$(active)
   addr=$(window "$title")
   pos=$(hyprctl monitors -j | python3 -I -c "import json,sys; m=max(json.load(sys.stdin), key=lambda m: m['scale']); w,h=m['width']/m['scale'],m['height']/m['scale']; print(*(int(c)//4*4 for c in (m['x']+(w-$w)/2, m['y']+(h-$h)/2)))")
@@ -212,7 +212,7 @@ shot() {
 # along a diagonal from the top left corner, with the logo and tagline on the fade.
 # The layout is in pixels of a 2000 wide shot and scales with the shot.
 social() {
-  OUT=$STAGE shot social hark 1600 800 >/dev/null
+  OUT=$STAGE shot social kuulo 1600 800 >/dev/null
   python3 -I - "$STAGE/social.png" "$repo" <<'EOF'
 import sys, tomllib
 import numpy as np
@@ -223,10 +223,10 @@ ys, xs = np.mgrid[0:H, 0:W]
 a = np.clip((1.25 - (xs / W + ys / H)) / (1.25 - 0.62), 0, 1); a = a * a * (3 - 2 * a)
 rgb = np.asarray(img, dtype=np.float32)
 card = Image.fromarray((rgb * (1 - a[..., None]) + np.float32([22, 22, 22]) * a[..., None]).astype(np.uint8)).convert('RGBA')
-logo = Image.open(f'{repo}/docs/brand/hark-logo.png').convert('RGBA')
+logo = Image.open(f'{repo}/docs/brand/kuulo-logo.png').convert('RGBA')
 lh = round(120 * k); logo = logo.resize((round(logo.width * lh / logo.height), lh), Image.LANCZOS)
 card.alpha_composite(logo, (round(84 * k), round(80 * k)))
-fonts = f'{repo}/crates/hark/assets/fonts/'
+fonts = f'{repo}/crates/kuulo/assets/fonts/'
 head = ImageFont.truetype(fonts + 'Inter-SemiBold.ttf', round(60 * k))
 sub = ImageFont.truetype(fonts + 'Inter-Regular.ttf', round(31 * k))
 d = ImageDraw.Draw(card)
@@ -246,8 +246,8 @@ case ${1:-all} in
   library) library ;;
   config) config ;;
   run) run "${2:-}" ;;
-  shot) shot "${2:-hero}" "${3:-hark}" "${4:-1500}" "${5:-900}" ;;
+  shot) shot "${2:-hero}" "${3:-kuulo}" "${4:-1500}" "${5:-900}" ;;
   social) social ;;
-  all) library; config; run; shot hero; social; run settings; shot presets "hark settings" 960 820 ;;
+  all) library; config; run; shot hero; social; run settings; shot presets "kuulo settings" 960 820 ;;
   *) sed -n 2,12p "$0" ;;
 esac

@@ -2346,65 +2346,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hark"
-version = "0.5.2"
-dependencies = [
- "anyhow",
- "blake3",
- "clipboard-win",
- "drag",
- "eframe",
- "egui",
- "egui-phosphor",
- "egui_extras",
- "hark-core",
- "image",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "png",
- "raw-window-handle",
- "rfd",
- "serde",
- "serde_json",
- "wayland-client",
- "windows-sys 0.52.0",
- "wl-clipboard-rs",
-]
-
-[[package]]
-name = "hark-cli"
-version = "0.5.2"
-dependencies = [
- "anyhow",
- "clap",
- "hark-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "hark-core"
-version = "0.5.2"
-dependencies = [
- "anyhow",
- "blake3",
- "chrono",
- "cpal",
- "directories",
- "ebur128",
- "flacenc",
- "rubato",
- "rusqlite",
- "serde",
- "serde_json",
- "symphonia",
- "thiserror 2.0.21",
- "ureq",
- "walkdir",
-]
-
-[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2790,6 +2731,65 @@ dependencies = [
  "euclid",
  "polycool",
  "smallvec",
+]
+
+[[package]]
+name = "kuulo"
+version = "0.5.2"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "clipboard-win",
+ "drag",
+ "eframe",
+ "egui",
+ "egui-phosphor",
+ "egui_extras",
+ "image",
+ "kuulo-core",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "png",
+ "raw-window-handle",
+ "rfd",
+ "serde",
+ "serde_json",
+ "wayland-client",
+ "windows-sys 0.52.0",
+ "wl-clipboard-rs",
+]
+
+[[package]]
+name = "kuulo-cli"
+version = "0.5.2"
+dependencies = [
+ "anyhow",
+ "clap",
+ "kuulo-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kuulo-core"
+version = "0.5.2"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "cpal",
+ "directories",
+ "ebur128",
+ "flacenc",
+ "rubato",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "symphonia",
+ "thiserror 2.0.21",
+ "ureq",
+ "walkdir",
 ]
 
 [[package]]

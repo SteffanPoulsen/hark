@@ -52,22 +52,22 @@ jobs:
         run: |
           set -euo pipefail
           v=${{ steps.version.outputs.version }}
-          dir=hark-$v-${{ matrix.name }}
+          dir=kuulo-$v-${{ matrix.name }}
           mkdir -p dist/$dir
           cp README.md LICENSE dist/$dir/
           case "${{ matrix.name }}" in
             linux-x86_64)
-              cp target/release/hark target/release/hark-cli packaging/hark.desktop packaging/install.sh dist/$dir/
+              cp target/release/kuulo target/release/kuulo-cli packaging/kuulo.desktop packaging/install.sh dist/$dir/
               mkdir dist/$dir/icons
-              cp crates/hark/assets/icon/hark-*.png crates/hark/assets/icon/hark.svg dist/$dir/icons/
+              cp crates/kuulo/assets/icon/kuulo-*.png crates/kuulo/assets/icon/kuulo.svg dist/$dir/icons/
               tar -C dist -czf dist/$dir.tar.gz $dir
               ;;
             windows-x86_64)
-              cp target/release/hark.exe target/release/hark-cli.exe dist/$dir/
+              cp target/release/kuulo.exe target/release/kuulo-cli.exe dist/$dir/
               (cd dist && 7z a -tzip -bso0 $dir.zip $dir)
               ;;
             macos-universal)
-              for b in hark hark-cli; do
+              for b in kuulo kuulo-cli; do
                 lipo -create -output dist/$dir/$b target/aarch64-apple-darwin/release/$b target/x86_64-apple-darwin/release/$b
               done
               tar -C dist -czf dist/$dir.tar.gz $dir
@@ -88,5 +88,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag=${GITHUB_REF#refs/tags/}
-          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --draft --title "hark ${tag#v}" --notes "Draft."
-          gh release upload "$tag" dist/hark-*-${{ matrix.name }}.* --clobber
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --draft --title "kuulo ${tag#v}" --notes "Draft."
+          gh release upload "$tag" dist/kuulo-*-${{ matrix.name }}.* --clobber
