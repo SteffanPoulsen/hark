@@ -75,6 +75,8 @@ enum Divider {
 }
 /// Height of the top bar's row of controls; the bar is this plus its margins.
 const TOP_BAR_H: f32 = 32.0;
+/// Height of the wordmark in the top bar: its letters reach the ascender of 22 point Inter.
+const LOGO_H: f32 = 16.0;
 const MUTED: &str = "Every channel is muted; unmute one beside the wave";
 /// The channel strip's width; the transport starts past it, level with the wave.
 const STRIP_W: f32 = 22.0;
@@ -445,10 +447,6 @@ struct App {
     update_check: Option<settings::UpdateCheck>,
     /// The clear-copies confirmation is up.
     copies_clear: bool,
-    /// The mark beside the wordmark, white on transparent, tinted at draw time.
-    mark: egui::TextureHandle,
-    /// Centre line of the project switcher on the last frame; the brand sits on it, since
-    /// egui does not centre buttons on the row they are in.
     search_id: egui::Id,
     /// The search box had the keyboard last frame; keys are handled before it is drawn.
     search_focused: bool,
@@ -490,11 +488,7 @@ impl App {
             Err(e) => (None, Some(format!("{e:#}"))),
         };
         let worker = Worker::start(cc.egui_ctx.clone(), 3);
-        let mark = {
-            let png = image::load_from_memory(include_bytes!("../assets/icon/kuulo-mark-96.png")).expect("the mark is a PNG").into_rgba8();
-            let (w, h) = png.dimensions();
-            cc.egui_ctx.load_texture("mark", egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], png.as_raw()), egui::TextureOptions::LINEAR)
-        };
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         if !config.roots().is_empty() {
             worker.send(Job::Scan(config.roots().to_vec()));
         }
@@ -568,7 +562,6 @@ impl App {
             settings_open: false,
             outputs: None,
             update_check: None,
-            mark,
             settings_page: settings::Page::General,
             copies_clear: false,
             search_id: egui::Id::new("search"),
@@ -1921,26 +1914,18 @@ impl App {
         // after it (egui centres each item in the row height known when it is placed).
         const ROW_H: f32 = TOP_BAR_H;
         ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            // The wordmark is two white shapes on one canvas, tinted from the palette: the
+            // letters in the accent and the wave in the second accent. Both paint into one
+            // allocated rect, so each rasterises at the pixel size it is shown at. The bar's
+            // padding follows it, so it stands in the same space on both sides.
+            ui.spacing_mut().item_spacing.x = theme::PAD as f32;
+            let letters = egui::Image::new(egui::include_image!("../assets/wordmark/letters.svg")).tint(self.theme.accent);
+            let wave = egui::Image::new(egui::include_image!("../assets/wordmark/wave.svg")).tint(self.theme.accent2);
+            let size = letters.load_and_calc_size(ui, egui::vec2(f32::INFINITY, LOGO_H)).unwrap_or(egui::vec2(LOGO_H, LOGO_H));
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            letters.paint_at(ui, rect);
+            wave.paint_at(ui, rect);
             ui.spacing_mut().item_spacing.x = theme::GAP;
-            // The brand is one word: the mark stands on the letters' baseline and reaches
-            // their ascender line, measured from the glyphs' own ink, and that block, not the
-            // font box, is centred on the controls.
-            let font = FontId::new(18.0, egui::FontFamily::Name(theme::SEMIBOLD.into()));
-            let word = ui.fonts_mut(|f| f.layout_no_wrap("kuulo".into(), font.clone(), self.theme.accent));
-            let (ink_top, ink_bottom) = word
-                .rows
-                .iter()
-                .flat_map(|r| r.row.glyphs.iter().map(move |g| (r.pos.y + g.pos.y + g.uv_rect.offset.y, g.uv_rect.size.y)))
-                .fold((f32::MAX, f32::MIN), |(t, b), (top, h)| (t.min(top), b.max(top + h)));
-            let ink_h = (ink_bottom - ink_top).max(1.0);
-            let [w, h] = self.mark.size();
-            let mark_w = ink_h * w as f32 / h as f32;
-            let gap = 5.0;
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(mark_w + gap + word.size().x, ROW_H), Sense::hover());
-            let galley_top = rect.center().y - (ink_top + ink_bottom) / 2.0;
-            let mark_rect = egui::Rect::from_min_size(egui::pos2(rect.left(), galley_top + ink_top), egui::vec2(mark_w, ink_h));
-            egui::Image::new(&self.mark).tint(self.theme.accent2).paint_at(ui, mark_rect);
-            ui.painter().galley(egui::pos2(mark_rect.right() + gap, galley_top), word, self.theme.accent);
             if let Some(action) = self.project_menu(ui) {
                 self.apply_project_action(action);
             }

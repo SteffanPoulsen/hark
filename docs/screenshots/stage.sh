@@ -224,8 +224,8 @@ a = np.clip((1.25 - (xs / W + ys / H)) / (1.25 - 0.62), 0, 1); a = a * a * (3 - 
 rgb = np.asarray(img, dtype=np.float32)
 card = Image.fromarray((rgb * (1 - a[..., None]) + np.float32([22, 22, 22]) * a[..., None]).astype(np.uint8)).convert('RGBA')
 logo = Image.open(f'{repo}/docs/brand/kuulo-logo.png').convert('RGBA')
-lh = round(120 * k); logo = logo.resize((round(logo.width * lh / logo.height), lh), Image.LANCZOS)
-card.alpha_composite(logo, (round(84 * k), round(80 * k)))
+lh = round(130 * k); logo = logo.resize((round(logo.width * lh / logo.height), lh), Image.LANCZOS)
+card.alpha_composite(logo, (round(90 * k), round(80 * k)))
 fonts = f'{repo}/crates/kuulo/assets/fonts/'
 head = ImageFont.truetype(fonts + 'Inter-SemiBold.ttf', round(60 * k))
 sub = ImageFont.truetype(fonts + 'Inter-Regular.ttf', round(31 * k))
@@ -233,10 +233,10 @@ d = ImageDraw.Draw(card)
 d.text((round(90 * k), round(240 * k)), 'Listen fast, export clean.', font=head, fill=(232, 230, 226))
 d.text((round(90 * k), round(326 * k)), 'A local sound library browser for game audio,', font=sub, fill=(165, 165, 165))
 d.text((round(90 * k), round(368 * k)), 'film, theatre and podcasts. Free software, GPL.', font=sub, fill=(165, 165, 165))
-# Until 1.0 the card announces the version, on the wordmark's baseline (the logo pads its ink by 24 of 262).
+# Until 1.0 the card announces the version, on the wordmark's baseline (docs/brand/logo.py puts it at 0.8125 of the lockup's height).
 version = tomllib.load(open(f'{repo}/Cargo.toml', 'rb'))['workspace']['package']['version']
 if version.startswith('0.'):
-    d.text((round(84 * k) + logo.width + round(28 * k), round(80 * k + lh * (1 - 24 / 262))), f'v{version}', font=ImageFont.truetype(fonts + 'Inter-Regular.ttf', round(36 * k)), fill=(165, 165, 165), anchor='ls')
+    d.text((round(90 * k) + logo.width + round(28 * k), round(80 * k + lh * 0.8125)), f'v{version}', font=ImageFont.truetype(fonts + 'Inter-Regular.ttf', round(36 * k)), fill=(165, 165, 165), anchor='ls')
 card.convert('RGB').save(f'{repo}/docs/brand/social-preview.png', optimize=True)
 print(f'social: {repo}/docs/brand/social-preview.png ({W}x{H})')
 EOF

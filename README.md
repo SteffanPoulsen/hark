@@ -1,4 +1,4 @@
-<img src="docs/brand/kuulo-logo.png" alt="kuulo" width="240">
+<img src="docs/brand/kuulo-logo.png" alt="kuulo" width="270">
 
 **Listen fast, export clean.** A local sound library browser for game audio, film and video post, apps, theatre, podcasts and sample packs.
 

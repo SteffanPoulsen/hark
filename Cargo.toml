@@ -28,7 +28,7 @@ ureq = { version = "3", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.36", features = ["persistence"] }
 egui = "0.36"
-egui_extras = { version = "0.36", features = ["serde"] }
+egui_extras = { version = "0.36", features = ["serde", "svg"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 egui-phosphor = { version = "0.14", features = ["regular", "fill"] }
 rfd = "0.17"
