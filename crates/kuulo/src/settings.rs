@@ -205,7 +205,7 @@ impl App {
         ui.label(theme::semibold("kuulo").size(28.0));
         ui.label(RichText::new(format!("Version {}", kuulo_core::VERSION)).color(theme.muted));
         ui.add_space(6.0);
-        ui.label("A local audio asset browser: audition a folder library, mark what you find, and export selections with their origin inside the file.");
+        ui.label("A local sound library browser: audition a folder library, mark what you find, and export selections with their origin inside the file.");
         ui.add_space(16.0);
         let link = |ui: &mut egui::Ui, icon: &str, label: &str, url: String| {
             if ui.add(egui::Button::new(theme::icon_text(icon, label, 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(0.0, 28.0))).on_hover_text(&url).clicked() {

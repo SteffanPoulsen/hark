@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=kuulo
-Comment=Audio asset browser for sound design
+Comment=Sound library browser for game audio and film
 Exec=kuulo %f
 Icon=kuulo
 Terminal=false

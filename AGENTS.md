@@ -4,7 +4,7 @@ Guidance for coding agents working in this repository.
 
 ## What this is
 
-kuulo: a local audio asset browser for anyone who works from a library of sounds, game audio first but film, apps, theatre and podcasts alike. Fast audition of a folder-based library, favorites and user-defined tags, waveform selection with fades, preset-driven export into a project, and an origin record embedded in every exported file. Linux and Wayland first, Windows and macOS from the same code. Public repository, git, GPL-3.0-or-later.
+kuulo: a local sound library browser, game audio first but film, apps, theatre and podcasts alike. Fast audition of a folder-based library, favorites and user-defined tags, waveform selection with fades, preset-driven export into a project, and an origin record embedded in every exported file. Linux and Wayland first, Windows and macOS from the same code. Public repository, git, GPL-3.0-or-later.
 
 The design note that started it lives in the user's Obsidian vault (`Audio Asset Browser - idea.md`); `README.md` is the current description for users.
 

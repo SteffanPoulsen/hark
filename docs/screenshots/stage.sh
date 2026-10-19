@@ -231,8 +231,8 @@ head = ImageFont.truetype(fonts + 'Inter-SemiBold.ttf', round(60 * k))
 sub = ImageFont.truetype(fonts + 'Inter-Regular.ttf', round(31 * k))
 d = ImageDraw.Draw(card)
 d.text((round(90 * k), round(240 * k)), 'Listen fast, export clean.', font=head, fill=(232, 230, 226))
-d.text((round(90 * k), round(326 * k)), 'A local audio asset browser for anyone who works', font=sub, fill=(165, 165, 165))
-d.text((round(90 * k), round(368 * k)), 'from a library of sounds. Free software, GPL.', font=sub, fill=(165, 165, 165))
+d.text((round(90 * k), round(326 * k)), 'A local sound library browser for game audio,', font=sub, fill=(165, 165, 165))
+d.text((round(90 * k), round(368 * k)), 'film, theatre and podcasts. Free software, GPL.', font=sub, fill=(165, 165, 165))
 # Until 1.0 the card announces the version, on the wordmark's baseline (the logo pads its ink by 24 of 262).
 version = tomllib.load(open(f'{repo}/Cargo.toml', 'rb'))['workspace']['package']['version']
 if version.startswith('0.'):

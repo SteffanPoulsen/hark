@@ -1,6 +1,6 @@
 <img src="docs/brand/kuulo-logo.png" alt="kuulo" width="240">
 
-**Listen fast, export clean.** A local audio asset browser for anyone who works from a library of sounds: game audio, film and video post, apps, theatre, podcasts, sample packs.
+**Listen fast, export clean.** A local sound library browser for game audio, film and video post, apps, theatre, podcasts and sample packs.
 
 ![kuulo auditioning a sword take, one hit selected with fades, the export card set to the sfx preset](docs/screenshots/hero.png)
 
