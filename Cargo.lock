@@ -2735,7 +2735,7 @@ dependencies = [
 
 [[package]]
 name = "kuulo"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2762,7 +2762,7 @@ dependencies = [
 
 [[package]]
 name = "kuulo-cli"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2773,7 +2773,7 @@ dependencies = [
 
 [[package]]
 name = "kuulo-core"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "blake3",
