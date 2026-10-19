@@ -1,12 +1,12 @@
 # AGENTS.md
 
-Guidance for coding agents working in this repository.
+Guidance for coding agents working in this repository. If `AGENTS.local.md` sits beside this file, read it as well: it is the working copy's own workflow and notes, kept out of the repository.
 
 ## What this is
 
 kuulo: a local sound library browser, game audio first but film, apps, theatre and podcasts alike. Fast audition of a folder-based library, favorites and user-defined tags, waveform selection with fades, preset-driven export into a project, and an origin record embedded in every exported file. Linux and Wayland first, Windows and macOS from the same code. Public repository, git, GPL-3.0-or-later.
 
-The design note that started it lives in the user's Obsidian vault (`Audio Asset Browser - idea.md`); `README.md` is the current description for users.
+`README.md` is the current description for users.
 
 ## Shape
 
@@ -31,11 +31,9 @@ A Cargo workspace with one core and two thin frontends. The frontends never reim
 ## Working here
 
 - `cargo clippy` stays at zero warnings. Fix a finding when the fix leaves the code no worse; otherwise `#[allow]` it on that one item, with a reason where it isn't obvious. A warning left standing costs every later session that reads the output.
-- `cargo build` builds everything; `cargo check --target x86_64-pc-windows-gnu` checks the Windows build (mingw-w64 is installed on majestic-prime).
-- Test audio is generated, not committed: see the sox and ffmpeg recipe in the session that built the first version, or make a few files with `sox -n -r 48000 -c 2 out.wav synth 0.4 sine 440 fade 0 0.4 0.3`.
+- `cargo build` builds everything; `cargo check --target x86_64-pc-windows-gnu` checks the Windows build; it needs mingw-w64.
+- Test audio is generated, not committed: make a few files with `sox -n -r 48000 -c 2 out.wav synth 0.4 sine 440 fade 0 0.4 0.3`.
 - `kuulo-cli roots add <folder>` then `kuulo-cli export <file> --preset sfx --output-root /tmp/out` exercises the whole core; `kuulo --open <file>` opens the window on a file for a visual check.
-- The user tests through the kuulo-dev launcher, which runs `target/debug/kuulo`: run `cargo build` before handing anything over to try, and name that launcher. The plain kuulo launcher runs an installed copy in `~/.local/bin` that never carries work in progress.
 - Config and database live under `~/.config/kuulo` and `~/.local/share/kuulo` on Linux; delete them to start fresh.
-- `NOTES.md` at the root is git-ignored, a working copy's own file: follow-ups and observations with their reasons, between a passing thought and a ROADMAP.md entry. Read it when a task starts if it is there; add to it when work turns up something worth keeping that is not the task.
-- `docs/screenshots/stage.sh all` synthesizes a sample library with sox, stages a project over it under `/tmp/kuulo-stage` with its own XDG folders, and captures the README screenshots through Hyprland and grim; `stage.sh social` composes the repository's social card, `docs/brand/social-preview.png`, from the running window. The capture floats and focuses windows on the user's desktop, so run it only when the user gives the go-ahead. `KUULO_OPEN_POPUP=filter` or `=file` opens the filter or the wave card's file menu at launch, for a capture of a popup nobody can click open. Every release retakes all of them from the release build, since the window shows the version; a visible change between releases is a reason to say they need retaking.
+- `docs/screenshots/stage.sh all` synthesizes a sample library with sox, stages a project over it under `/tmp/kuulo-stage` with its own XDG folders, and captures the README screenshots through Hyprland and grim; `stage.sh social` composes the repository's social card, `docs/brand/social-preview.png`, from the running window. `KUULO_OPEN_POPUP=filter` or `=file` opens the filter or the wave card's file menu at launch, for a capture of a popup nobody can click open.
 - `docs/brand/logo.py` draws the logo from its construction and writes every file made from it: the lockup the README and the social card show, the top bar's wordmark (two white shapes the window tints from its palette), and the icon set. Change the logo there, not in the files it writes; it needs `vectorcraft-cli` and `rsvg-convert`.
