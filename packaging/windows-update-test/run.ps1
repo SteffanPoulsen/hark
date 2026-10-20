@@ -48,13 +48,14 @@ function CloseKuulo {
 function WaitFor([scriptblock]$done, [int]$seconds) {
     for ($i = 0; $i -lt $seconds -and -not (& $done); $i++) { Start-Sleep 1 }
 }
-# Runs kuulo-cli through cmd, which hands back its error output as plain lines: Windows
-# PowerShell 5.1 would turn them into errors that stop this script.
-function Cli([string]$arguments) {
-    $lines = cmd /c "`"$app\kuulo-cli.exe`" $arguments 2>&1"
-    $code = $LASTEXITCODE
-    foreach ($line in $lines) { Note "  kuulo-cli: $line" }
-    Note "  kuulo-cli exit code: $code"
+# Runs kuulo-cli with its output in files: read straight from a native program, Windows
+# PowerShell 5.1 turns error output into errors that stop this script.
+function RunKuuloCli([string]$arguments) {
+    $out = Join-Path $env:TEMP 'kuulo-cli-out.txt'
+    $err = Join-Path $env:TEMP 'kuulo-cli-err.txt'
+    $process = Start-Process -FilePath "$app\kuulo-cli.exe" -ArgumentList $arguments -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+    foreach ($line in @(Get-Content $out) + @(Get-Content $err)) { if ($line) { Note "  kuulo-cli: $line" } }
+    Note "  kuulo-cli exit code: $($process.ExitCode)"
 }
 
 New-Item -ItemType File -Path $report -Force | Out-Null
@@ -83,11 +84,11 @@ try {
     $env:KUULO_UPDATE_FEED = $feedUrl
     Start-Process (Join-Path $app 'kuulo.exe') -ArgumentList '--settings', 'about'
     Note 'kuulo 0.0.1 is opening on Settings > About.'
-    Note 'Click Check for updates, then Install 0.0.2. kuulo should close, then open again by itself.'
+    Note "Click Check for updates, then Install 0.0.2. kuulo should close, then open again by itself with its What's new card."
     Read-Host 'Press Enter once kuulo is back, or once it clearly is not coming back' | Out-Null
     WaitFor { (Installed) -eq '0.0.2' } 30
     State
-    Answer 'Did kuulo come back by itself? Did any message or window appear on the way? (describe)' | Out-Null
+    Answer "Did kuulo come back by itself, showing What's new with 'Updated from 0.0.1'? Did anything else appear on the way? (describe)" | Out-Null
     CloseKuulo
 
     Step '2 of 2: install from kuulo-cli'
@@ -96,12 +97,12 @@ try {
     Start-Process (Join-Path $app 'kuulo.exe')
     Read-Host 'kuulo 0.0.1 is opening. Press Enter once its window is up' | Out-Null
     Note 'Running kuulo-cli update with the window open. It should refuse and ask for kuulo to be closed.'
-    Cli 'update'
+    RunKuuloCli 'update'
     State
     Answer 'Is the kuulo window still open and working, with nothing else on screen? (describe)' | Out-Null
     Note 'Closing kuulo, then running kuulo-cli update again. It should install with nothing on screen.'
     CloseKuulo
-    Cli 'update'
+    RunKuuloCli 'update'
     WaitFor { (Installed) -eq '0.0.2' } 90
     State
     Answer 'Did any message or window appear this time, such as files in use? (describe)' | Out-Null

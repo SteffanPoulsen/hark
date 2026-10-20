@@ -38,12 +38,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libpipewire-0.3-dev libasound2-dev libclang-dev pkg-config libxkbcommon-dev libwayland-dev libgl-dev
+      # A test version takes the coming release's notes as its own, as the release's version
+      # commit will, so its what's-new card shows after an update like the release's.
       - name: Test version
         if: inputs.version != ''
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
-        run: sed -i.bak "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml && rm Cargo.toml.bak
+        run: |
+          sed -i.bak "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml && rm Cargo.toml.bak
+          sed -i.bak "s/^## Unreleased$/## $VERSION/" CHANGELOG.md && rm CHANGELOG.md.bak
       - name: Version
         id: version
         shell: bash
