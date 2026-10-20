@@ -28,6 +28,17 @@ pub fn peaks_cache_dir() -> PathBuf {
     dirs().cache_dir().join("peaks")
 }
 
+/// Where an update is downloaded and unpacked before it is installed.
+pub fn update_dir() -> PathBuf {
+    dirs().cache_dir().join("update")
+}
+
+/// Written by the Linux archive's `install.sh`: the folder it put the binaries in.
+#[cfg(target_os = "linux")]
+pub fn install_marker() -> PathBuf {
+    dirs().data_dir().join("installed")
+}
+
 /// Writes `bytes` beside `path` and renames them over it, so a reader never sees half a file:
 /// the window and the CLI each reload what the other saves. The temporary name carries the
 /// process, so two writers never share one.

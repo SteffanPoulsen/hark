@@ -5,7 +5,7 @@ use egui::{Color32, CornerRadius, Margin, RichText};
 use egui_phosphor::regular as icons;
 use kuulo_core::audition::Player;
 use kuulo_core::keys::Action;
-use kuulo_core::update::Release;
+use kuulo_core::update::{Progress, Release};
 use std::sync::mpsc::Receiver;
 
 use crate::theme::{self, Theme};
@@ -48,6 +48,13 @@ impl Page {
 pub enum UpdateCheck {
     Running(Receiver<Result<Release, String>>),
     Done(Result<Release, String>),
+    Installing { release: Release, rx: Receiver<InstallStep>, progress: Option<Progress> },
+    InstallFailed { release: Release, error: String },
+}
+
+pub enum InstallStep {
+    Progress(Progress),
+    Done(Result<(), String>),
 }
 
 const NAV_W: f32 = 180.0;
@@ -195,15 +202,54 @@ impl App {
         });
     }
 
+    /// Takes in what the update check or the install has sent. A finished install closes
+    /// kuulo, and the installed one starts once this one has gone.
+    pub fn poll_update(&mut self, ctx: &egui::Context) {
+        let next = match &mut self.update_check {
+            Some(UpdateCheck::Running(rx)) => rx.try_recv().ok().map(UpdateCheck::Done),
+            Some(UpdateCheck::Installing { release, rx, progress }) => {
+                let mut next = None;
+                while let Ok(step) = rx.try_recv() {
+                    match step {
+                        InstallStep::Progress(p) => *progress = Some(p),
+                        InstallStep::Done(Ok(())) => ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close),
+                        InstallStep::Done(Err(error)) => next = Some(UpdateCheck::InstallFailed { release: release.clone(), error }),
+                    }
+                }
+                next
+            }
+            _ => None,
+        };
+        if next.is_some() {
+            self.update_check = next;
+        }
+    }
+
+    fn start_install(&mut self, release: Release, ctx: &egui::Context) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        let r = release.clone();
+        std::thread::spawn(move || {
+            let result = kuulo_core::update::install(&r, true, &mut |p| {
+                let _ = tx.send(InstallStep::Progress(p));
+                ctx.request_repaint();
+            });
+            let _ = tx.send(InstallStep::Done(result.map_err(|e| format!("{e:#}"))));
+            ctx.request_repaint();
+        });
+        self.update_check = Some(UpdateCheck::Installing { release, rx, progress: None });
+    }
+
     fn page_about(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme.clone();
-        if let Some(UpdateCheck::Running(rx)) = &self.update_check {
-            if let Ok(result) = rx.try_recv() {
-                self.update_check = Some(UpdateCheck::Done(result));
-            }
-        }
         ui.label(theme::semibold("kuulo").size(28.0));
-        ui.label(RichText::new(format!("Version {}", kuulo_core::VERSION)).color(theme.muted));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("Version {}", kuulo_core::VERSION)).color(theme.muted));
+            let notes = crate::whats_new::again();
+            if ui.add_enabled(notes.is_some(), egui::Button::new(theme::icon_text(icons::SPARKLE, "What's new", 13.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER))).clicked() {
+                self.whats_new = notes;
+            }
+        });
         ui.add_space(6.0);
         ui.label("A local sound library browser: audition a folder library, mark what you find, and export selections with their origin inside the file.");
         ui.add_space(16.0);
@@ -213,19 +259,43 @@ impl App {
             }
         };
         card(ui, &theme, |ui| {
-            let (desc, release) = match &self.update_check {
-                None => ("Asks GitHub for the latest release. kuulo makes no other request.".to_string(), None),
+            let own = kuulo_core::update::own_install().is_some();
+            let mb = |bytes: u64| bytes as f64 / 1e6;
+            let (desc, offer) = match &self.update_check {
+                None => ("Asks GitHub for the latest release. kuulo contacts GitHub at no other time, and downloads an update only when you install it.".to_string(), None),
                 Some(UpdateCheck::Running(_)) => ("Asking GitHub…".to_string(), None),
-                Some(UpdateCheck::Done(Ok(r))) if r.newer => (format!("kuulo {} is out.", r.version), Some(r.url.clone())),
+                Some(UpdateCheck::Done(Ok(r))) if r.newer => {
+                    let how = if own { "Installing it restarts kuulo." } else { kuulo_core::update::PACKAGED.unwrap_or("") };
+                    (format!("kuulo {} is out. {how}", r.version), Some(r.clone()))
+                }
                 Some(UpdateCheck::Done(Ok(_))) => ("This is the latest release.".to_string(), None),
                 Some(UpdateCheck::Done(Err(e))) => (format!("The check failed: {e}"), None),
+                Some(UpdateCheck::Installing { release, progress, .. }) => {
+                    let v = &release.version;
+                    let desc = match progress {
+                        Some(Progress::Downloading { done, total: Some(total) }) => format!("Downloading kuulo {v}: {:.1} of {:.1} MB", mb(*done), mb(*total)),
+                        Some(Progress::Downloading { done, total: None }) => format!("Downloading kuulo {v}: {:.1} MB", mb(*done)),
+                        Some(Progress::Installing) => format!("Installing kuulo {v}…"),
+                        None => format!("Downloading kuulo {v}…"),
+                    };
+                    (desc, None)
+                }
+                Some(UpdateCheck::InstallFailed { release, error }) => (format!("Installing kuulo {} failed: {error}", release.version), Some(release.clone())),
             };
             row(ui, &theme, true, "Updates", &desc, |ui| {
-                if let Some(url) = release {
-                    link(ui, icons::DOWNLOAD_SIMPLE, "Get it", url);
+                if let Some(release) = offer {
+                    if !own {
+                        link(ui, icons::DOWNLOAD_SIMPLE, "Get it", release.url.clone());
+                    } else if ui
+                        .add(egui::Button::new(theme::icon_text(icons::DOWNLOAD_SIMPLE, &format!("Install {}", release.version), 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(0.0, 28.0)))
+                        .on_hover_text("Downloads it, checks kuulo's release signature on it, installs it and restarts kuulo.")
+                        .clicked()
+                    {
+                        self.start_install(release, ui.ctx());
+                    }
                 }
-                let running = matches!(self.update_check, Some(UpdateCheck::Running(_)));
-                if ui.add_enabled(!running, egui::Button::new(theme::icon_text(icons::ARROWS_CLOCKWISE, "Check for updates", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(0.0, 28.0))).clicked() {
+                let busy = matches!(self.update_check, Some(UpdateCheck::Running(_) | UpdateCheck::Installing { .. }));
+                if ui.add_enabled(!busy, egui::Button::new(theme::icon_text(icons::ARROWS_CLOCKWISE, "Check for updates", 14.0, egui::FontFamily::Proportional, Color32::PLACEHOLDER)).min_size(egui::vec2(0.0, 28.0))).clicked() {
                     let (tx, rx) = std::sync::mpsc::channel();
                     let ctx = ui.ctx().clone();
                     std::thread::spawn(move || {

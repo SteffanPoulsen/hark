@@ -7,6 +7,7 @@ mod promise;
 mod settings;
 mod theme;
 mod waveform;
+mod whats_new;
 mod worker;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -445,6 +446,8 @@ struct App {
     /// The output devices the General page offers, listed once per opening of the window.
     outputs: Option<Vec<kuulo_core::audition::Output>>,
     update_check: Option<settings::UpdateCheck>,
+    /// The what's-new card, while it is up.
+    whats_new: Option<whats_new::WhatsNew>,
     /// The clear-copies confirmation is up.
     copies_clear: bool,
     search_id: egui::Id,
@@ -481,6 +484,9 @@ impl App {
         let theme = theme_file.as_ref().and_then(|p| Theme::from_file(p)).unwrap_or_default();
         theme.apply(&cc.egui_ctx);
         cc.egui_ctx.set_zoom_factor(config.ui_zoom.clamp(0.5, 3.0));
+        // eframe's state file: only the window writes it, where the CLI creates the database too.
+        let ran_before = eframe::storage_dir("kuulo").is_some_and(|d| d.join("app.ron").exists());
+        let whats_new = whats_new::on_start(cc.storage.and_then(|s| s.get_string(whats_new::SEEN_KEY)).as_deref(), ran_before);
         let mut db = Db::open().expect("library database");
         db.set_project(config.project_id());
         let (player, audio_error) = match Player::open(config.output_sample_rate, config.output_device.as_deref()) {
@@ -562,6 +568,7 @@ impl App {
             settings_open: false,
             outputs: None,
             update_check: None,
+            whats_new,
             settings_page: settings::Page::General,
             copies_clear: false,
             search_id: egui::Id::new("search"),
@@ -3853,6 +3860,10 @@ impl eframe::App for App {
         self.drag.shutdown();
     }
 
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(whats_new::SEEN_KEY, kuulo_core::VERSION.to_string());
+    }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         if std::mem::take(&mut self.drag_took_release) {
             let (pos, modifiers) = ctx.input(|i| (i.pointer.interact_pos(), i.modifiers));
@@ -3926,6 +3937,8 @@ impl eframe::App for App {
             }
         }
 
+        self.ui_whats_new(&ctx);
+        self.poll_update(&ctx);
         self.ui_settings(&ctx);
         self.hold_drag(&ctx);
 

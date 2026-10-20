@@ -4,13 +4,17 @@
 # compositor show kuulo by its app id. ~/.local/bin is not on every graphical session's
 # PATH, so an archive install points the entry at the installed binary; from the repository
 # the binaries stay where cargo put them and the entry runs `kuulo` by name.
+# An archive install also leaves a marker naming the binaries' folder: kuulo installs its
+# own updates only when it runs from there, by running the next archive's install.sh.
 # `install.sh --uninstall` removes what this installs and leaves the library, settings and
 # copies alone.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 bin="$HOME/.local/bin"
-apps="$HOME/.local/share/applications"
-hicolor="$HOME/.local/share/icons/hicolor"
+data="${XDG_DATA_HOME:-$HOME/.local/share}"
+apps="$data/applications"
+hicolor="$data/icons/hicolor"
+marker="$data/kuulo/installed"
 sizes="16 32 48 64 128 256 512"
 
 refresh() {
@@ -19,7 +23,7 @@ refresh() {
 }
 
 if [ "$1" = --uninstall ]; then
-  rm -f "$bin/kuulo" "$bin/kuulo-cli" "$apps/kuulo.desktop" "$hicolor/scalable/apps/kuulo.svg"
+  rm -f "$bin/kuulo" "$bin/kuulo-cli" "$marker" "$apps/kuulo.desktop" "$hicolor/scalable/apps/kuulo.svg"
   for s in $sizes; do
     rm -f "$hicolor/${s}x${s}/apps/kuulo.png"
   done
@@ -35,8 +39,16 @@ else
 fi
 exec_line="Exec=kuulo %f"
 if [ -x "$here/kuulo" ]; then
-  install -Dm755 "$here/kuulo" "$bin/kuulo"
-  install -Dm755 "$here/kuulo-cli" "$bin/kuulo-cli"
+  # Both binaries are copied in beside their places first and then renamed over them, so a
+  # copy that fails, on a full disk say, leaves the installed kuulo whole.
+  mkdir -p "$bin"
+  trap 'rm -f "$bin/.kuulo.new" "$bin/.kuulo-cli.new"' EXIT
+  install -m755 "$here/kuulo" "$bin/.kuulo.new"
+  install -m755 "$here/kuulo-cli" "$bin/.kuulo-cli.new"
+  mv -f "$bin/.kuulo.new" "$bin/kuulo"
+  mv -f "$bin/.kuulo-cli.new" "$bin/kuulo-cli"
+  mkdir -p "$data/kuulo"
+  echo "$bin" > "$marker"
   exec_line="Exec=\"$bin/kuulo\" %f"
 fi
 mkdir -p "$apps"

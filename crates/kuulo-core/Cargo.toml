@@ -25,3 +25,7 @@ cpal.workspace = true
 flacenc.workspace = true
 chrono.workspace = true
 ureq.workspace = true
+minisign-verify.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

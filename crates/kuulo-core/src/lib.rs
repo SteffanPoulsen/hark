@@ -1,4 +1,5 @@
 pub mod audition;
+pub mod changelog;
 pub mod config;
 pub mod decode;
 pub mod export;

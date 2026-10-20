@@ -177,7 +177,14 @@ enum Cmd {
         /// Ask GitHub for the latest release and say whether it is newer.
         #[arg(long)]
         check: bool,
+        /// What changed in this version, from the changelog built into kuulo.
+        #[arg(long)]
+        notes: bool,
     },
+    /// Install the latest release over this one, when kuulo's own installer put it here. The
+    /// download must carry kuulo's release signature. A kuulo window that is open keeps
+    /// running this version until it is restarted.
+    Update,
     /// Play a file through the output device and wait for it to finish. Files whose decoded
     /// audio is larger than the config's `stream_above_mb` stream from disk while they play.
     Play {
@@ -1137,10 +1144,11 @@ fn run() -> Result<()> {
                 }
             }
         }
-        Cmd::Version { check } => {
+        Cmd::Version { check, notes } => {
             let latest = if check { Some(kuulo_core::update::latest()?) } else { None };
+            let notes = if notes { kuulo_core::changelog::this_version() } else { None };
             if json {
-                print_json(&serde_json::json!({ "version": kuulo_core::VERSION, "repository": kuulo_core::update::REPOSITORY, "latest": latest }))?;
+                print_json(&serde_json::json!({ "version": kuulo_core::VERSION, "repository": kuulo_core::update::REPOSITORY, "latest": latest, "notes": notes.map(|n| n.lines) }))?;
             } else {
                 println!("kuulo {}  {}", kuulo_core::VERSION, kuulo_core::update::REPOSITORY);
                 match latest {
@@ -1148,6 +1156,38 @@ fn run() -> Result<()> {
                     Some(_) => println!("up to date"),
                     None => {}
                 }
+                if let Some(n) = notes {
+                    println!();
+                    for line in n.lines {
+                        println!("{line}");
+                    }
+                }
+            }
+        }
+        Cmd::Update => {
+            let latest = kuulo_core::update::latest()?;
+            if latest.newer {
+                let mut said = None;
+                kuulo_core::update::install(&latest, false, &mut |p| {
+                    let step = match p {
+                        kuulo_core::update::Progress::Downloading { .. } => "Downloading",
+                        kuulo_core::update::Progress::Installing => "Installing",
+                    };
+                    if !json && said != Some(step) {
+                        eprintln!("{step} kuulo {}…", latest.version);
+                        said = Some(step);
+                    }
+                })?;
+            }
+            if json {
+                let after_exit = kuulo_core::update::INSTALLS_AFTER_EXIT;
+                print_json(&serde_json::json!({ "version": kuulo_core::VERSION, "latest": latest, "installed": latest.newer && !after_exit, "installing": latest.newer && after_exit }))?;
+            } else if latest.newer && kuulo_core::update::INSTALLS_AFTER_EXIT {
+                println!("kuulo {} finishes installing once kuulo-cli has exited; a kuulo window that is open closes for it.", latest.version);
+            } else if latest.newer {
+                println!("kuulo {} is installed; `kuulo-cli version --notes` says what is new.", latest.version);
+            } else {
+                println!("kuulo {} is the latest release.", kuulo_core::VERSION);
             }
         }
         Cmd::Play { file, start, end, from, channels, reverse, looped, seconds, jump, stream_above, preset } => {

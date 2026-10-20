@@ -25,6 +25,7 @@ cpal = "0.18"
 flacenc = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 ureq = { version = "3", features = ["json"] }
+minisign-verify = "0.3"
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.36", features = ["persistence"] }
 egui = "0.36"

@@ -51,8 +51,15 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; Value
 
 [Run]
 Filename: "{app}\kuulo.exe"; Description: "{cm:LaunchProgram,kuulo}"; Flags: nowait postinstall skipifsilent
+; kuulo installs its own update silently and passes /LAUNCH=1 to be started again.
+Filename: "{app}\kuulo.exe"; Flags: nowait; Check: LaunchRequested
 
 [Code]
+function LaunchRequested: Boolean;
+begin
+  Result := ExpandConstant('{param:LAUNCH|0}') = '1';
+end;
+
 function PathPos(Dir: string; var Path: string): Integer;
 begin
   if not RegQueryStringValue(HKCU, 'Environment', 'Path', Path) then

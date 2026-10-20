@@ -35,6 +35,8 @@ Download kuulo for Linux x86_64, Windows x86_64 or macOS (universal) from the [R
 
 On Linux, dragging out and clipboard copy need Wayland; everything else runs on all three.
 
+kuulo installed by `install.sh`, the setup or the disk image updates itself when you ask: Settings → About → Check for updates offers to install a newer release and restarts kuulo, and `kuulo-cli update` does the same from a terminal. kuulo downloads the release from GitHub and installs it only if it carries kuulo's release signature. The public key is built into kuulo and is also in [`packaging/kuulo.pub`](packaging/kuulo.pub), so `minisign -Vm <file> -p kuulo.pub` checks a download by hand; [`kuulo-backup.pub`](packaging/kuulo-backup.pub) is an offline backup key's, which kuulo accepts too. kuulo contacts GitHub only when you check or install.
+
 ### From source
 
 Rust stable, then:

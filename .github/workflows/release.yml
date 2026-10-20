@@ -1,12 +1,16 @@
 # Builds the release downloads for Linux, Windows and macOS. A pushed tag `v*` attaches them
-# to a draft release of that tag, left for a person to publish; a manual run only keeps
-# them as workflow artifacts.
+# to a draft release of that tag, its notes made from CHANGELOG.md, left for a person to sign
+# (packaging/sign-release.sh) and publish; a manual run only keeps them as workflow artifacts.
 name: release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: Build as this version instead of Cargo.toml's, to try an update before a release (packaging/update-feed.sh)
+        required: false
 
 permissions:
   contents: write
@@ -25,8 +29,8 @@ jobs:
             name: macos-universal
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - name: Linux build dependencies
@@ -34,10 +38,20 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libpipewire-0.3-dev libasound2-dev libclang-dev pkg-config libxkbcommon-dev libwayland-dev libgl-dev
+      - name: Test version
+        if: inputs.version != ''
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: sed -i.bak "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml && rm Cargo.toml.bak
       - name: Version
         id: version
         shell: bash
         run: echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+      - name: Release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: packaging/release-notes.sh "${GITHUB_REF#refs/tags/v}" > "$RUNNER_TEMP/notes.md"
       - name: Build
         shell: bash
         run: |
@@ -81,12 +95,14 @@ jobs:
               codesign --force --sign - $app/Contents/MacOS/kuulo-cli
               codesign --force --sign - $app
               codesign --verify --deep --strict --verbose=2 $app
+              # The updater installs from a tarball of the app, which needs no mounting.
+              COPYFILE_DISABLE=1 tar -C dist/$dir -czf dist/$dir.tar.gz kuulo.app
               ln -s /Applications dist/$dir/Applications
               hdiutil create -volname kuulo -srcfolder dist/$dir -format UDZO dist/$dir.dmg
               ;;
           esac
           ls -l dist/*.tar.gz dist/*.zip dist/*.dmg 2>/dev/null || true
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.name }}
           path: |
@@ -102,5 +118,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag=${GITHUB_REF#refs/tags/}
-          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --draft --title "kuulo ${tag#v}" --notes "Draft."
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --draft --title "kuulo ${tag#v}" --notes-file "$RUNNER_TEMP/notes.md"
           gh release upload "$tag" $(find dist -maxdepth 1 -type f -name "kuulo-*-${{ matrix.name }}*") --clobber
