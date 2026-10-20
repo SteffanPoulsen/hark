@@ -4,3 +4,4 @@
 .claude/
 /dist
 /AGENTS.local.md
+__pycache__/

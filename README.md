@@ -1,6 +1,14 @@
-<img src="docs/brand/kuulo-logo.png" alt="kuulo" width="270">
+<p align="center"><img src="docs/brand/kuulo-logo.png" alt="kuulo" width="270"></p>
 
-**Listen fast, export clean.** A local sound library browser for game audio, film and video post, apps, theatre, podcasts and sample packs.
+<p align="center"><b>Listen fast, export clean.</b> A local sound library browser for game audio, film and video post, apps, theatre, podcasts and sample packs.</p>
+
+<p align="center">
+  <a href="https://github.com/SteffanPoulsen/kuulo/releases/download/v0.6.0/kuulo-0.6.0-windows-x86_64-setup.exe"><img src="docs/brand/download-windows.svg" alt="Download for Windows"></a>
+  <a href="https://github.com/SteffanPoulsen/kuulo/releases/download/v0.6.0/kuulo-0.6.0-macos-universal.dmg"><img src="docs/brand/download-macos.svg" alt="Download for macOS"></a>
+  <a href="https://github.com/SteffanPoulsen/kuulo/releases/download/v0.6.0/kuulo-0.6.0-linux-x86_64.tar.gz"><img src="docs/brand/download-linux.svg" alt="Download for Linux"></a>
+  <br>
+  <sub>Version 0.6.0 · <a href="#install">First launch on Windows and macOS</a> · <a href="https://github.com/SteffanPoulsen/kuulo/releases">All releases</a></sub>
+</p>
 
 ![kuulo auditioning a sword take, one hit selected with fades, the export card set to the sfx preset](docs/screenshots/hero.png)
 
@@ -27,7 +35,7 @@ Auditioning a large library in a DAW means importing first, and in a file manage
 
 ## Install
 
-Download kuulo for Linux x86_64, Windows x86_64 or macOS (universal) from the [Releases](../../releases) page.
+The buttons at the top of the page download the latest release for Windows x86_64, macOS (universal) and Linux x86_64; the [Releases](../../releases) page holds every version and file.
 
 - **Linux:** `install.sh` in the archive puts `kuulo` and `kuulo-cli` in `~/.local/bin` and installs the desktop entry and icon; `install.sh --uninstall` removes them again and leaves your library and settings.
 - **Windows:** run the setup, which installs kuulo for your account without asking for admin rights, adds it to the Start menu and puts `kuulo-cli` on your PATH; the zip is the same two programs to run from any folder. kuulo is not code-signed yet, so Windows may say it protected your PC: choose More info, then Run anyway.
