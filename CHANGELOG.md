@@ -2,7 +2,7 @@
 
 What changed in each release of kuulo, newest first. A release's page on GitHub shows the same lines above its downloads, and kuulo shows them the first time it starts after an update. kuulo was called hark before 0.5.3.
 
-## Unreleased
+## 0.6.0
 
 - **kuulo updates itself.** Settings → About → Check for updates offers to install a newer release, and installing it restarts kuulo; `kuulo-cli update` does the same from a terminal. kuulo installs only a download that carries kuulo's release signature, and only where its own installer put it: `install.sh`, the Windows setup or the macOS app.
 - **What's new after an update.** The first start of a new version shows what changed since the one you had, and Settings → About → What's new shows it again.
