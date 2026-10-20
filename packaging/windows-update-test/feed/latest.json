@@ -1,0 +1,8 @@
+{
+  "tag_name": "v0.0.2",
+  "html_url": "http://localhost:8765/",
+  "assets": [
+    {"name": "kuulo-0.0.2-windows-x86_64-setup.exe", "browser_download_url": "http://localhost:8765/kuulo-0.0.2-windows-x86_64-setup.exe"},
+    {"name": "kuulo-0.0.2-windows-x86_64-setup.exe.minisig", "browser_download_url": "http://localhost:8765/kuulo-0.0.2-windows-x86_64-setup.exe.minisig"}
+  ]
+}

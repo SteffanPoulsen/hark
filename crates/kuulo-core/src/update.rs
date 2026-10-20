@@ -157,6 +157,10 @@ pub fn install(release: &Release, restart: bool, progress: &mut dyn FnMut(Progre
         Some(explanation) => anyhow!("{explanation}"),
         None => anyhow!("kuulo's own installer did not put this build here, so it cannot update itself; kuulo {} is at {}", release.version, release.url),
     })?;
+    #[cfg(windows)]
+    if window_open_elsewhere(own) {
+        bail!("kuulo is open; close it first, or install the update from its About page");
+    }
     // An offer can wait in an open window while another kuulo installs something newer.
     let now = latest()?;
     if now.version != release.version {
@@ -301,6 +305,17 @@ fn swap(a: &Path, b: &Path) -> Result<()> {
         return Err(std::io::Error::last_os_error()).with_context(|| format!("swapping the new kuulo into {}", b.display()));
     }
     Ok(())
+}
+
+/// Whether a kuulo window other than this process runs from `own`. Windows will not let the
+/// setup replace a running exe, and kuulo's window ignores the Restart Manager's request to
+/// close, so only the window that installs closes itself; any other has to be closed first.
+#[cfg(windows)]
+fn window_open_elsewhere(own: &Path) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    let window = own.join("kuulo.exe");
+    let this_is_it = std::env::current_exe().and_then(|p| p.canonicalize()).ok() == window.canonicalize().ok();
+    !this_is_it && std::fs::OpenOptions::new().write(true).open(&window).is_err_and(|e| e.raw_os_error() == Some(ERROR_SHARING_VIOLATION))
 }
 
 #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]

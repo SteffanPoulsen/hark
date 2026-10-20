@@ -28,6 +28,10 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ChangesEnvironment=yes
+; kuulo's window ignores the Restart Manager's polite request to close. A window that installs
+; an update closes itself right after starting the setup; if it is slow to go, it is ended
+; rather than the setup stopping on a locked file.
+CloseApplications=force
 WizardStyle=modern
 Compression=lzma2
 SolidCompression=yes

@@ -183,7 +183,8 @@ enum Cmd {
     },
     /// Install the latest release over this one, when kuulo's own installer put it here. The
     /// download must carry kuulo's release signature. A kuulo window that is open keeps
-    /// running this version until it is restarted.
+    /// running this version until it is restarted; on Windows, where a running kuulo cannot
+    /// be replaced, close it first.
     Update,
     /// Play a file through the output device and wait for it to finish. Files whose decoded
     /// audio is larger than the config's `stream_above_mb` stream from disk while they play.
@@ -1183,7 +1184,7 @@ fn run() -> Result<()> {
                 let after_exit = kuulo_core::update::INSTALLS_AFTER_EXIT;
                 print_json(&serde_json::json!({ "version": kuulo_core::VERSION, "latest": latest, "installed": latest.newer && !after_exit, "installing": latest.newer && after_exit }))?;
             } else if latest.newer && kuulo_core::update::INSTALLS_AFTER_EXIT {
-                println!("kuulo {} finishes installing once kuulo-cli has exited; a kuulo window that is open closes for it.", latest.version);
+                println!("kuulo {} finishes installing once kuulo-cli has exited.", latest.version);
             } else if latest.newer {
                 println!("kuulo {} is installed; `kuulo-cli version --notes` says what is new.", latest.version);
             } else {
